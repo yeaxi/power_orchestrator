@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from types import SimpleNamespace
@@ -168,6 +169,43 @@ def test_diagnostic_entities_expose_execution_reason_and_journal_state():
 
     coordinator.data["journal_persistence_blocked"] = True
     assert journal.is_on is False
+
+
+def test_last_operation_entity_bounds_recorder_attributes_without_losing_total():
+    coordinator = MagicMock()
+    coordinator.data = {
+        "last_operation_result": "observe_only",
+        "last_action_id": "observe-99",
+        "last_operation_id": "observe-observe-99",
+        "pending_action_id": None,
+        "journal_unresolved_count": 0,
+        "action_journal_invalid": False,
+        "journal_persistence_blocked": False,
+        "audit_history": [
+            {
+                "action_id": f"action-{index}",
+                "operation_id": f"operation-{index}",
+                "action": "grid_loss_all_stop",
+                "phase": "observe_only",
+                "result": "observe_only",
+                "reason": "r" * 160,
+                "source": "grid_loss",
+                "actor_id": "a" * 128,
+                "context_id": "c" * 128,
+            }
+            for index in range(100)
+        ],
+    }
+    entry = SimpleNamespace(entry_id="entry-1")
+
+    operation = PowerOrchestratorLastOperationSensor(coordinator, entry)
+    attributes = operation.extra_state_attributes
+
+    assert len(attributes["audit_history"]) == 12
+    assert attributes["audit_history_total"] == 100
+    assert attributes["audit_history_truncated"] == 88
+    assert attributes["audit_history"][0]["action_id"] == "action-88"
+    assert len(json.dumps(attributes, separators=(",", ":"))) < 12000
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 
+_MAX_AUDIT_HISTORY_ATTRIBUTES = 12
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -244,6 +246,9 @@ class PowerOrchestratorLastOperationSensor(PowerOrchestratorSensorBase):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         data = self.coordinator.data or {}
+        raw_history = data.get("audit_history", [])
+        history = [dict(item) for item in raw_history if isinstance(item, dict)]
+        history_tail = history[-_MAX_AUDIT_HISTORY_ATTRIBUTES:]
         return {
             "action_id": data.get("last_action_id"),
             "operation_id": data.get("last_operation_id"),
@@ -251,5 +256,7 @@ class PowerOrchestratorLastOperationSensor(PowerOrchestratorSensorBase):
             "journal_unresolved_count": data.get("journal_unresolved_count", 0),
             "action_journal_invalid": data.get("action_journal_invalid", False),
             "journal_persistence_blocked": data.get("journal_persistence_blocked", False),
-            "audit_history": data.get("audit_history", []),
+            "audit_history": history_tail,
+            "audit_history_total": len(history),
+            "audit_history_truncated": max(0, len(history) - len(history_tail)),
         }
