@@ -15,6 +15,7 @@ from power_orchestrator.const import (
     CONF_DEVICE_ENTITY,
     CONF_DEVICE_EXPECTED_POWER,
     CONF_DEVICE_HVAC_MODE_ON,
+    CONF_DEVICE_POWER_SENSOR,
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
     CONF_DEVICES,
@@ -128,6 +129,35 @@ async def test_flow_policy_engine_end_to_end_selects_highest_custom_tier(count):
 
     assert decision.triggered is True
     assert decision.active_tier == f"custom_{count}"
+
+
+def test_device_form_exposes_logical_actuator_fields():
+    flow = PowerOrchestratorConfigFlow()
+    flow.hass = MagicMock()
+    result = flow._device_config_form(
+        {
+            "entity_id": "switch.kitchen",
+            "name": "Kitchen heater",
+            "power_sensor": "sensor.kitchen_power",
+        }
+    )
+    schema_names = {getattr(key, "schema", key) for key in result["data_schema"].schema}
+    assert CONF_DEVICE_ACTUATORS in schema_names
+    assert CONF_DEVICE_HVAC_MODE_ON in schema_names
+
+    built = flow._build_device(
+        {
+            CONF_DEVICE_ENTITY: "switch.kitchen",
+            CONF_DEVICE_NAME: "Kitchen heater",
+            CONF_DEVICE_EXPECTED_POWER: 3000,
+            CONF_DEVICE_POWER_SENSOR: "sensor.kitchen_power",
+            CONF_DEVICE_ACTUATORS: ["climate.kitchen"],
+            CONF_DEVICE_HVAC_MODE_ON: "heat",
+        },
+        {"entity_id": "switch.kitchen", "name": "Kitchen heater"},
+    )
+    assert built[CONF_DEVICE_ACTUATORS] == ["climate.kitchen"]
+    assert built[CONF_DEVICE_HVAC_MODE_ON] == "heat"
 
 
 @pytest.mark.asyncio

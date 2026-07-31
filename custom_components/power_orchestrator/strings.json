@@ -118,6 +118,8 @@
           "name": "Friendly name (leave empty to keep the discovered name)",
           "expected_power": "Expected power usage when ON (W)",
           "power_sensor": "Power sensor (auto-discovered when available; choose another to override)",
+          "actuators": "Additional logical actuators (optional)",
+          "hvac_mode_on": "HVAC mode when ON",
           "only_from_solar": "Only turn on when solar forecast covers this device",
           "add_another": "Add another custom device after this one"
         },
@@ -128,6 +130,8 @@
           "name": "Friendly name shown in entities, priorities, notifications, and logs. Leave it empty to keep the discovered or Home Assistant name.",
           "expected_power": "Reserved power in watts used before a start to check available capacity. It is admission planning power; the optional measured-power sensor is kept separate.",
           "power_sensor": "Measured device-power sensor. When Energy Dashboard provides stat_rate, it is preselected automatically. Choose any other sensor to override it, or clear the field to disable measured telemetry; fresh non-negative readings are never substituted for expected power during start admission.",
+          "actuators": "Optional additional entities in the same logical load group, such as a climate entity paired with a switch. Every actuator must provide causal readback; partial, unknown, or unavailable group state is fail-closed and cannot confirm ON or OFF.",
+          "hvac_mode_on": "HVAC mode requested for a climate actuator during a guarded start. It is used only inside the integration's causal lifecycle; observe mode never calls the climate service.",
           "only_from_solar": "When enabled, this device may start only if the exact current Forecast.Solar power forecast is at least its expected power. Missing, stale, or invalid forecast blocks the start.",
           "add_another": "Controls only the custom-device form loop. It has no runtime effect; enable it to configure another custom device before assigning priorities."
         }

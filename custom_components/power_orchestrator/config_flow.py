@@ -705,6 +705,19 @@ class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
             ): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             ),
+            vol.Optional(
+                CONF_DEVICE_ACTUATORS,
+                default=list(candidate.get(CONF_DEVICE_ACTUATORS, ())),
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["switch", "light", "input_boolean", "climate"],
+                    multiple=True,
+                )
+            ),
+            vol.Optional(
+                CONF_DEVICE_HVAC_MODE_ON,
+                default=candidate.get(CONF_DEVICE_HVAC_MODE_ON, "heat"),
+            ): selector.TextSelector(),
             vol.Optional(CONF_DEVICE_ONLY_SOLAR, default=False): bool,
         }
         if not candidate:
@@ -744,6 +757,8 @@ class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
             CONF_DEVICE_EXPECTED_POWER: user_input.get(CONF_DEVICE_EXPECTED_POWER, 2000),
             CONF_DEVICE_POWER_SENSOR: power_sensor,
             CONF_DEVICE_ONLY_SOLAR: user_input.get(CONF_DEVICE_ONLY_SOLAR, False),
+            CONF_DEVICE_ACTUATORS: user_input.get(CONF_DEVICE_ACTUATORS, []),
+            CONF_DEVICE_HVAC_MODE_ON: user_input.get(CONF_DEVICE_HVAC_MODE_ON, "heat"),
         }
 
     # ── Step 3 ─────────────────────────────────────────────────────
