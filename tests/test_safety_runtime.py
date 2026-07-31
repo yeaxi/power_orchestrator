@@ -630,6 +630,21 @@ async def test_failed_start_persists_quarantine_before_returning():
 
 
 @pytest.mark.asyncio
+async def test_start_journal_failure_vetoes_physical_command_and_blocks_retry():
+    coordinator = _coordinator()
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    device.is_on = False
+    coordinator._store.async_save.side_effect = OSError("journal unavailable")
+    coordinator._reserve_pending_start(device)
+
+    assert await coordinator._turn_on_device(device) is False
+
+    assert coordinator._journal_persistence_blocked is True
+    assert coordinator.hass.services.async_call.await_count == 0
+
+
+@pytest.mark.asyncio
 async def test_precommand_state_cannot_confirm_turn_off():
     coordinator = _coordinator()
     coordinator._relay_readback_timeout = 0.005
@@ -959,11 +974,11 @@ async def test_fault_persistence_retries_after_transient_storage_failure():
     coordinator._evaluate = AsyncMock()
 
     await coordinator._evaluate_safely()
-    assert coordinator._fault_state_dirty is True
+    assert coordinator._fault_state_dirty is False
+    assert store.async_save.await_count == 2
     await coordinator._evaluate_safely()
 
     assert store.async_save.await_count == 2
-    assert coordinator._fault_state_dirty is False
 
 
 @pytest.mark.asyncio
@@ -989,7 +1004,7 @@ async def test_fault_state_is_persisted_and_notification_is_deduplicated():
 
     await coordinator._evaluate_safely()
 
-    coordinator._store.async_save.assert_awaited_once()
+    coordinator._store.async_save.assert_awaited()
     assert coordinator.hass.services.async_call.await_count == 1
     assert coordinator.hass.services.async_call.await_args.args[:2] == (
         "persistent_notification",
@@ -998,7 +1013,7 @@ async def test_fault_state_is_persisted_and_notification_is_deduplicated():
 
     await coordinator._evaluate_safely()
 
-    coordinator._store.async_save.assert_awaited_once()
+    coordinator._store.async_save.assert_awaited()
     assert coordinator.hass.services.async_call.await_count == 1
 
 
@@ -1461,6 +1476,22 @@ async def test_hard_interlock_all_stop_attempts_every_device_after_failure():
 
 
 @pytest.mark.asyncio
+async def test_emergency_all_stop_save_failure_retains_journal_safety_block():
+    coordinator = _coordinator(policy=PolicyConfig.from_mapping({}))
+    for device in coordinator._model.all_devices():
+        device.is_on = True
+    coordinator._turn_off_device = AsyncMock(return_value=True)
+    coordinator._store.async_save.side_effect = OSError("journal unavailable")
+
+    await coordinator._perform_emergency_all_stop()
+
+    assert coordinator._turn_off_device.await_count == 2
+    assert coordinator._journal_dirty is True
+    assert coordinator._journal_persistence_blocked is True
+    assert coordinator.status == STATUS_SAFETY_BLOCKED
+
+
+@pytest.mark.asyncio
 async def test_observe_hard_interlock_all_stop_is_diagnostic_only():
     coordinator = _coordinator(
         policy=PolicyConfig.from_mapping({}),
@@ -1733,3 +1764,48 @@ async def test_physical_stop_journal_reuses_one_action_id_across_lifecycle():
     assert history[0]["result"] == "confirmed"
     assert history[0]["source"] == "grid_loss"
     assert history[0]["emergency"] is True
+
+
+def test_startup_reconciles_prepared_action_without_quarantining_device():
+    store = RuntimeStore(_storage_fake())
+    store.record_action(
+        {
+            "action_id": "start-1",
+            "operation_id": "7",
+            "device_id": "d1",
+            "action": "turn_on",
+            "phase": "prepared",
+            "result": "prepared",
+        }
+    )
+    coordinator = _coordinator(store=store)
+
+    coordinator.restore_action_journal(store.unresolved_actions())
+
+    assert coordinator.action_journal_invalid is False
+    assert coordinator.safety_storage_invalid is False
+    assert "d1" not in coordinator._faulted
+    assert store.audit_history()[0]["phase"] == "failed"
+    assert store.audit_history()[0]["reason"] == "restart_before_dispatch"
+
+
+def test_startup_quarantines_dispatched_action_until_reconciliation():
+    store = RuntimeStore(_storage_fake())
+    store.record_action(
+        {
+            "action_id": "start-2",
+            "operation_id": "8",
+            "device_id": "d1",
+            "action": "turn_on",
+            "phase": "dispatched",
+            "result": "dispatched",
+        }
+    )
+    coordinator = _coordinator(store=store)
+
+    coordinator.restore_action_journal(store.unresolved_actions())
+
+    assert coordinator.action_journal_invalid is False
+    assert coordinator.safety_storage_invalid is True
+    assert coordinator._model.get_device("d1").is_on is None
+    assert coordinator._fault_reasons["d1"] == "persisted_action_dispatched_unresolved"

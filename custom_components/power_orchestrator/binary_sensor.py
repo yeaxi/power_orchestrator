@@ -31,6 +31,7 @@ async def async_setup_entry(
             PowerOrchestratorGridOkSensor(coordinator, entry),
             PowerOrchestratorFaultSensor(coordinator, entry),
             PowerOrchestratorRecoveryBlockedSensor(coordinator, entry),
+            PowerOrchestratorActionJournalHealthySensor(coordinator, entry),
         ]
     )
 
@@ -127,4 +128,31 @@ class PowerOrchestratorRecoveryBlockedSensor(_QuarantineSensorBase):
             "device_ids": list(data.get("recovery_blocked_devices", ())),
             "device_reasons": dict(data.get("fault_reasons", {})),
             "next_restore_target": data.get("next_restore_target"),
+        }
+
+
+class PowerOrchestratorActionJournalHealthySensor(_QuarantineSensorBase):
+    """True only when the action journal can accept safe lifecycle writes."""
+
+    _attr_translation_key = "action_journal_healthy"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, "action_journal_healthy")
+        self._attr_icon = "mdi:clipboard-check-outline"
+
+    @property
+    def is_on(self) -> bool:
+        data = self.coordinator.data or {}
+        return not (
+            data.get("action_journal_invalid", False)
+            or data.get("journal_persistence_blocked", False)
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data or {}
+        return {
+            "unresolved_count": data.get("journal_unresolved_count", 0),
+            "invalid": data.get("action_journal_invalid", False),
+            "persistence_blocked": data.get("journal_persistence_blocked", False),
         }

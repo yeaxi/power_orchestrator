@@ -450,6 +450,24 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
         fault_reasons=runtime_store.restore_fault_reasons(model),
         storage_invalid=runtime_store.safety_storage_invalid,
     )
+    restored_notification_state = runtime_store.restore_fault_notification_state(model)
+    if (
+        isinstance(restored_notification_state, (tuple, list))
+        and len(restored_notification_state) == 2
+        and all(isinstance(value, dict) for value in restored_notification_state)
+    ):
+        coordinator.restore_fault_notification_state(*restored_notification_state)
+    else:
+        coordinator.restore_fault_notification_state({}, {})
+    unresolved_reader = getattr(runtime_store, "unresolved_actions", None)
+    unresolved_actions = unresolved_reader() if callable(unresolved_reader) else []
+    if not isinstance(unresolved_actions, (list, tuple)):
+        unresolved_actions = []
+    journal_invalid = getattr(runtime_store, "action_journal_invalid", False) is True
+    coordinator.restore_action_journal(
+        unresolved_actions,
+        journal_invalid=journal_invalid,
+    )
     runtime_store.restore_policy_runtime(coordinator._policy_engine, model)
     restored_mode = runtime_store.restore_mode()
     if restored_mode == MODE_AUTO:

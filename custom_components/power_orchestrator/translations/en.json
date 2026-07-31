@@ -308,6 +308,15 @@
       },
       "last_action": {
         "name": "Last action"
+      },
+      "execution_mode": {
+        "name": "Execution mode"
+      },
+      "reason_code": {
+        "name": "Reason code"
+      },
+      "last_operation": {
+        "name": "Last operation"
       }
     },
     "binary_sensor": {
@@ -319,6 +328,9 @@
       },
       "recovery_blocked": {
         "name": "Recovery blocked"
+      },
+      "action_journal_healthy": {
+        "name": "Action journal healthy"
       }
     },
     "select": {

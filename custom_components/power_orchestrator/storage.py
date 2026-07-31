@@ -19,6 +19,7 @@ from .const import (
     EXECUTION_MODE_LIVE,
     EXECUTION_MODE_OBSERVE,
     EXTERNAL_OWNERSHIP_GRACE_SECONDS,
+    FAULT_NOTIFICATION_SCHEMA_VERSION,
     MAX_RUNTIME_PAUSE_SECONDS,
     MODE_AUTO,
     MODE_OFF,
@@ -34,8 +35,16 @@ from .policy import (
 from .power_model import PowerModel
 
 _MAX_AUDIT_ENTRIES = 100
+_MAX_UNRESOLVED_ACTIONS = 16
 _MAX_ACTION_FIELD_LENGTH = 256
 _MAX_FAULT_REASON_LENGTH = 160
+_ACTION_PHASE_RANK = {
+    "prepared": 10,
+    "dispatched": 20,
+    "observe_only": 30,
+    "failed": 30,
+    "confirmed": 30,
+}
 
 
 class RuntimeStore:
@@ -45,22 +54,30 @@ class RuntimeStore:
         self._store = store
         self._data: dict[str, Any] = {}
         self._safety_storage_invalid = False
+        self._action_journal_invalid = False
 
     @property
     def safety_storage_invalid(self) -> bool:
         """Return whether persisted safety runtime must remain quarantined."""
         return self._safety_storage_invalid
+
+    @property
+    def action_journal_invalid(self) -> bool:
+        """Return whether unresolved journal state exceeded safe bounds."""
+        return self._action_journal_invalid
     async def async_load(self) -> None:
         """Load persisted state."""
         data = await self._store.async_load()
         if isinstance(data, dict):
             self._data = data
+            self._action_journal_invalid = bool(self._data.get("action_journal_invalid"))
             self._data["audit_history"] = self._normalize_history(
                 self._data.get("audit_history", [])
             )
         else:
             # Corrupt/non-object storage must never influence control decisions.
             self._data = {}
+            self._action_journal_invalid = False
 
     async def async_save(self) -> None:
         """Persist current state atomically through HA's Store."""
@@ -280,6 +297,60 @@ class RuntimeStore:
             and reason.strip()
         }
 
+    def save_fault_notification_state(
+        self,
+        active_fingerprints: Mapping[str, str],
+        pending_dismissal_fingerprints: Mapping[str, str],
+    ) -> None:
+        """Persist notification deduplication and dismissal retry state."""
+        self._data["fault_notifications"] = {
+            "schema_version": FAULT_NOTIFICATION_SCHEMA_VERSION,
+            "active": {
+                device_id: fingerprint[:128]
+                for device_id, fingerprint in active_fingerprints.items()
+                if isinstance(device_id, str)
+                and device_id.strip()
+                and isinstance(fingerprint, str)
+                and fingerprint.strip()
+            },
+            "pending_dismissal": {
+                device_id: fingerprint[:128]
+                for device_id, fingerprint in pending_dismissal_fingerprints.items()
+                if isinstance(device_id, str)
+                and device_id.strip()
+                and isinstance(fingerprint, str)
+                and fingerprint.strip()
+            },
+        }
+
+    def restore_fault_notification_state(
+        self,
+        model: PowerModel,
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Restore only valid notification state for configured devices."""
+        raw = self._data.get("fault_notifications")
+        if raw is None or not isinstance(raw, dict):
+            return {}, {}
+        if raw.get("schema_version") != FAULT_NOTIFICATION_SCHEMA_VERSION:
+            return {}, {}
+        configured_ids = {device.device_id for device in model.all_devices()}
+
+        def _valid_mapping(value: Any) -> dict[str, str]:
+            if not isinstance(value, dict):
+                return {}
+            return {
+                device_id: fingerprint[:128]
+                for device_id, fingerprint in value.items()
+                if isinstance(device_id, str)
+                and device_id in configured_ids
+                and isinstance(fingerprint, str)
+                and bool(fingerprint.strip())
+            }
+
+        return _valid_mapping(raw.get("active")), _valid_mapping(
+            raw.get("pending_dismissal")
+        )
+
     @staticmethod
     def _device_runtime_envelope_is_valid(value: Any) -> bool:
         """Validate the safety envelope shape before restoring any healthy state."""
@@ -450,12 +521,41 @@ class RuntimeStore:
         return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
     @staticmethod
+    def _action_phase_rank(event: Mapping[str, Any]) -> int:
+        phase = event.get("phase")
+        return _ACTION_PHASE_RANK.get(phase, 30) if isinstance(phase, str) else 30
+
+    @classmethod
+    def _merge_action_records(
+        cls,
+        existing: Mapping[str, Any],
+        incoming: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Merge lifecycle records without allowing a terminal downgrade."""
+        old_rank = cls._action_phase_rank(existing)
+        new_rank = cls._action_phase_rank(incoming)
+        if new_rank < old_rank:
+            merged = dict(existing)
+            merged.update(
+                {
+                    key: value
+                    for key, value in incoming.items()
+                    if key not in {"phase", "result"}
+                    and (key not in merged or merged[key] is None)
+                }
+            )
+            return merged
+        merged = dict(existing)
+        merged.update(incoming)
+        return merged
+
+    @staticmethod
     def _normalize_action_event(
         event: Any,
         *,
         legacy_key: str | None = None,
     ) -> dict[str, Any] | None:
-        """Return one bounded, versioned, idempotent scalar action record."""
+        """Return one bounded, versioned, monotonic scalar action record."""
         if not isinstance(event, dict):
             return None
         schema = event.get("event_schema")
@@ -499,38 +599,75 @@ class RuntimeStore:
         normalized.setdefault("source", "planner")
         normalized.setdefault("actor_id", None)
         normalized.setdefault("context_id", None)
+        phase = normalized.get("phase")
+        if phase is not None and phase not in _ACTION_PHASE_RANK:
+            return None
+        if phase is None:
+            result = normalized.get("result")
+            phase = result if result in _ACTION_PHASE_RANK else "confirmed"
+            normalized["phase"] = phase
+        normalized.setdefault("result", phase)
         return normalized
 
-    @classmethod
-    def _normalize_history(cls, value: Any) -> list[dict[str, Any]]:
-        """Sanitize and bound persisted action history before runtime use."""
+    def _normalize_history(self, value: Any) -> list[dict[str, Any]]:
+        """Sanitize, deduplicate, and safely bound persisted action history."""
         if not isinstance(value, list):
             return []
-        normalized = [
+        by_action_id: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for index, item in enumerate(value):
+            event = self._normalize_action_event(item, legacy_key=str(index))
+            if event is None:
+                continue
+            action_id = event["action_id"]
+            if action_id not in by_action_id:
+                order.append(action_id)
+                by_action_id[action_id] = event
+            else:
+                by_action_id[action_id] = self._merge_action_records(
+                    by_action_id[action_id], event
+                )
+        normalized = [by_action_id[action_id] for action_id in order]
+        unresolved = [
             event
-            for index, item in enumerate(value)
-            if (event := cls._normalize_action_event(item, legacy_key=str(index))) is not None
+            for event in normalized
+            if event.get("phase") in {"prepared", "dispatched"}
         ]
-        return normalized[-_MAX_AUDIT_ENTRIES:]
+        if len(unresolved) > _MAX_UNRESOLVED_ACTIONS:
+            self._action_journal_invalid = True
+            self._data["action_journal_invalid"] = True
+            unresolved = unresolved[-_MAX_UNRESOLVED_ACTIONS:]
+        terminals = [
+            event
+            for event in normalized
+            if event.get("phase") not in {"prepared", "dispatched"}
+        ]
+        terminal_slots = max(0, _MAX_AUDIT_ENTRIES - len(unresolved))
+        retained_terminals = terminals[-terminal_slots:] if terminal_slots else []
+        return unresolved + retained_terminals
 
     def record_action(self, event: dict[str, Any]) -> None:
         """Upsert one bounded action record by stable action_id."""
         normalized = self._normalize_action_event(event)
         if normalized is None:
             return
-        history = self._data.setdefault("audit_history", [])
-        if not isinstance(history, list):
-            history = []
-            self._data["audit_history"] = history
+        history = self._normalize_history(self._data.get("audit_history", []))
         action_id = normalized["action_id"]
         for index, existing in enumerate(history):
-            if isinstance(existing, dict) and existing.get("action_id") == action_id:
-                merged = dict(existing)
-                merged.update(normalized)
-                history[index] = merged
+            if existing.get("action_id") == action_id:
+                history[index] = self._merge_action_records(existing, normalized)
+                self._data["audit_history"] = self._normalize_history(history)
                 return
         history.append(normalized)
-        del history[:-_MAX_AUDIT_ENTRIES]
+        self._data["audit_history"] = self._normalize_history(history)
+
+    def unresolved_actions(self) -> list[dict[str, Any]]:
+        """Return durable prepared/dispatched actions requiring reconciliation."""
+        return [
+            dict(event)
+            for event in self._normalize_history(self._data.get("audit_history", []))
+            if event.get("phase") in {"prepared", "dispatched"}
+        ]
 
     def audit_history(self) -> list[dict[str, Any]]:
         """Return a defensive copy of the bounded action journal."""

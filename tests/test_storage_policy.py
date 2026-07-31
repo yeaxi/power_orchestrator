@@ -279,3 +279,58 @@ def test_device_runtime_round_trips_fault_quarantine_and_ownership():
     assert recovery_blocked == {"d1"}
     assert restored_device.ownership is Ownership.EXTERNAL
     assert restored_device.ownership_until is not None
+
+
+def test_action_journal_replay_cannot_downgrade_terminal_phase():
+    store = RuntimeStore(FakeStore())
+    store.record_action(
+        {
+            "action_id": "action-1",
+            "phase": "confirmed",
+            "result": "confirmed",
+            "timestamp": 20.0,
+        }
+    )
+    store.record_action(
+        {
+            "action_id": "action-1",
+            "phase": "prepared",
+            "result": "prepared",
+            "timestamp": 21.0,
+        }
+    )
+
+    history = store.audit_history()
+    assert len(history) == 1
+    assert history[0]["phase"] == "confirmed"
+    assert history[0]["result"] == "confirmed"
+
+
+def test_action_journal_deduplicates_persisted_lifecycle_records():
+    store = RuntimeStore(FakeStore())
+    store._data["audit_history"] = [
+        {"action_id": "action-1", "phase": "prepared", "result": "prepared"},
+        {"action_id": "action-1", "phase": "dispatched", "result": "dispatched"},
+        {"action_id": "action-1", "phase": "confirmed", "result": "confirmed"},
+    ]
+
+    history = store.audit_history()
+    assert len(history) == 1
+    assert history[0]["phase"] == "confirmed"
+
+
+def test_unresolved_action_bound_is_fail_closed_and_preserved():
+    store = RuntimeStore(FakeStore())
+    for index in range(20):
+        store.record_action(
+            {
+                "action_id": f"action-{index}",
+                "phase": "dispatched",
+                "result": "dispatched",
+                "device_id": "d1",
+            }
+        )
+
+    assert store.action_journal_invalid is True
+    assert len(store.unresolved_actions()) == 16
+    assert len(store.audit_history()) == 16

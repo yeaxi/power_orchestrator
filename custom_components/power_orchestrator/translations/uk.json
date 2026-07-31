@@ -308,6 +308,15 @@
       },
       "last_action": {
         "name": "Остання дія"
+      },
+      "execution_mode": {
+        "name": "Режим виконання"
+      },
+      "reason_code": {
+        "name": "Код причини"
+      },
+      "last_operation": {
+        "name": "Остання операція"
       }
     },
     "binary_sensor": {
@@ -319,6 +328,9 @@
       },
       "recovery_blocked": {
         "name": "Відновлення заблоковано"
+      },
+      "action_journal_healthy": {
+        "name": "Журнал дій справний"
       }
     },
     "select": {

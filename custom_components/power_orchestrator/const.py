@@ -113,5 +113,6 @@ MAX_HISTORY_DAYS: Final = 365
 
 # Structured event types
 EVENT_SCHEMA_VERSION: Final = 1
+FAULT_NOTIFICATION_SCHEMA_VERSION: Final = 1
 EVENT_ACTION: Final = f"{DOMAIN}.action"
 EVENT_DECISION: Final = f"{DOMAIN}.decision"

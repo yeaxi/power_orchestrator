@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 import time
@@ -70,6 +71,7 @@ class _PendingStart:
     admission_reported_at: float | None
     admission_generation: int
     admission_load_w: float | None
+    action_id: str | None = None
     phase: str = "reserved"
     on_confirmed_reported_at: float | None = None
     rollback_off_reported_at: float | None = None
@@ -201,7 +203,12 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._fault_state_dirty = False
         self._journal_dirty = False
         self._fault_notifications_sent: set[str] = set()
+        self._fault_notification_fingerprints: dict[str, str] = {}
         self._fault_notifications_pending_dismissal: set[str] = set()
+        self._fault_notification_pending_fingerprints: dict[str, str] = {}
+        self._fault_notification_dirty = False
+        self._action_journal_invalid = False
+        self._journal_persistence_blocked = False
         self._safety_storage_invalid = False
         self._grid_loss_expected_off: set[str] = set()
         self._manual_override_notified: set[str] = set()
@@ -212,6 +219,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def safety_storage_invalid(self) -> bool:
         """Return whether persisted safety runtime is malformed or future-versioned."""
         return self._safety_storage_invalid
+
+    @property
+    def action_journal_invalid(self) -> bool:
+        """Return whether startup journal reconciliation is fail-closed."""
+        return self._action_journal_invalid
 
     @property
     def execution_mode(self) -> str:
@@ -493,11 +505,12 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._fault_state_dirty = False
         dismissed = await self._dismiss_fault_notification(device.device_id)
         if not dismissed:
-            self._fault_notifications_pending_dismissal.add(device.device_id)
+            self._queue_fault_notification_dismissal(device.device_id)
             self._last_action = (
                 f"Recovery quarantine cleared for {device.name}; "
                 "notification dismissal will be retried"
             )
+        await self._persist_runtime_if_dirty()
         self._emit_event(
             "power_orchestrator.quarantine_cleared",
             {
@@ -621,35 +634,98 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _persist_runtime_if_dirty(self) -> bool:
         """Persist safety state and action journal, retaining dirty flags on failure."""
-        if not self._fault_state_dirty and not self._journal_dirty:
+        if (
+            not self._fault_state_dirty
+            and not self._journal_dirty
+            and not self._fault_notification_dirty
+        ):
             return True
+        journal_dirty_before = self._journal_dirty
         try:
             self._save_runtime_snapshot()
             await self._store.async_save()
         except Exception as exc:
             _LOGGER.error("Failed to persist Power Orchestrator runtime state: %s", exc)
+            if journal_dirty_before:
+                self._journal_persistence_blocked = True
             return False
         self._fault_state_dirty = False
         self._journal_dirty = False
+        self._fault_notification_dirty = False
+        if not self._action_journal_invalid:
+            self._journal_persistence_blocked = False
         return True
 
     async def _persist_fault_state_if_dirty(self) -> None:
         """Durably retain quarantine and journal state without weakening fail-closed memory."""
         await self._persist_runtime_if_dirty()
 
+    def _fault_notification_reason(self, device_id: str) -> str:
+        """Return the bounded reason displayed for one active quarantine."""
+        return self._fault_reasons.get(device_id) or self._safety_fault_reason or (
+            ReasonCode.RECOVERY_BLOCKED.value
+            if device_id in self._recovery_blocked
+            else ReasonCode.FAULT.value
+        )
+
+    def _fault_notification_fingerprint(self, device_id: str, reason: str) -> str:
+        """Return a stable revision fingerprint for notification deduplication."""
+        membership = "+".join(
+            sorted(
+                scope
+                for scope, active in (
+                    ("fault", device_id in self._faulted),
+                    ("recovery", device_id in self._recovery_blocked),
+                )
+                if active
+            )
+        )
+        raw = f"{device_id}|{membership}|{reason[:160]}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+    def _queue_fault_notification_dismissal(self, device_id: str) -> None:
+        """Persist a dismissal retry marker without reopening the quarantine."""
+        fingerprint = self._fault_notification_fingerprints.get(device_id)
+        if fingerprint is None:
+            fingerprint = self._fault_notification_fingerprint(
+                device_id, self._fault_notification_reason(device_id)
+            )
+        self._fault_notifications_pending_dismissal.add(device_id)
+        self._fault_notification_pending_fingerprints[device_id] = fingerprint
+        self._fault_notification_dirty = True
+
     async def _notify_faults(self) -> None:
-        """Create one persistent notification for each active quarantined device."""
+        """Create or revise persistent notifications for active quarantines."""
         for device_id in sorted(self._faulted | self._recovery_blocked):
-            if device_id in self._fault_notifications_sent:
-                continue
             device = self._model.get_device(device_id)
             if device is None:
                 continue
-            reason = self._fault_reasons.get(device_id) or self._safety_fault_reason or (
-                ReasonCode.RECOVERY_BLOCKED.value
-                if device_id in self._recovery_blocked
-                else ReasonCode.FAULT.value
-            )
+            reason = self._fault_notification_reason(device_id)
+            fingerprint = self._fault_notification_fingerprint(device_id, reason)
+            pending_fingerprint = self._fault_notification_pending_fingerprints.get(device_id)
+            if pending_fingerprint is not None:
+                if pending_fingerprint == fingerprint:
+                    # The fault reopened before dismissal succeeded; the
+                    # existing notification remains the correct active record.
+                    self._fault_notification_pending_fingerprints.pop(device_id, None)
+                    self._fault_notifications_pending_dismissal.discard(device_id)
+                    self._fault_notification_fingerprints[device_id] = fingerprint
+                    self._fault_notifications_sent.add(device_id)
+                    self._fault_notification_dirty = True
+                    continue
+                self._fault_notification_pending_fingerprints.pop(device_id, None)
+                self._fault_notifications_pending_dismissal.discard(device_id)
+                self._fault_notification_dirty = True
+
+            existing = self._fault_notification_fingerprints.get(device_id)
+            if existing == fingerprint and device_id in self._fault_notifications_sent:
+                continue
+            # Compatibility with pre-fingerprint in-memory state: treat the
+            # old sent set as the current revision until a new reason appears.
+            if device_id in self._fault_notifications_sent and existing is None:
+                self._fault_notification_fingerprints[device_id] = fingerprint
+                self._fault_notification_dirty = True
+                continue
             try:
                 await self.hass.services.async_call(
                     "persistent_notification",
@@ -670,6 +746,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.error("Failed to create safety notification for %s: %s", device_id, exc)
             else:
                 self._fault_notifications_sent.add(device_id)
+                self._fault_notification_fingerprints[device_id] = fingerprint
+                self._fault_notification_dirty = True
+        await self._persist_runtime_if_dirty()
 
     async def _dismiss_fault_notification(self, device_id: str) -> bool:
         """Dismiss the diagnostic notification after a verified quarantine clear."""
@@ -685,7 +764,17 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as exc:
             _LOGGER.warning("Failed to dismiss safety notification for %s: %s", device_id, exc)
             return False
-        self._fault_notifications_sent.discard(device_id)
+        if (
+            device_id in self._fault_notifications_sent
+            or device_id in self._fault_notification_fingerprints
+            or device_id in self._fault_notifications_pending_dismissal
+            or device_id in self._fault_notification_pending_fingerprints
+        ):
+            self._fault_notifications_sent.discard(device_id)
+            self._fault_notification_fingerprints.pop(device_id, None)
+            self._fault_notifications_pending_dismissal.discard(device_id)
+            self._fault_notification_pending_fingerprints.pop(device_id, None)
+            self._fault_notification_dirty = True
         return True
 
     async def _retry_fault_notification_dismissals(self) -> None:
@@ -693,6 +782,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for device_id in tuple(self._fault_notifications_pending_dismissal):
             if await self._dismiss_fault_notification(device_id):
                 self._fault_notifications_pending_dismissal.discard(device_id)
+                self._fault_notification_pending_fingerprints.pop(device_id, None)
+        await self._persist_runtime_if_dirty()
 
 
     async def _evaluate_safely(self) -> None:
@@ -874,6 +965,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Observe: overload policy would shed one device "
                         f"({self._last_policy_decision.reason_code.value}); no physical command issued"
                     )
+                    await self._record_observe_only_action(
+                        action="shed",
+                        reason=self._last_policy_decision.reason_code.value,
+                        source="policy",
+                    )
                     return
                 if not self._policy_engine.can_shed_again(self._load_generation):
                     self._status = STATUS_RECOVERY_WAIT
@@ -892,6 +988,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if not self.physical_commands_allowed:
                     self._status = STATUS_OBSERVE
                     self._last_action = "Observe: legacy overload would shed; no physical command issued"
+                    await self._record_observe_only_action(
+                        action="shed",
+                        reason=ReasonCode.SHED_SUSTAINED_OVERLOAD.value,
+                        source="legacy_policy",
+                    )
                     return
                 await self._perform_shedding(current)
                 return
@@ -900,6 +1001,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if not self.physical_commands_allowed:
                     self._status = STATUS_OBSERVE
                     self._last_action = "Observe: legacy average overload would shed; no physical command issued"
+                    await self._record_observe_only_action(
+                        action="shed",
+                        reason=ReasonCode.SHED_SUSTAINED_OVERLOAD.value,
+                        source="legacy_policy",
+                    )
                     return
                 await self._perform_shedding(avg)
                 return
@@ -1281,6 +1387,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "Observe: grid loss would stop all optional devices; "
                 "no physical command issued"
             )
+            await self._record_observe_only_action(
+                action="grid_loss_all_stop",
+                reason=ReasonCode.GRID_LOSS.value,
+                source="grid_loss",
+            )
             self._emit_event(
                 EVENT_ACTION,
                 {
@@ -1351,15 +1462,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.error(self._last_action)
         else:
             self._last_action = "Grid loss — all optional devices turned off"
-        try:
-            self._save_runtime_snapshot()
-            await self._store.async_save()
-        except Exception as exc:
-            _LOGGER.error("Failed to persist grid-loss state: %s", exc)
-            self._fault_state_dirty = True
+        if not await self._persist_runtime_if_dirty():
+            _LOGGER.error("Failed to persist grid-loss state")
             self._status = STATUS_SAFETY_BLOCKED
             return
-        self._fault_state_dirty = False
 
     async def _notify_manual_overrides(self) -> None:
         """Notify once when a device is re-enabled after an emergency stop."""
@@ -1400,6 +1506,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_action = (
                 "Observe: hard interlock requires emergency all-stop; "
                 "no physical commands issued"
+            )
+            await self._record_observe_only_action(
+                action="emergency_all_stop",
+                reason=ReasonCode.HARD_INTERLOCK.value,
+                source="hard_interlock",
             )
             self._emit_event(
                 EVENT_ACTION,
@@ -1451,9 +1562,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             self._status = STATUS_LOAD_SHEDDING
             self._last_action = "Hard interlock emergency all-stop completed"
-        self._save_runtime_snapshot()
-        await self._store.async_save()
-        self._fault_state_dirty = False
+        if not await self._persist_runtime_if_dirty():
+            self._status = STATUS_SAFETY_BLOCKED
+            self._last_action = "Emergency all-stop persisted with safety block"
 
     async def _perform_shedding(
         self,
@@ -1765,6 +1876,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._mode != MODE_AUTO
             or not self.physical_commands_allowed
             or self._startup_safe
+            or self._journal_persistence_blocked
             or device.is_on is not False
             or pending is None
             or pending.device_id != device.device_id
@@ -1773,7 +1885,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ):
             _LOGGER.info("Ignoring unsafe or unreserved start of %s", device.name)
             return False
-        action_id = action_id or self._new_action_id("start")
+        action_id = action_id or pending.action_id or self._new_action_id("start")
+        pending.action_id = action_id
         self._last_action_id = action_id
         self._last_operation_id = str(pending.operation_id)
         action_base = {
@@ -1937,23 +2050,16 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         action_id = action_id or self._new_action_id("stop")
         self._last_action_id = action_id
         if not self.physical_commands_allowed:
-            self._last_operation_id = f"observe-{action_id}"
-            self._last_operation_result = "observe_only"
             self._status = STATUS_OBSERVE
             self._last_action = f"Observe: would turn off {device.name}"
-            self._record_action(
-                {
-                    "action_id": action_id,
-                    "operation_id": self._last_operation_id,
-                    "device_id": device.device_id,
-                    "action": "turn_off",
-                    "phase": "observe_only",
-                    "result": "observe_only",
-                    "source": source,
-                    "actor_id": actor_id,
-                    "context_id": context_id,
-                    "reason": ReasonCode.OBSERVE_MODE.value,
-                }
+            await self._record_observe_only_action(
+                action="turn_off",
+                reason=ReasonCode.OBSERVE_MODE.value,
+                action_id=action_id,
+                device_id=device.device_id,
+                source=source,
+                actor_id=actor_id,
+                context_id=context_id,
             )
             return False
         operation_id = self._next_operation_id(device)
@@ -2061,6 +2167,43 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._store.record_action(normalized)
         self._journal_dirty = True
 
+    async def _record_observe_only_action(
+        self,
+        *,
+        action: str,
+        reason: str,
+        action_id: str | None = None,
+        device_id: str | None = None,
+        source: str = "planner",
+        actor_id: str | None = None,
+        context_id: str | None = None,
+    ) -> bool:
+        """Record and durably commit a terminal no-physical-command intent."""
+        action_id = action_id or self._new_action_id("observe")
+        operation_id = f"observe-{action_id}"
+        self._last_action_id = action_id
+        self._last_operation_id = operation_id
+        self._last_operation_result = "observe_only"
+        event: dict[str, Any] = {
+            "action_id": action_id,
+            "operation_id": operation_id,
+            "action": action,
+            "phase": "observe_only",
+            "result": "observe_only",
+            "reason": reason,
+            "source": source,
+            "actor_id": actor_id,
+            "context_id": context_id,
+        }
+        if device_id is not None:
+            event["device_id"] = device_id
+        self._record_action(event)
+        persisted = await self._persist_runtime_if_dirty()
+        if not persisted:
+            self._status = STATUS_SAFETY_BLOCKED
+            self._last_action = f"Observe intent journal unavailable for {action}"
+        return persisted
+
     def _emit_event(self, event_type: str, payload: dict[str, Any]) -> None:
         """Publish a bounded, versioned event without making control depend on it."""
         event = {
@@ -2128,7 +2271,13 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if not await self._persist_runtime_if_dirty():
                     raise RuntimeError("observe start intent journal could not be persisted")
                 return False
-            if self._mode != MODE_AUTO or self._startup_safe:
+            if (
+                self._mode != MODE_AUTO
+                or self._startup_safe
+                or self._journal_persistence_blocked
+                or self._action_journal_invalid
+                or self._safety_storage_invalid
+            ):
                 raise ValueError("planner is not armed")
             if self._post_arm_reconciliation_required:
                 raise ValueError("waiting for post-arm aggregate report")
@@ -2327,6 +2476,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             old_fault_reason = self._safety_fault_reason
             old_fault_reasons = dict(self._fault_reasons)
             old_fault_state_dirty = self._fault_state_dirty
+            old_journal_dirty = self._journal_dirty
+            old_fault_notification_dirty = self._fault_notification_dirty
             old_status = self._status
             old_last_action = self._last_action
             store_snapshot = (
@@ -2361,6 +2512,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._recovery_blocked = old_recovery_blocked
                 self._fault_reasons = old_fault_reasons
                 self._fault_state_dirty = old_fault_state_dirty
+                self._journal_dirty = old_journal_dirty
+                self._fault_notification_dirty = old_fault_notification_dirty
                 self._safety_fault_reason = old_fault_reason
                 self._status = old_status
                 self._last_action = old_last_action
@@ -2373,13 +2526,16 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._last_action = "Quarantine clear failed; quarantine retained"
                 raise
             self._fault_state_dirty = False
+            self._journal_dirty = False
+            self._fault_notification_dirty = False
             dismissed = await self._dismiss_fault_notification(device_id)
             if not dismissed:
-                self._fault_notifications_pending_dismissal.add(device_id)
+                self._queue_fault_notification_dismissal(device_id)
                 self._last_action = (
                     f"Quarantine cleared for {device.name}; "
                     "notification dismissal will be retried"
                 )
+            await self._persist_runtime_if_dirty()
             self._emit_event(
                 "power_orchestrator.quarantine_cleared",
                 {
@@ -2484,6 +2640,75 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._evaluate_safely()
             self.async_set_updated_data(self._build_data())
 
+    def restore_fault_notification_state(
+        self,
+        active_fingerprints: Mapping[str, str],
+        pending_dismissal_fingerprints: Mapping[str, str],
+    ) -> None:
+        """Restore durable notification revisions before first refresh."""
+        configured_ids = {device.device_id for device in self._model.all_devices()}
+        self._fault_notification_fingerprints = {
+            device_id: fingerprint[:128]
+            for device_id, fingerprint in active_fingerprints.items()
+            if device_id in configured_ids and isinstance(fingerprint, str)
+        }
+        self._fault_notifications_sent = set(self._fault_notification_fingerprints)
+        self._fault_notification_pending_fingerprints = {
+            device_id: fingerprint[:128]
+            for device_id, fingerprint in pending_dismissal_fingerprints.items()
+            if device_id in configured_ids and isinstance(fingerprint, str)
+        }
+        self._fault_notifications_pending_dismissal = set(
+            self._fault_notification_pending_fingerprints
+        )
+        self._fault_notification_dirty = False
+
+    def restore_action_journal(
+        self,
+        unresolved_actions: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+        *,
+        journal_invalid: bool = False,
+    ) -> None:
+        """Reconcile durable action intents before accepting automatic starts."""
+        self._action_journal_invalid = bool(journal_invalid)
+        configured_ids = {device.device_id for device in self._model.all_devices()}
+        for action in unresolved_actions:
+            device_id = action.get("device_id")
+            if not isinstance(device_id, str) or device_id not in configured_ids:
+                self._action_journal_invalid = True
+                continue
+            action_id = action.get("action_id")
+            phase = action.get("phase")
+            if not isinstance(action_id, str) or phase not in {"prepared", "dispatched"}:
+                self._action_journal_invalid = True
+                continue
+            if phase == "prepared":
+                self._record_action(
+                    {
+                        "action_id": action_id,
+                        "operation_id": action.get("operation_id", "unknown"),
+                        "device_id": device_id,
+                        "action": action.get("action", "unknown"),
+                        "phase": "failed",
+                        "result": "failed",
+                        "reason": "restart_before_dispatch",
+                        "source": "startup_reconciliation",
+                    }
+                )
+                continue
+            self._faulted.add(device_id)
+            self._recovery_blocked.add(device_id)
+            self._fault_reasons[device_id] = "persisted_action_dispatched_unresolved"
+            device = self._model.get_device(device_id)
+            if device is not None:
+                device.is_on = None
+        if unresolved_actions or journal_invalid:
+            self._fault_state_dirty = True
+        if self._action_journal_invalid or any(
+            action.get("phase") == "dispatched" for action in unresolved_actions
+        ):
+            self._safety_storage_invalid = True
+
     def restore_device_runtime(
         self,
         faulted_devices: set[str] | frozenset[str] | list[str],
@@ -2529,6 +2754,14 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 recovery_blocked_devices=self._recovery_blocked,
                 fault_reasons=self._fault_reasons,
             )
+        save_fault_notification_state = getattr(
+            self._store, "save_fault_notification_state", None
+        )
+        if callable(save_fault_notification_state):
+            save_fault_notification_state(
+                self._fault_notification_fingerprints,
+                self._fault_notification_pending_fingerprints,
+            )
 
     async def async_persist_runtime(self) -> None:
         """Persist pauses, typed policy state, ownership, and quarantine history."""
@@ -2543,6 +2776,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         history = history_reader() if callable(history_reader) else []
         if not isinstance(history, list):
             history = []
+        unresolved_reader = getattr(self._store, "unresolved_actions", None)
+        unresolved = unresolved_reader() if callable(unresolved_reader) else []
+        if not isinstance(unresolved, list):
+            unresolved = []
         next_restore = self._policy_engine.next_restore_target()
         return {
             "status": self._status,
@@ -2588,8 +2825,16 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "pending_operation_id": (
                 self._pending_start.operation_id if self._pending_start is not None else None
             ),
+            "pending_action_id": (
+                self._pending_start.action_id if self._pending_start is not None else None
+            ),
             "last_operation_id": self._last_operation_id,
             "last_operation_result": self._last_operation_result,
+            "last_action_id": self._last_action_id,
+            "journal_unresolved_count": len(unresolved),
+            "action_journal_invalid": self._action_journal_invalid
+            or getattr(self._store, "action_journal_invalid", False) is True,
+            "journal_persistence_blocked": self._journal_persistence_blocked,
             "faulted_devices": sorted(self._faulted),
             "recovery_blocked_devices": sorted(self._recovery_blocked),
             "fault_reasons": dict(sorted(self._fault_reasons.items())),

@@ -19,6 +19,7 @@ from power_orchestrator import (
     async_unload_entry,
 )
 from power_orchestrator.binary_sensor import (
+    PowerOrchestratorActionJournalHealthySensor,
     PowerOrchestratorFaultSensor,
     PowerOrchestratorGridOkSensor,
     PowerOrchestratorRecoveryBlockedSensor,
@@ -41,6 +42,9 @@ from power_orchestrator.sensor import (
     PowerOrchestratorAverageLoadSensor,
     PowerOrchestratorAvailableCapacitySensor,
     PowerOrchestratorCurrentLoadSensor,
+    PowerOrchestratorExecutionModeSensor,
+    PowerOrchestratorLastOperationSensor,
+    PowerOrchestratorReasonCodeSensor,
     PowerOrchestratorStatusSensor,
     async_setup_entry as async_setup_sensor,
 )
@@ -88,16 +92,17 @@ async def test_entity_platform_setup_has_platform_scoped_unique_ids():
     sensor_add = MagicMock()
     await async_setup_sensor(hass, entry, sensor_add)
     sensor_ids = [entity._attr_unique_id for entity in sensor_add.call_args.args[0]]
-    assert len(sensor_ids) == 5
+    assert len(sensor_ids) == 8
     assert all("_sensor_" in entity_id for entity_id in sensor_ids)
 
     binary_add = MagicMock()
     await async_setup_binary(hass, entry, binary_add)
     binary_entities = binary_add.call_args.args[0]
-    assert len(binary_entities) == 3
+    assert len(binary_entities) == 4
     assert binary_entities[0]._attr_unique_id == "entry-1_binary_sensor_grid_ok"
     assert binary_entities[1]._attr_unique_id == "entry-1_binary_sensor_faulted"
     assert binary_entities[2]._attr_unique_id == "entry-1_binary_sensor_recovery_blocked"
+    assert binary_entities[3]._attr_unique_id == "entry-1_binary_sensor_action_journal_healthy"
 
 
 @pytest.mark.asyncio
@@ -124,6 +129,45 @@ async def test_quarantine_entities_expose_persisted_device_ids():
         "device_reasons": {"d1": "relay_readback_timeout"},
         "next_restore_target": "d2",
     }
+
+
+def test_diagnostic_entities_expose_execution_reason_and_journal_state():
+    coordinator = MagicMock()
+    coordinator.execution_mode = "observe"
+    coordinator.mode = "off"
+    coordinator.reason_code = "observe_mode"
+    coordinator.data = {
+        "physical_commands_allowed": False,
+        "journal_persistence_blocked": False,
+        "status": "observe",
+        "policy_phase": "monitoring",
+        "safety_fault_reason": None,
+        "load_sensor_reason": "ok",
+        "last_operation_result": "observe_only",
+        "last_action_id": "observe-1",
+        "last_operation_id": "observe-observe-1",
+        "pending_action_id": None,
+        "journal_unresolved_count": 0,
+        "action_journal_invalid": False,
+        "audit_history": [],
+    }
+    entry = SimpleNamespace(entry_id="entry-1")
+
+    execution = PowerOrchestratorExecutionModeSensor(coordinator, entry)
+    reason = PowerOrchestratorReasonCodeSensor(coordinator, entry)
+    operation = PowerOrchestratorLastOperationSensor(coordinator, entry)
+    journal = PowerOrchestratorActionJournalHealthySensor(coordinator, entry)
+
+    assert execution.native_value == "observe"
+    assert execution.extra_state_attributes["physical_commands_allowed"] is False
+    assert reason.native_value == "observe_mode"
+    assert reason.extra_state_attributes["status"] == "observe"
+    assert operation.native_value == "observe_only"
+    assert operation.extra_state_attributes["action_id"] == "observe-1"
+    assert journal.is_on is True
+
+    coordinator.data["journal_persistence_blocked"] = True
+    assert journal.is_on is False
 
 
 @pytest.mark.asyncio

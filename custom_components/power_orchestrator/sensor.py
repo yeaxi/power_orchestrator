@@ -35,6 +35,9 @@ async def async_setup_entry(
             PowerOrchestratorAverageLoadSensor(coordinator, entry),
             PowerOrchestratorAvailableCapacitySensor(coordinator, entry),
             PowerOrchestratorLastActionSensor(coordinator, entry),
+            PowerOrchestratorExecutionModeSensor(coordinator, entry),
+            PowerOrchestratorReasonCodeSensor(coordinator, entry),
+            PowerOrchestratorLastOperationSensor(coordinator, entry),
         ]
     )
 
@@ -173,3 +176,80 @@ class PowerOrchestratorLastActionSensor(PowerOrchestratorSensorBase):
     @property
     def native_value(self) -> str:
         return self.coordinator.last_action
+
+
+class PowerOrchestratorExecutionModeSensor(PowerOrchestratorSensorBase):
+    """Physical execution boundary: observe or live."""
+
+    _attr_translation_key = "execution_mode"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_sensor_execution_mode"
+        self._attr_icon = "mdi:shield-lock"
+
+    @property
+    def native_value(self) -> str:
+        return self.coordinator.execution_mode
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data or {}
+        return {
+            "planner_mode": self.coordinator.mode,
+            "physical_commands_allowed": data.get("physical_commands_allowed", False),
+            "journal_persistence_blocked": data.get("journal_persistence_blocked", False),
+        }
+
+
+class PowerOrchestratorReasonCodeSensor(PowerOrchestratorSensorBase):
+    """Typed policy/safety reason for the current decision."""
+
+    _attr_translation_key = "reason_code"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_sensor_reason_code"
+        self._attr_icon = "mdi:information-outline"
+
+    @property
+    def native_value(self) -> str:
+        return self.coordinator.reason_code
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data or {}
+        return {
+            "status": data.get("status"),
+            "policy_phase": data.get("policy_phase"),
+            "safety_fault_reason": data.get("safety_fault_reason"),
+            "load_sensor_reason": data.get("load_sensor_reason"),
+        }
+
+
+class PowerOrchestratorLastOperationSensor(PowerOrchestratorSensorBase):
+    """Last guarded action result and bounded journal diagnostics."""
+
+    _attr_translation_key = "last_operation"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_sensor_last_operation"
+        self._attr_icon = "mdi:timeline-check-outline"
+
+    @property
+    def native_value(self) -> str:
+        return str((self.coordinator.data or {}).get("last_operation_result", "none"))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data or {}
+        return {
+            "action_id": data.get("last_action_id"),
+            "operation_id": data.get("last_operation_id"),
+            "pending_action_id": data.get("pending_action_id"),
+            "journal_unresolved_count": data.get("journal_unresolved_count", 0),
+            "action_journal_invalid": data.get("action_journal_invalid", False),
+            "journal_persistence_blocked": data.get("journal_persistence_blocked", False),
+            "audit_history": data.get("audit_history", []),
+        }
