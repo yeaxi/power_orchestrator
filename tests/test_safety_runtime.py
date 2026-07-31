@@ -1276,6 +1276,90 @@ async def test_recovery_stack_entry_pops_only_after_causal_aggregate_report():
 
 
 @pytest.mark.asyncio
+async def test_recovery_stack_pop_is_durable_before_reconciliation_returns():
+    fake = _storage_fake()
+    store = RuntimeStore(fake)
+    await store.async_load()
+    coordinator = _coordinator(store=store, policy=DEFAULT_POLICY)
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    entry = ShedStackEntry(
+        device_id="d1",
+        operation_id="shed-durable",
+        pre_state=True,
+        snapshot={"switch.d1": {"state": "on"}},
+        load_generation=1,
+        reason_code=ReasonCode.SHED_FAST_OVERLOAD,
+    )
+    coordinator._policy_engine.runtime.shed_stack.append(entry)
+    await coordinator.async_persist_runtime()
+    assert fake.data["policy_runtime"]["shed_stack"]
+
+    device.is_on = False
+    coordinator._load_generation = 1
+    coordinator._load_reported_at = 1.0
+    coordinator._turn_on_device = AsyncMock(return_value=True)
+    await coordinator._perform_adding(avg_load=0, capacity=5000)
+
+    pending = coordinator._pending_start
+    assert pending is not None
+    pending.phase = "waiting_load_telemetry"
+    pending.on_confirmed_reported_at = 10.0
+    coordinator._load_reported_at = 11.0
+    coordinator._load_generation = 2
+
+    await coordinator._reconcile_pending_start()
+
+    assert coordinator._policy_engine.next_restore_target() is None
+    assert fake.data["policy_runtime"]["shed_stack"] == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_stack_pop_save_failure_retains_target_and_blocks_starts():
+    fake = _storage_fake()
+    store = RuntimeStore(fake)
+    await store.async_load()
+    coordinator = _coordinator(store=store, policy=DEFAULT_POLICY)
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    entry = ShedStackEntry(
+        device_id="d1",
+        operation_id="shed-save-failure",
+        pre_state=True,
+        snapshot={"switch.d1": {"state": "on"}},
+        load_generation=1,
+        reason_code=ReasonCode.SHED_FAST_OVERLOAD,
+    )
+    coordinator._policy_engine.runtime.shed_stack.append(entry)
+    await coordinator.async_persist_runtime()
+
+    async def fail_save(_data):
+        raise OSError("disk full")
+
+    fake.async_save = fail_save
+    device.is_on = False
+    coordinator._load_generation = 1
+    coordinator._load_reported_at = 1.0
+    coordinator._turn_on_device = AsyncMock(return_value=True)
+    await coordinator._perform_adding(avg_load=0, capacity=5000)
+    pending = coordinator._pending_start
+    assert pending is not None
+    pending.phase = "waiting_load_telemetry"
+    pending.on_confirmed_reported_at = 10.0
+    coordinator._load_reported_at = 11.0
+    coordinator._load_generation = 2
+
+    await coordinator._reconcile_pending_start()
+
+    assert coordinator._policy_engine.next_restore_target() is entry
+    assert coordinator._pending_restore_entry is entry
+    assert coordinator.pending_start_power == 1000
+    assert coordinator._journal_persistence_blocked is True
+    assert coordinator.status == STATUS_SAFETY_BLOCKED
+    assert fake.data["policy_runtime"]["shed_stack"]
+
+
+@pytest.mark.asyncio
 async def test_invalid_load_does_not_release_unresolved_reservation():
     coordinator = _coordinator()
     coordinator._load_reported_at = 100.0

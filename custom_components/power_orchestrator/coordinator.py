@@ -404,9 +404,28 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "Safety blocked — recovery stack target changed during reconciliation"
                 )
                 return
+            previous_stack = list(self._policy_engine.runtime.shed_stack)
+            store_snapshot = (
+                self._store.snapshot() if isinstance(self._store, RuntimeStore) else None
+            )
             self._policy_engine.pop_restore_target()
+            try:
+                self._save_runtime_snapshot()
+                await self._store.async_save()
+            except Exception:
+                self._policy_engine.runtime.shed_stack = previous_stack
+                if store_snapshot is not None:
+                    self._store.restore_snapshot(store_snapshot)
+                self._journal_persistence_blocked = True
+                self._status = STATUS_SAFETY_BLOCKED
+                self._last_action = (
+                    "Recovery stack pop persistence failed; restore target retained"
+                )
+                _LOGGER.exception("Failed to persist recovery stack pop")
+                return
+            if not self._action_journal_invalid:
+                self._journal_persistence_blocked = False
             self._pending_restore_entry = None
-            self._store.save_policy_runtime(self._policy_engine)
         self._clear_pending_start()
 
     async def _reconcile_recovery_block(self, pending: _PendingStart) -> None:
