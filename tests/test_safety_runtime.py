@@ -1850,12 +1850,51 @@ async def test_physical_stop_journal_reuses_one_action_id_across_lifecycle():
     assert history[0]["emergency"] is True
 
 
-def test_startup_reconciles_prepared_action_without_quarantining_device():
+@pytest.mark.asyncio
+async def test_restart_blocks_non_lifo_on_with_restored_planner_ownership():
+    coordinator = _coordinator(policy=DEFAULT_POLICY)
+    d1 = coordinator._model.get_device("d1")
+    assert d1 is not None
+
+    coordinator._policy_engine.runtime.phase = PolicyPhase.RECOVERY_WAIT
+    coordinator._policy_engine.runtime.shed_stack = [
+        ShedStackEntry(
+            device_id="d1",
+            operation_id="shed-1",
+            pre_state=True,
+            snapshot={"switch.d1": {"state": "on"}},
+            load_generation=1,
+            reason_code=ReasonCode.SHED_FAST_OVERLOAD,
+        ),
+        ShedStackEntry(
+            device_id="d2",
+            operation_id="shed-2",
+            pre_state=True,
+            snapshot={"switch.d2": {"state": "on"}},
+            load_generation=2,
+            reason_code=ReasonCode.SHED_FAST_OVERLOAD,
+        ),
+    ]
+    d1.ownership = Ownership.PLANNER
+    d1.is_on = None
+    coordinator.hass.states.get.side_effect = lambda entity_id: (
+        _state("on") if entity_id == "switch.d1" else _state("off")
+    )
+    coordinator._turn_off_device = AsyncMock(return_value=True)
+
+    await coordinator._refresh_device_states()
+
+    coordinator._turn_off_device.assert_awaited_once_with(d1)
+    assert "d1" in coordinator._faulted
+    assert d1.ownership is Ownership.EXTERNAL
+
+
+def test_startup_treats_prepared_action_as_ambiguous_quarantine():
     store = RuntimeStore(_storage_fake())
     store.record_action(
         {
-            "action_id": "start-1",
-            "operation_id": "7",
+            "action_id": "start-ambiguous",
+            "operation_id": "9",
             "device_id": "d1",
             "action": "turn_on",
             "phase": "prepared",
@@ -1867,10 +1906,14 @@ def test_startup_reconciles_prepared_action_without_quarantining_device():
     coordinator.restore_action_journal(store.unresolved_actions())
 
     assert coordinator.action_journal_invalid is False
-    assert coordinator.safety_storage_invalid is False
-    assert "d1" not in coordinator._faulted
+    assert coordinator.safety_storage_invalid is True
+    assert coordinator._journal_persistence_blocked is True
+    assert "d1" in coordinator._faulted
+    assert "d1" in coordinator._recovery_blocked
+    assert coordinator._model.get_device("d1").is_on is None
+    assert coordinator._fault_reasons["d1"] == "persisted_action_prepared_ambiguous"
     assert store.audit_history()[0]["phase"] == "failed"
-    assert store.audit_history()[0]["reason"] == "restart_before_dispatch"
+    assert store.audit_history()[0]["reason"] == "persisted_action_prepared_ambiguous"
 
 
 def test_startup_quarantines_dispatched_action_until_reconciliation():

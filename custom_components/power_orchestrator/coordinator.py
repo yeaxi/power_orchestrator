@@ -1286,6 +1286,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         not self._initial_device_reconciliation_complete
                         and previous is None
                         and device.ownership is not Ownership.UNKNOWN
+                        and not self._policy_engine.runtime.shed_stack
+                        and not self._manual_start_is_active()
                     )
                     if not restored_state:
                         await self._handle_external_start(device)
@@ -1724,7 +1726,14 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _perform_adding(self, avg_load: float, capacity: float) -> None:
         """Reserve and turn on at most one LIFO restore or normal load."""
-        if self._mode != MODE_AUTO or self._startup_safe or self._pending_start is not None:
+        if (
+            self._mode != MODE_AUTO
+            or self._startup_safe
+            or self._pending_start is not None
+            or self._safety_storage_invalid
+            or self._action_journal_invalid
+            or self._journal_persistence_blocked
+        ):
             return
         if (
             self._load_reported_at is not None
@@ -2702,6 +2711,13 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._action_journal_invalid = True
                 continue
             if phase == "prepared":
+                reason = "persisted_action_prepared_ambiguous"
+                self._faulted.add(device_id)
+                self._recovery_blocked.add(device_id)
+                self._fault_reasons[device_id] = reason
+                device = self._model.get_device(device_id)
+                if device is not None:
+                    device.is_on = None
                 self._record_action(
                     {
                         "action_id": action_id,
@@ -2710,7 +2726,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "action": action.get("action", "unknown"),
                         "phase": "failed",
                         "result": "failed",
-                        "reason": "restart_before_dispatch",
+                        "reason": reason,
                         "source": "startup_reconciliation",
                     }
                 )
@@ -2723,8 +2739,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 device.is_on = None
         if unresolved_actions or journal_invalid:
             self._fault_state_dirty = True
+            self._journal_persistence_blocked = True
         if self._action_journal_invalid or any(
-            action.get("phase") == "dispatched" for action in unresolved_actions
+            action.get("phase") in {"prepared", "dispatched"}
+            for action in unresolved_actions
         ):
             self._safety_storage_invalid = True
 
