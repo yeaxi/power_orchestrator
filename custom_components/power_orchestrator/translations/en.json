@@ -1,0 +1,334 @@
+{
+  "title": "Power Orchestrator",
+  "services": {
+    "force_evaluate": {
+      "name": "Force evaluate",
+      "description": "Run an immediate evaluation; safety gates and execution policy are not bypassed."
+    },
+    "set_mode": {
+      "name": "Set planner mode",
+      "description": "Arm or disarm normal planning. The emergency stop remains active."
+    },
+    "request_start": {
+      "name": "Request logical-device start",
+      "description": "Guarded start request through the integration with telemetry, ownership, reserve, and readback checks.",
+      "fields": {
+        "device_id": {"name": "Logical device ID", "description": "Stable device_id, not a raw switch entity ID."},
+        "source": {"name": "Request source", "description": "Audit label such as dashboard, automation, or user."}
+      }
+    },
+    "request_stop": {
+      "name": "Request logical-device stop",
+      "description": "Guarded stop request through the integration; do not call a raw relay service.",
+      "fields": {
+        "device_id": {"name": "Logical device ID", "description": "Stable device_id, not a raw switch entity ID."},
+        "source": {"name": "Request source", "description": "Audit label for the caller."}
+      }
+    },
+    "set_execution_mode": {
+      "name": "Set physical execution policy",
+      "description": "Choose observe or live. Live requires explicit confirmation.",
+      "fields": {
+        "execution_mode": {"name": "Execution policy", "description": "Observe records decisions only; live permits guarded physical commands."},
+        "confirm_live": {"name": "Confirm live ownership", "description": "Must be true to enter live execution."}
+      }
+    }
+  },
+  "config": {
+    "step": {
+      "user": {
+        "title": "Auto-Discovery",
+        "description": "Discovered from Energy Dashboard:\n{summary}",
+        "data": {},
+        "data_description": {
+          "grid_power": "Optional discovery hint for grid/import power. It pre-fills the next step; the Load Monitoring sensor below is the authoritative sensor used for capacity and load-shedding decisions.",
+          "solar_power": "Optional measured PV production sensor. It is kept for runtime telemetry; starts are authorized by the exact Forecast.Solar forecast selected below, not by actual PV production.",
+          "solar_forecast": "Forecast.Solar config entry used to resolve the exact current-power forecast. Solar-only devices may start only when this forecast covers their expected power; missing, stale, or invalid forecast blocks starts.",
+          "battery_soc": "Battery state-of-charge sensor used by threshold safety mode and freshness checks. A stale, unknown, or wrong-unit value blocks normal starts and can trigger the safety stop.",
+          "battery_power": "Optional battery-power telemetry sensor. It is stored as context and does not by itself authorize starts or replace the selected grid-loss safety source."
+        }
+      },
+      "load_monitoring": {
+        "title": "Load Monitoring",
+        "description": "Monitor total load using {sensor_name}. If the average load exceeds the limit, optional devices will be turned off.",
+        "data": {
+          "load_sensor": "Load sensor (entity to monitor)",
+          "max_load": "Maximum total load (W)",
+          "averaging_period": "Averaging period (s)",
+          "safety_reserve": "Safety reserve (W)",
+          "hysteresis": "Hysteresis (W)",
+          "threshold_count": "Number of overload thresholds (1–10)",
+          "threshold_1_power": "Threshold 1 power limit (W)",
+          "threshold_1_time": "Threshold 1 dwell time (s)",
+          "threshold_2_power": "Threshold 2 power limit (W)",
+          "threshold_2_time": "Threshold 2 dwell time (s)",
+          "threshold_3_power": "Threshold 3 power limit (W)",
+          "threshold_3_time": "Threshold 3 dwell time (s)",
+          "threshold_4_power": "Threshold 4 power limit (W)",
+          "threshold_4_time": "Threshold 4 dwell time (s)",
+          "threshold_5_power": "Threshold 5 power limit (W)",
+          "threshold_5_time": "Threshold 5 dwell time (s)",
+          "threshold_6_power": "Threshold 6 power limit (W)",
+          "threshold_6_time": "Threshold 6 dwell time (s)",
+          "threshold_7_power": "Threshold 7 power limit (W)",
+          "threshold_7_time": "Threshold 7 dwell time (s)",
+          "threshold_8_power": "Threshold 8 power limit (W)",
+          "threshold_8_time": "Threshold 8 dwell time (s)",
+          "threshold_9_power": "Threshold 9 power limit (W)",
+          "threshold_9_time": "Threshold 9 dwell time (s)",
+          "threshold_10_power": "Threshold 10 power limit (W)",
+          "threshold_10_time": "Threshold 10 dwell time (s)"
+        },
+        "data_description": {
+          "load_sensor": "Authoritative whole-house power sensor. Fresh, non-negative readings in watts update capacity decisions; stale, unknown, or unsupported-unit readings block normal starts.",
+          "max_load": "Hard average-load ceiling in watts. If the average exceeds it, the coordinator sheds one lowest-priority active device per evaluation cycle.",
+          "averaging_period": "Time window used to calculate average load. A longer window smooths short spikes, but it never extends the separate safety-input freshness limit.",
+          "safety_reserve": "Watts kept unused below the maximum load. Increasing it reduces the capacity available for new devices and protects headroom for unexpected demand.",
+          "hysteresis": "Additional watt margin required before a new device may start. Increasing it reduces on/off cycling but delays starts until more capacity is available.",
+          "threshold_count": "How many custom power-limit and time pairs to use. Maximum 10; power limits must be strictly increasing.",
+          "threshold_1_power": "Power limit 1 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_1_time": "How many seconds fresh aggregate load must remain continuously above threshold 1. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_2_power": "Power limit 2 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_2_time": "How many seconds fresh aggregate load must remain continuously above threshold 2. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_3_power": "Power limit 3 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_3_time": "How many seconds fresh aggregate load must remain continuously above threshold 3. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_4_power": "Power limit 4 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_4_time": "How many seconds fresh aggregate load must remain continuously above threshold 4. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_5_power": "Power limit 5 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_5_time": "How many seconds fresh aggregate load must remain continuously above threshold 5. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_6_power": "Power limit 6 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_6_time": "How many seconds fresh aggregate load must remain continuously above threshold 6. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_7_power": "Power limit 7 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_7_time": "How many seconds fresh aggregate load must remain continuously above threshold 7. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_8_power": "Power limit 8 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_8_time": "How many seconds fresh aggregate load must remain continuously above threshold 8. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_9_power": "Power limit 9 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_9_time": "How many seconds fresh aggregate load must remain continuously above threshold 9. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_10_power": "Power limit 10 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_10_time": "How many seconds fresh aggregate load must remain continuously above threshold 10. A short spike, stale input, or invalid telemetry never confirms shedding."
+        }
+      },
+      "devices": {
+        "title": "Optional Devices",
+        "description": "Confirm devices discovered by Energy Dashboard, remove any you do not want to manage, and optionally add a custom device. For each selected device, choose the on/off entity. Configured: {count}\n\nDiscovered: {discovered}",
+        "data": {
+          "discovered_devices": "Devices to manage",
+          "add_custom_device": "Add a custom device",
+          "entity": "On/off control entity",
+          "name": "Friendly name (leave empty to keep the discovered name)",
+          "expected_power": "Expected power usage when ON (W)",
+          "power_sensor": "Power sensor (auto-discovered when available; choose another to override)",
+          "only_from_solar": "Only turn on when solar forecast covers this device",
+          "add_another": "Add another custom device after this one"
+        },
+        "data_description": {
+          "discovered_devices": "Energy Dashboard statistic candidates only. Select the candidates you want to map to real controllable entities; unselected candidates are ignored, and a statistic sensor is never toggled directly.",
+          "add_custom_device": "If enabled, opens a control-mapping form after discovery so you can add a switch, light, or input_boolean manually.",
+          "entity": "The actual on/off control entity that the integration may command. This is the physical service target and must be a switch, light, or input_boolean.",
+          "name": "Friendly name shown in entities, priorities, notifications, and logs. Leave it empty to keep the discovered or Home Assistant name.",
+          "expected_power": "Reserved power in watts used before a start to check available capacity. It is admission planning power; the optional measured-power sensor is kept separate.",
+          "power_sensor": "Measured device-power sensor. When Energy Dashboard provides stat_rate, it is preselected automatically. Choose any other sensor to override it, or clear the field to disable measured telemetry; fresh non-negative readings are never substituted for expected power during start admission.",
+          "only_from_solar": "When enabled, this device may start only if the exact current Forecast.Solar power forecast is at least its expected power. Missing, stale, or invalid forecast blocks the start.",
+          "add_another": "Controls only the custom-device form loop. It has no runtime effect; enable it to configure another custom device before assigning priorities."
+        }
+      },
+      "priority": {
+        "title": "Priority & Pause",
+        "description": "Choose the device name for each position. Position 1 is the highest priority; the last position is shed first when the load is too high.\n\nCurrent order:\n{device_list}",
+        "data": {
+          "priority_1": "Priority position 1",
+          "priority_2": "Priority position 2",
+          "priority_3": "Priority position 3",
+          "priority_4": "Priority position 4",
+          "priority_5": "Priority position 5",
+          "priority_6": "Priority position 6",
+          "priority_7": "Priority position 7",
+          "priority_8": "Priority position 8",
+          "priority_9": "Priority position 9",
+          "priority_10": "Priority position 10",
+          "pause_period": "Wait time before re-enabling a device after it was turned off (s)"
+        },
+        "data_description": {
+          "priority_1": "Choose the device for this position. Position 1 is considered first for normal starts and is protected longest; later positions are shed first when load is too high.",
+          "priority_2": "Choose the device for this position. Earlier positions start sooner; later positions are shed first when load is too high.",
+          "priority_3": "Choose the device for this position. Earlier positions start sooner; later positions are shed first when load is too high.",
+          "priority_4": "Choose the device for this position. Earlier positions start sooner; later positions are shed first when load is too high.",
+          "priority_5": "Choose the device for this position. Earlier positions start sooner; later positions are shed first when load is too high.",
+          "priority_6": "Choose the device for this position. Earlier positions start sooner; later positions are shed first when load is too high.",
+          "priority_7": "Choose the device for this position. Earlier positions start sooner; later positions are shed first when load is too high.",
+          "priority_8": "Choose the device for this position. Earlier positions start sooner; later positions are shed first when load is too high.",
+          "priority_9": "Choose the device for this position. Earlier positions start sooner; later positions are shed first when load is too high.",
+          "priority_10": "Choose the device for this position. Earlier positions start sooner; later positions are shed first when load is too high.",
+          "pause_period": "Seconds a device remains paused after the coordinator turns it off, reducing rapid cycling before it becomes eligible again. Emergency safety stops still apply."
+        }
+      },
+      "grid_loss": {
+        "title": "Grid Loss Behavior",
+        "description": "Choose how to detect grid loss. When grid is lost, all optional devices are turned off immediately.\n\n{battery_info}",
+        "data": {
+          "grid_loss_mode": "Detection mode",
+          "grid_loss_sensor": "Binary sensor: ON = grid available, OFF = grid lost",
+          "battery_soc": "Battery state-of-charge sensor (%)",
+          "battery_threshold": "Battery discharge threshold (%)"
+        },
+        "data_description": {
+          "grid_loss_mode": "Select the safety source. Binary-sensor mode requires ON to mean grid available; battery-threshold mode allows starts only while SoC is strictly above the threshold.",
+          "grid_loss_sensor": "Used only in binary-sensor mode. It must be fresh and report ON for normal operation; OFF, unknown, stale, or missing input triggers an emergency stop of optional devices.",
+          "battery_soc": "Used in battery-threshold mode. It must be a fresh sensor with a percent unit; SoC at or below the threshold, unknown, stale, or invalid input blocks starts and triggers the safety stop.",
+          "battery_threshold": "Battery SoC percentage at or below which the system treats the safety source as lost. A higher value protects the battery more but blocks automatic starts more often."
+        }
+      }
+    },
+    "error": {
+      "invalid_priority_order": "Each priority position must contain a different optional device.",
+      "invalid_discovered_devices": "Select only devices currently discovered by Energy Dashboard.",
+      "missing_grid_loss_sensor": "Select a grid-loss binary sensor before continuing.",
+      "missing_battery_soc_sensor": "Select a battery state-of-charge sensor before continuing."
+    },
+    "abort": {
+      "single_instance": "Only one whole-house Power Orchestrator entry can be configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Runtime & Safety Options",
+        "description": "Changing these options reloads the integration. Invalid or stale safety inputs fail closed.",
+        "data": {
+          "load_sensor": "Load sensor",
+          "max_load": "Maximum total load (W)",
+          "averaging_period": "Averaging period (s)",
+          "safety_reserve": "Safety reserve (W)",
+          "hysteresis": "Hysteresis (W)",
+          "pause_period": "Pause period (s)",
+          "grid_loss_mode": "Detection mode",
+          "grid_loss_sensor": "Grid-loss binary sensor",
+          "battery_soc": "Battery state-of-charge sensor (%)",
+          "battery_threshold": "Battery discharge threshold (%)",
+          "devices": "Managed device mappings (structured list)",
+          "solar_power": "Measured PV production sensor",
+          "solar_forecast_entry": "Forecast.Solar config entry",
+          "battery_power": "Battery power telemetry sensor",
+          "threshold_count": "Number of overload thresholds (1–10)",
+          "threshold_1_power": "Threshold 1 power limit (W)",
+          "threshold_1_time": "Threshold 1 dwell time (s)",
+          "threshold_2_power": "Threshold 2 power limit (W)",
+          "threshold_2_time": "Threshold 2 dwell time (s)",
+          "threshold_3_power": "Threshold 3 power limit (W)",
+          "threshold_3_time": "Threshold 3 dwell time (s)",
+          "threshold_4_power": "Threshold 4 power limit (W)",
+          "threshold_4_time": "Threshold 4 dwell time (s)",
+          "threshold_5_power": "Threshold 5 power limit (W)",
+          "threshold_5_time": "Threshold 5 dwell time (s)",
+          "threshold_6_power": "Threshold 6 power limit (W)",
+          "threshold_6_time": "Threshold 6 dwell time (s)",
+          "threshold_7_power": "Threshold 7 power limit (W)",
+          "threshold_7_time": "Threshold 7 dwell time (s)",
+          "threshold_8_power": "Threshold 8 power limit (W)",
+          "threshold_8_time": "Threshold 8 dwell time (s)",
+          "threshold_9_power": "Threshold 9 power limit (W)",
+          "threshold_9_time": "Threshold 9 dwell time (s)",
+          "threshold_10_power": "Threshold 10 power limit (W)",
+          "threshold_10_time": "Threshold 10 dwell time (s)"
+        },
+        "data_description": {
+          "load_sensor": "Authoritative whole-house power sensor used for capacity, admission, and shedding. Stale, unknown, invalid, or wrong-unit readings block normal starts.",
+          "max_load": "Hard total-load ceiling in watts. The coordinator sheds one lowest-priority active device when the current or average load exceeds it.",
+          "averaging_period": "Time window for average-load decisions. It does not extend the independent safety-input freshness budget.",
+          "safety_reserve": "Watts held back below the maximum. It reduces start capacity and protects headroom for unexpected demand.",
+          "hysteresis": "Additional watt margin required before a new device may start, reducing rapid cycling.",
+          "pause_period": "Seconds a device remains paused after a planner stop. Emergency safety stops are not delayed by this timer.",
+          "grid_loss_mode": "Select the authoritative safety source. Only a valid, fresh source can authorize normal starts.",
+          "grid_loss_sensor": "Binary sensor used in sensor mode; it must be fresh and ON for normal operation. OFF, missing, stale, or unknown triggers safety shedding.",
+          "battery_soc": "Percent sensor used in battery-threshold mode. It must be fresh, valid, and strictly above the configured threshold.",
+          "battery_threshold": "SoC percentage at or below which the integration treats the safety source as lost and blocks normal starts.",
+          "devices": "Structured mappings for every physical control: stable device_id, switch/light/input_boolean entity, expected watts, optional measured-power sensor, solar-only policy, and unique priority. Invalid mappings are rejected instead of silently skipped.",
+          "solar_power": "Optional measured PV telemetry. It is observable context only; actual PV production never authorizes a start.",
+          "solar_forecast_entry": "Forecast.Solar config entry used to resolve the exact current-power forecast. Missing, stale, or invalid forecast blocks solar-only starts.",
+          "battery_power": "Optional battery-power telemetry for diagnostics. It does not replace the selected grid-loss source or authorize starts.",
+          "threshold_count": "How many custom power-limit and time pairs to use. Maximum 10; power limits must be strictly increasing.",
+          "threshold_1_power": "Power limit 1 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_1_time": "How many seconds fresh aggregate load must remain continuously above threshold 1. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_2_power": "Power limit 2 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_2_time": "How many seconds fresh aggregate load must remain continuously above threshold 2. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_3_power": "Power limit 3 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_3_time": "How many seconds fresh aggregate load must remain continuously above threshold 3. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_4_power": "Power limit 4 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_4_time": "How many seconds fresh aggregate load must remain continuously above threshold 4. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_5_power": "Power limit 5 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_5_time": "How many seconds fresh aggregate load must remain continuously above threshold 5. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_6_power": "Power limit 6 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_6_time": "How many seconds fresh aggregate load must remain continuously above threshold 6. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_7_power": "Power limit 7 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_7_time": "How many seconds fresh aggregate load must remain continuously above threshold 7. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_8_power": "Power limit 8 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_8_time": "How many seconds fresh aggregate load must remain continuously above threshold 8. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_9_power": "Power limit 9 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_9_time": "How many seconds fresh aggregate load must remain continuously above threshold 9. A short spike, stale input, or invalid telemetry never confirms shedding.",
+          "threshold_10_power": "Power limit 10 that starts this tier's timer. When fresh aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
+          "threshold_10_time": "How many seconds fresh aggregate load must remain continuously above threshold 10. A short spike, stale input, or invalid telemetry never confirms shedding."
+        }
+      }
+    },
+    "error": {
+      "missing_grid_loss_sensor": "Select a grid-loss binary sensor before continuing.",
+      "missing_battery_soc_sensor": "Select a battery state-of-charge sensor before continuing.",
+      "invalid_load_sensor": "Select a valid sensor entity for whole-house load.",
+      "invalid_grid_loss_mode": "Select a supported grid-loss safety mode.",
+      "invalid_grid_loss_sensor": "Select a valid binary sensor for grid-loss detection.",
+      "invalid_battery_soc_sensor": "Select a valid percent sensor for battery-threshold mode.",
+      "invalid_devices": "Every device mapping must use a unique valid control entity, finite expected watts, optional sensor telemetry, boolean solar policy, and unique positive priority.",
+      "invalid_numeric_setting": "One or more numeric safety settings are outside the allowed finite range.",
+      "invalid_solar_power": "Select a valid sensor for optional PV telemetry.",
+      "invalid_battery_power": "Select a valid sensor for optional battery telemetry.",
+      "invalid_solar_forecast_entry": "Select a valid Forecast.Solar config entry."
+    }
+  },
+  "selector": {
+    "grid_loss_mode": {
+      "options": {
+        "grid_loss_sensor": "Grid loss sensor",
+        "battery_threshold": "Battery threshold"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status"
+      },
+      "current_load": {
+        "name": "Current load"
+      },
+      "average_load": {
+        "name": "Average load"
+      },
+      "available_capacity": {
+        "name": "Available capacity"
+      },
+      "last_action": {
+        "name": "Last action"
+      }
+    },
+    "binary_sensor": {
+      "grid_ok": {
+        "name": "Grid OK"
+      },
+      "faulted": {
+        "name": "Device fault"
+      },
+      "recovery_blocked": {
+        "name": "Recovery blocked"
+      }
+    },
+    "select": {
+      "mode": {
+        "name": "Mode",
+        "state": {
+          "auto": "Auto",
+          "off": "Off"
+        }
+      }
+    }
+  }
+}

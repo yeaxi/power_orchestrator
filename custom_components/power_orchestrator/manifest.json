@@ -1,0 +1,13 @@
+{
+  "domain": "power_orchestrator",
+  "name": "Power Orchestrator",
+  "codeowners": ["@yeaxi"],
+  "config_flow": true,
+  "documentation": "https://github.com/yeaxi/power_orchestrator",
+  "issue_tracker": "https://github.com/yeaxi/power_orchestrator/issues",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.5.0"
+}

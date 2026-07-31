@@ -1,0 +1,11 @@
+{
+  "name": "Power Orchestrator",
+  "filename": "power_orchestrator.zip",
+  "content_in_root": false,
+  "domains": ["sensor", "binary_sensor", "select"],
+  "render_readme": true,
+  "hide_default_branch": true,
+  "zip_release": true,
+  "country": ["UA", "US"],
+  "homeassistant": "2026.7.4"
+}
