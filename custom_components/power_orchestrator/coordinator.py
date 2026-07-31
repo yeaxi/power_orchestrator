@@ -149,6 +149,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._decision_events: deque[dict[str, Any]] = deque(maxlen=100)
         self._last_operation_result = "none"
         self._last_operation_id: str | None = None
+        self._last_action_id: str | None = None
         self._last_reconciliation_generation: int | None = None
         self._shed_snapshots: dict[str, dict[str, Any]] = {}
         self._safety_fault_reason: str | None = None
@@ -1315,6 +1316,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._pause_device(device)
                 self._record_action(
                     {
+                        "action_id": self._last_action_id,
                         "device_id": device.device_id,
                         "action": "turn_off",
                         "result": "confirmed",
@@ -1332,6 +1334,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._fault_state_dirty = True
                 self._record_action(
                     {
+                        "action_id": self._last_action_id,
                         "device_id": device.device_id,
                         "action": "turn_off",
                         "result": "failed",
@@ -1539,6 +1542,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 self._record_action(
                     {
+                        "action_id": self._last_action_id,
                         "operation_id": str(self._last_operation_id or "unknown"),
                         "device_id": device.device_id,
                         "action": "turn_off",
@@ -1550,6 +1554,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._emit_event(
                     EVENT_ACTION,
                     {
+                        "action_id": self._last_action_id,
                         "operation_id": str(self._last_operation_id or "unknown"),
                         "device_id": device.device_id,
                         "action": "turn_off",
@@ -1572,6 +1577,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._last_action = f"Load shedding stop failed for {device.name}"
                 self._record_action(
                     {
+                        "action_id": self._last_action_id,
                         "operation_id": str(self._last_operation_id or "unknown"),
                         "device_id": device.device_id,
                         "action": "turn_off",
@@ -1744,7 +1750,15 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._persist_fault_state_if_dirty()
         return stopped
 
-    async def _turn_on_device(self, device: ManagedDevice) -> bool:
+    async def _turn_on_device(
+        self,
+        device: ManagedDevice,
+        *,
+        action_id: str | None = None,
+        source: str = "planner",
+        actor_id: str | None = None,
+        context_id: str | None = None,
+    ) -> bool:
         """Turn on only with a reservation and a causal ON report."""
         pending = self._pending_start
         if (
@@ -1759,6 +1773,37 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ):
             _LOGGER.info("Ignoring unsafe or unreserved start of %s", device.name)
             return False
+        action_id = action_id or self._new_action_id("start")
+        self._last_action_id = action_id
+        self._last_operation_id = str(pending.operation_id)
+        action_base = {
+            "action_id": action_id,
+            "operation_id": str(pending.operation_id),
+            "device_id": device.device_id,
+            "action": "turn_on",
+            "source": source,
+            "actor_id": actor_id,
+            "context_id": context_id,
+        }
+        self._record_action({**action_base, "phase": "prepared", "result": "prepared"})
+        if not await self._persist_runtime_if_dirty():
+            reason = "action_prepare_persistence_failed"
+            self._mark_recovery_blocked(device, reason=reason)
+            self._last_operation_result = "failed"
+            self._last_action = (
+                f"Start vetoed for {device.name}; prepared action was not persisted"
+            )
+            self._record_action(
+                {
+                    **action_base,
+                    "phase": "failed",
+                    "result": "failed",
+                    "reason": reason,
+                }
+            )
+            await self._persist_runtime_if_dirty()
+            return False
+        self._record_action({**action_base, "phase": "dispatched", "result": "dispatched"})
         domain = device.entity_id.split(".")[0]
         try:
             pre_reported_at = self._pre_command_reported_at(device)
@@ -1796,11 +1841,27 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     f"Start not confirmed for {device.name}; "
                     f"compensating stop {'confirmed' if rollback_ok else 'failed'}"
                 )
+                self._record_action(
+                    {
+                        **action_base,
+                        "phase": "failed",
+                        "result": "failed",
+                        "reason": ReasonCode.RELAY_READBACK_TIMEOUT.value,
+                    }
+                )
                 return False
             pending = self._pending_start
             if pending is None or pending.device_id != device.device_id:
                 device.is_on = None
                 self._status = STATUS_SAFETY_BLOCKED
+                self._record_action(
+                    {
+                        **action_base,
+                        "phase": "failed",
+                        "result": "failed",
+                        "reason": "pending_start_lost",
+                    }
+                )
                 return False
             pending.phase = "waiting_load_telemetry"
             pending.on_confirmed_reported_at = self._last_confirmed_reported_at.get(
@@ -1814,6 +1875,14 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     f"Start readback marker missing for {device.name}; "
                     f"compensating stop {'confirmed' if rollback_ok else 'failed'}"
                 )
+                self._record_action(
+                    {
+                        **action_base,
+                        "phase": "failed",
+                        "result": "failed",
+                        "reason": "causal_on_marker_missing",
+                    }
+                )
                 return False
             pending.telemetry_deadline_monotonic = (
                 time.monotonic() + self._pending_start_timeout
@@ -1826,6 +1895,14 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_operation_id = str(pending.operation_id)
             self._last_operation_result = "confirmed"
             self._clear_pause(device)
+            self._record_action(
+                {
+                    **action_base,
+                    "phase": "confirmed",
+                    "result": "confirmed",
+                    "reason": ReasonCode.NORMAL_MONITORING.value,
+                }
+            )
             return True
         except Exception as exc:
             device.is_on = None
@@ -1835,6 +1912,14 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"Start failed for {device.name}; "
                 f"compensating stop {'confirmed' if rollback_ok else 'failed'}"
             )
+            self._record_action(
+                {
+                    **action_base,
+                    "phase": "failed",
+                    "result": "failed",
+                    "reason": str(exc),
+                }
+            )
             _LOGGER.error("Failed to turn on %s: %s", device.entity_id, exc)
             return False
 
@@ -1843,15 +1928,51 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         device: ManagedDevice,
         *,
         emergency: bool = False,
+        action_id: str | None = None,
+        source: str = "planner",
+        actor_id: str | None = None,
+        context_id: str | None = None,
     ) -> bool:
         """Turn off every actuator and require causal OFF readback."""
+        action_id = action_id or self._new_action_id("stop")
+        self._last_action_id = action_id
         if not self.physical_commands_allowed:
+            self._last_operation_id = f"observe-{action_id}"
             self._last_operation_result = "observe_only"
             self._status = STATUS_OBSERVE
             self._last_action = f"Observe: would turn off {device.name}"
+            self._record_action(
+                {
+                    "action_id": action_id,
+                    "operation_id": self._last_operation_id,
+                    "device_id": device.device_id,
+                    "action": "turn_off",
+                    "phase": "observe_only",
+                    "result": "observe_only",
+                    "source": source,
+                    "actor_id": actor_id,
+                    "context_id": context_id,
+                    "reason": ReasonCode.OBSERVE_MODE.value,
+                }
+            )
             return False
         operation_id = self._next_operation_id(device)
         self._last_operation_id = str(operation_id)
+        action_base = {
+            "action_id": action_id,
+            "operation_id": str(operation_id),
+            "device_id": device.device_id,
+            "action": "turn_off",
+            "source": source,
+            "actor_id": actor_id,
+            "context_id": context_id,
+            "emergency": emergency,
+        }
+        self._record_action({**action_base, "phase": "prepared", "result": "prepared"})
+        # A stop must proceed even if the journal cannot be saved. The dirty
+        # record is retried by the evaluation/persistence lifecycle.
+        await self._persist_runtime_if_dirty()
+        self._record_action({**action_base, "phase": "dispatched", "result": "dispatched"})
         try:
             pre_reported_at = self._pre_command_reported_at(device)
             command_issued_at = time.time()
@@ -1881,11 +2002,27 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 device.is_on = None
                 self._last_operation_result = "failed"
                 self._safety_fault_reason = ReasonCode.RELAY_READBACK_TIMEOUT.value
+                self._record_action(
+                    {
+                        **action_base,
+                        "phase": "failed",
+                        "result": "failed",
+                        "reason": ReasonCode.RELAY_READBACK_TIMEOUT.value,
+                    }
+                )
                 return False
             device.is_on = False
             device.ownership = Ownership.PLANNER
             device.ownership_until = None
             self._last_operation_result = "confirmed"
+            self._record_action(
+                {
+                    **action_base,
+                    "phase": "confirmed",
+                    "result": "confirmed",
+                    "reason": ReasonCode.NORMAL_MONITORING.value,
+                }
+            )
             return True
         except Exception as exc:
             device.is_on = None
@@ -1893,6 +2030,14 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_operation_result = "failed"
             self._safety_fault_reason = str(exc)
             self._last_action = f"Stop failed for {device.name}"
+            self._record_action(
+                {
+                    **action_base,
+                    "phase": "failed",
+                    "result": "failed",
+                    "reason": str(exc),
+                }
+            )
             _LOGGER.error("Failed to turn off %s: %s", device.entity_id, exc)
             return False
 
@@ -1962,21 +2107,26 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             device = self._model.get_device(device_id)
             if device is None:
                 raise ValueError("unknown device_id")
+            action_id = self._new_action_id("intent")
             if self._execution_mode == EXECUTION_MODE_OBSERVE:
                 self._policy_engine.runtime.last_reason_code = ReasonCode.OBSERVE_MODE
                 self._last_action = f"Observe: start intent for {device.name} was not executed"
                 self._record_action(
                     {
-                        "operation_id": f"intent-{self._operation_generation}",
+                        "action_id": action_id,
+                        "operation_id": f"intent-{action_id}",
                         "device_id": device_id,
                         "action": "turn_on",
+                        "phase": "observe_only",
                         "result": "observe_only",
                         "source": source,
-                    "actor_id": actor_id,
-                    "context_id": context_id,
+                        "actor_id": actor_id,
+                        "context_id": context_id,
                         "reason": ReasonCode.OBSERVE_MODE.value,
                     }
                 )
+                if not await self._persist_runtime_if_dirty():
+                    raise RuntimeError("observe start intent journal could not be persisted")
                 return False
             if self._mode != MODE_AUTO or self._startup_safe:
                 raise ValueError("planner is not armed")
@@ -2032,9 +2182,16 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if device.expected_power > capacity or not self._solar_forecast_ok(device):
                 raise ValueError("expected power is not admitted by current policy")
             self._reserve_pending_start(device)
-            started = await self._turn_on_device(device)
+            started = await self._turn_on_device(
+                device,
+                action_id=action_id,
+                source=source,
+                actor_id=actor_id,
+                context_id=context_id,
+            )
             self._record_action(
                 {
+                    "action_id": self._last_action_id,
                     "operation_id": str(self._last_operation_id or "unknown"),
                     "device_id": device_id,
                     "action": "turn_on",
@@ -2045,8 +2202,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "reason": self.reason_code,
                 }
             )
-            self._save_runtime_snapshot()
-            await self._store.async_save()
+            await self._persist_runtime_if_dirty()
             return started
 
     async def async_request_stop(
@@ -2064,38 +2220,31 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 raise ValueError("unknown device_id")
             if device.is_on is not True:
                 return False
-            if self._execution_mode == EXECUTION_MODE_OBSERVE:
-                self._last_action = f"Observe: stop intent for {device.name} was not executed"
-                self._record_action(
-                    {
-                        "operation_id": f"intent-{self._operation_generation}",
-                        "device_id": device_id,
-                        "action": "turn_off",
-                        "result": "observe_only",
-                        "source": source,
-                    "actor_id": actor_id,
-                    "context_id": context_id,
-                        "reason": ReasonCode.OBSERVE_MODE.value,
-                    }
-                )
-                return False
-            stopped = await self._turn_off_device(device)
+            action_id = self._new_action_id("intent")
+            stopped = await self._turn_off_device(
+                device,
+                action_id=action_id,
+                source=source,
+                actor_id=actor_id,
+                context_id=context_id,
+            )
             if stopped:
                 self._pause_device(device)
             self._record_action(
                 {
+                    "action_id": self._last_action_id,
                     "operation_id": str(self._last_operation_id or "unknown"),
                     "device_id": device_id,
                     "action": "turn_off",
-                    "result": "confirmed" if stopped else "failed",
+                    "result": "confirmed" if stopped else self._last_operation_result,
                     "source": source,
                     "actor_id": actor_id,
                     "context_id": context_id,
                     "reason": self.reason_code,
                 }
             )
-            self._save_runtime_snapshot()
-            await self._store.async_save()
+            if not await self._persist_runtime_if_dirty() and not stopped:
+                raise RuntimeError("stop intent journal could not be persisted")
             return stopped
 
     def _read_current_device_power_for_clear(self, device: ManagedDevice) -> None:

@@ -1677,3 +1677,59 @@ async def test_explicit_arm_requires_post_arm_load_report_after_restart():
     coordinator._turn_on_device.assert_awaited_once_with(
         coordinator._model.get_device("d2")
     )
+
+
+@pytest.mark.asyncio
+async def test_observe_start_intent_persists_terminal_journal_before_return():
+    """Observe intent is durable and never reaches a physical service sink."""
+    store = RuntimeStore(_storage_fake())
+    await store.async_load()
+    coordinator = _coordinator(store=store, execution_mode="observe")
+
+    result = await coordinator.async_request_start(
+        "d1",
+        source="dashboard",
+        actor_id="user-1",
+        context_id="ctx-1",
+    )
+
+    assert result is False
+    coordinator.hass.services.async_call.assert_not_awaited()
+    history = store.audit_history()
+    assert len(history) == 1
+    assert history[0]["action_id"].startswith("intent-")
+    assert history[0]["phase"] == "observe_only"
+    assert history[0]["result"] == "observe_only"
+    assert history[0]["source"] == "dashboard"
+    assert history[0]["actor_id"] == "user-1"
+    assert history[0]["context_id"] == "ctx-1"
+
+
+@pytest.mark.asyncio
+async def test_physical_stop_journal_reuses_one_action_id_across_lifecycle():
+    """Prepared, dispatched, and confirmed stop states upsert one record."""
+    store = RuntimeStore(_storage_fake())
+    await store.async_load()
+    coordinator = _coordinator(store=store)
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    coordinator._confirm_device_state = AsyncMock(return_value=True)
+
+    result = await coordinator._turn_off_device(
+        device,
+        source="grid_loss",
+        actor_id="system",
+        context_id="ctx-grid",
+        emergency=True,
+    )
+    assert result is True
+    assert await coordinator._persist_runtime_if_dirty() is True
+
+    history = store.audit_history()
+    assert len(history) == 1
+    assert history[0]["action_id"].startswith("stop-")
+    assert history[0]["phase"] == "confirmed"
+    assert history[0]["result"] == "confirmed"
+    assert history[0]["source"] == "grid_loss"
+    assert history[0]["emergency"] is True
