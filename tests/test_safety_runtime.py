@@ -1028,7 +1028,11 @@ async def test_clear_quarantine_does_not_use_large_safety_reserve_as_off_proof()
     device.measured_power = 3000
     device.measured_power_valid = True
     coordinator._recovery_blocked.add(device.device_id)
-    coordinator.hass.states.get.side_effect = lambda entity_id: _state("off", {})
+    coordinator.hass.states.get.side_effect = lambda entity_id: (
+        _state("3000", {"unit_of_measurement": "W"})
+        if entity_id == "sensor.d1_power"
+        else _state("off", {})
+    )
     coordinator._load_samples.append(1000.0)
     coordinator._load_sensor_valid = True
     coordinator._load_reported_at = time.time()
