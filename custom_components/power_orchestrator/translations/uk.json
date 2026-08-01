@@ -7,30 +7,68 @@
     },
     "set_mode": {
       "name": "Встановити режим planner",
-      "description": "Увімкнути або вимкнути нормальне планування. Emergency stop залишається активним."
+      "description": "Увімкнути або вимкнути нормальне планування. Emergency stop залишається активним.",
+      "fields": {
+        "mode": {
+          "name": "Режим planner",
+          "description": "Auto вмикає нормальне планування; off залишає звичайні дії planner вимкненими. Це окремо від physical execution policy observe/live."
+        }
+      }
     },
     "request_start": {
       "name": "Запросити старт logical device",
       "description": "Guarded-запит старту через integration із перевіркою телеметрії, ownership, reserve та readback.",
       "fields": {
-        "device_id": {"name": "ID logical device", "description": "Стабільний device_id, а не raw switch entity ID."},
-        "source": {"name": "Джерело запиту", "description": "Мітка для audit, наприклад dashboard, automation або user."}
+        "device_id": {
+          "name": "ID logical device",
+          "description": "Стабільний device_id, а не raw switch entity ID."
+        },
+        "source": {
+          "name": "Джерело запиту",
+          "description": "Мітка для audit, наприклад dashboard, automation або user."
+        }
       }
     },
     "request_stop": {
       "name": "Запросити stop logical device",
       "description": "Guarded-запит вимкнення через integration, без прямого relay service.",
       "fields": {
-        "device_id": {"name": "ID logical device", "description": "Стабільний device_id, а не raw switch entity ID."},
-        "source": {"name": "Джерело запиту", "description": "Мітка для audit."}
+        "device_id": {
+          "name": "ID logical device",
+          "description": "Стабільний device_id, а не raw switch entity ID."
+        },
+        "source": {
+          "name": "Джерело запиту",
+          "description": "Мітка для audit."
+        }
       }
     },
     "set_execution_mode": {
       "name": "Встановити physical execution policy",
       "description": "Обрати observe або live. Live потребує явного підтвердження.",
       "fields": {
-        "execution_mode": {"name": "Execution policy", "description": "Observe лише приймає рішення й пише audit; live дозволяє guarded physical commands."},
-        "confirm_live": {"name": "Підтвердити live ownership", "description": "Має бути true для переходу в live."}
+        "execution_mode": {
+          "name": "Execution policy",
+          "description": "Observe лише приймає рішення й пише audit; live дозволяє guarded physical commands."
+        },
+        "confirm_live": {
+          "name": "Підтвердити live ownership",
+          "description": "Має бути true для переходу в live."
+        }
+      }
+    },
+    "clear_quarantine": {
+      "name": "Очистити quarantine пристрою",
+      "description": "Очистити persisted quarantine лише після перевірки свіжого OFF, валідної aggregate telemetry та безпечної measured power.",
+      "fields": {
+        "device_id": {
+          "name": "ID logical device",
+          "description": "Стабільний logical device_id, а не raw entity ID."
+        },
+        "source": {
+          "name": "Джерело очищення",
+          "description": "Audit label явного запиту оператора."
+        }
       }
     }
   },
@@ -180,6 +218,44 @@
           "grid_loss_sensor": "Використовується лише у binary-sensor mode. Сенсор має бути свіжим і показувати ON для нормальної роботи; OFF, unknown, stale або відсутній input викликає emergency stop необов'язкових пристроїв.",
           "battery_soc": "Використовується у battery-threshold mode. Потрібен свіжий сенсор з одиницею %; SoC на рівні/нижче порогу, unknown, stale або невалідний input блокує старти й викликає safety stop.",
           "battery_threshold": "Відсоток SoC, на рівні або нижче якого джерело безпеки вважається втраченим. Вищий поріг краще захищає батарею, але частіше блокує автоматичні старти."
+        }
+      },
+      "reconfigure": {
+        "title": "Переналаштувати Power Orchestrator",
+        "description": "Оновіть safety sources, thresholds, керовані пристрої та runtime limits без видалення інтеграції.",
+        "data": {
+          "load_sensor": "Сенсор загального навантаження",
+          "max_load": "Максимальне загальне навантаження (Вт)",
+          "averaging_period": "Період усереднення (с)",
+          "safety_reserve": "Запас безпеки (Вт)",
+          "hysteresis": "Гістерезис (Вт)",
+          "pause_period": "Період паузи (с)",
+          "grid_loss_mode": "Режим безпеки втрати мережі",
+          "grid_loss_sensor": "Binary sensor втрати мережі",
+          "battery_soc": "Сенсор заряду батареї",
+          "battery_threshold": "Поріг батареї (%)",
+          "solar_power": "Необов’язковий сенсор PV-телеметрії",
+          "solar_forecast_entry": "Config entry Forecast.Solar",
+          "battery_power": "Необов’язковий сенсор телеметрії батареї",
+          "devices": "Керовані logical devices",
+          "threshold_count": "Кількість порогів перевищення (1–10)"
+        },
+        "data_description": {
+          "load_sensor": "Авторитетний сенсор загального навантаження. Invalid, stale, unknown або неправильна одиниця блокує нормальні старти.",
+          "max_load": "Жорстка межа загального навантаження у ватах для допуску та shedding.",
+          "averaging_period": "Вікно середнього навантаження; воно не подовжує незалежні safety freshness limits.",
+          "safety_reserve": "Вати, зарезервовані нижче максимуму для запасу headroom.",
+          "hysteresis": "Додаткова ємність, потрібна перед стартом нового пристрою.",
+          "pause_period": "Скільки секунд planner-stopped device залишається на паузі перед recovery.",
+          "grid_loss_mode": "Оберіть авторитетне джерело безпеки втрати мережі.",
+          "grid_loss_sensor": "Обов’язковий у sensor mode; має бути свіжим і ON для нормальної роботи.",
+          "battery_soc": "Обов’язковий у battery-threshold mode; має бути свіжим, валідним і вище порогу.",
+          "battery_threshold": "SoC, при якому нормальні старти блокуються і діє safety shedding.",
+          "solar_power": "Необов’язкова фактична PV-телеметрія; вона не дозволяє старт.",
+          "solar_forecast_entry": "Джерело Forecast.Solar для перевірки точного прогнозу поточної потужності.",
+          "battery_power": "Необов’язкова телеметрія батареї для контексту й diagnostics.",
+          "devices": "Повні mappings logical devices: entities керування, expected watts, actuator groups, priorities і solar policy.",
+          "threshold_count": "Кількість finite, строго зростаючих power/time threshold pairs."
         }
       }
     },
@@ -345,6 +421,59 @@
           "off": "Вимкнено"
         }
       }
+    }
+  },
+  "exceptions": {
+    "invalid_service_source": {
+      "message": "Джерело запиту має бути непорожнім рядком."
+    },
+    "invalid_service_mode": {
+      "message": "Режим planner має бути auto або off."
+    },
+    "invalid_execution_mode": {
+      "message": "Execution mode має бути observe або live."
+    },
+    "entry_not_loaded": {
+      "message": "Power Orchestrator не завантажений."
+    },
+    "entry_not_unique": {
+      "message": "Потрібен рівно один завантажений entry Power Orchestrator."
+    },
+    "operation_failed": {
+      "message": "Операція Power Orchestrator завершилася помилкою."
+    },
+    "start_request_failed": {
+      "message": "Guarded-запит старту завершився помилкою."
+    },
+    "stop_request_failed": {
+      "message": "Guarded-запит вимкнення завершився помилкою."
+    },
+    "quarantine_clear_failed": {
+      "message": "Запит очищення quarantine завершився помилкою."
+    },
+    "execution_mode_change_failed": {
+      "message": "Зміна execution mode завершилася помилкою."
+    },
+    "evaluation_failed": {
+      "message": "Оцінювання Power Orchestrator завершилося помилкою."
+    },
+    "mode_change_failed": {
+      "message": "Зміна planner mode завершилася помилкою."
+    },
+    "missing_device_id": {
+      "message": "Потрібен ID logical device."
+    },
+    "request_rejected": {
+      "message": "Запит відхилено: {reason}."
+    },
+    "invalid_select_option": {
+      "message": "Непідтримуваний режим planner: {option}."
+    }
+  },
+  "issues": {
+    "quarantine_requires_reconciliation": {
+      "title": "Power Orchestrator потребує reconciliation пристрою",
+      "description": "Пристрій {device_id} у quarantine, бо після restart або failed readback не вдалося довести безпечний стан останньої дії чи ownership."
     }
   }
 }

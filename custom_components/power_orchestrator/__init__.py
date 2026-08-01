@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
@@ -31,7 +32,7 @@ except ImportError:  # pragma: no cover - local test doubles do not ship excepti
 
         pass
 
-    class ServiceValidationError(HomeAssistantError):  # type: ignore[no-redef]
+    class ServiceValidationError(HomeAssistantError):  # type: ignore[no-redef, misc]
         """Fallback validation error for the local Home Assistant test doubles."""
 
         pass
@@ -89,6 +90,7 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SELECT]
 _LIFECYCLE_KEY = f"{DOMAIN}_lifecycle"
+_REPAIR_ISSUE_IDS_KEY = f"{DOMAIN}_repair_issue_ids"
 
 _REGISTERED_SERVICES = (
     "force_evaluate",
@@ -101,6 +103,95 @@ _REGISTERED_SERVICES = (
 
 _ALLOWED_CONTROL_DOMAINS = frozenset({"switch", "light", "input_boolean"})
 _ALLOWED_ACTUATOR_DOMAINS = frozenset({"switch", "light", "input_boolean", "climate"})
+
+
+def _translated_error(
+    exception_type: type[Exception],
+    translation_key: str,
+    *,
+    reason: str | None = None,
+) -> Exception:
+    """Build a localized HA exception while supporting local test doubles."""
+    placeholders = {"reason": reason} if reason else None
+    factory = cast(Any, exception_type)
+    try:
+        created: Exception = factory(
+            translation_domain=DOMAIN,
+            translation_key=translation_key,
+            translation_placeholders=placeholders,
+        )
+        return created
+    except TypeError:
+        return exception_type(translation_key)
+
+
+def _repair_issue_id(device_id: str) -> str:
+    """Return a collision-resistant, stable issue ID for a device."""
+    digest = hashlib.sha256(device_id.encode("utf-8")).hexdigest()[:20]
+    return f"quarantine_{digest}"
+
+
+def _repair_device_ids(data: Mapping[str, Any], key: str) -> set[str]:
+    """Return valid persisted device IDs from one quarantine collection."""
+    values = data.get(key, ())
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return set()
+    return {
+        device_id
+        for device_id in values
+        if isinstance(device_id, str) and device_id
+    }
+
+
+def _sync_repair_issues(
+    hass: HomeAssistant,
+    coordinator: PowerOrchestratorCoordinator,
+    model: PowerModel,
+) -> None:
+    """Mirror durable quarantine state into the Home Assistant issue registry."""
+    try:
+        from homeassistant.helpers.issue_registry import (
+            IssueSeverity,
+            async_create_issue,
+            async_delete_issue,
+        )
+    except ImportError:  # pragma: no cover - local Home Assistant test doubles
+        return
+
+    data = getattr(coordinator, "data", None) or {}
+    if not isinstance(data, Mapping):
+        data = {}
+    active_ids = set().union(
+        _repair_device_ids(data, "faulted_devices"),
+        _repair_device_ids(data, "recovery_blocked_devices"),
+    )
+    # The persisted coordinator state is authoritative.  Keep an issue even
+    # when a device mapping was removed: deleting it would hide an unresolved
+    # physical action and would weaken the fail-closed boundary.
+    desired_issue_ids = {_repair_issue_id(device_id) for device_id in active_ids}
+    hass_data = getattr(hass, "data", None)
+    if not isinstance(hass_data, dict):
+        hass_data = {}
+        setattr(hass, "data", hass_data)
+    previous_issue_ids = set(hass_data.get(_REPAIR_ISSUE_IDS_KEY, ()))
+
+    for device_id in sorted(active_ids):
+        async_create_issue(
+            hass,
+            DOMAIN,
+            _repair_issue_id(device_id),
+            is_fixable=False,
+            is_persistent=True,
+            issue_domain=DOMAIN,
+            learn_more_url="https://github.com/yeaxi/power_orchestrator#troubleshooting",
+            severity=IssueSeverity.ERROR,
+            translation_key="quarantine_requires_reconciliation",
+            translation_placeholders={"device_id": device_id},
+        )
+
+    for issue_id in sorted(previous_issue_ids - desired_issue_ids):
+        async_delete_issue(hass, DOMAIN, issue_id)
+    hass_data[_REPAIR_ISSUE_IDS_KEY] = desired_issue_ids
 
 
 def _lifecycle_state(hass: HomeAssistant) -> dict[str, Any]:
@@ -489,11 +580,21 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
             _unregister_services(hass)
         raise
 
-    # ── Store references ───────────────────────────────────────────
+    # ── Store references ────────────────────────────────────────────
+    repair_listener_remove = None
+    add_update_listener = getattr(coordinator, "async_add_listener", None)
+    if callable(add_update_listener):
+        repair_listener_remove = add_update_listener(
+            lambda: _sync_repair_issues(hass, coordinator, model)
+        )
+    _sync_repair_issues(hass, coordinator, model)
     runtime_data = PowerOrchestratorRuntimeData(
         coordinator=coordinator,
         model=model,
         store=runtime_store,
+        repair_listener_remove=(
+            repair_listener_remove if callable(repair_listener_remove) else None
+        ),
     )
     entry.runtime_data = runtime_data
 
@@ -501,6 +602,11 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     try:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except Exception:
+        remove_repair_listener = getattr(
+            runtime_data, "repair_listener_remove", None
+        )
+        if callable(remove_repair_listener):
+            remove_repair_listener()
         entry.runtime_data = None
         shutdown = getattr(coordinator, "async_shutdown", None)
         if callable(shutdown):
@@ -560,7 +666,7 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
                 return
             state_worker_task = asyncio.create_task(_run_state_worker())
 
-        async def _state_listener(event) -> None:
+        async def _state_listener(event: Any) -> None:
             """Mark relevant state changes and schedule one coalesced worker."""
             nonlocal state_dirty
             event_data = getattr(event, "data", {}) or {}
@@ -598,6 +704,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if runtime is not None and unload_ok:
         store = getattr(runtime, "store", None)
         coordinator = getattr(runtime, "coordinator", None)
+        remove_repair_listener = getattr(runtime, "repair_listener_remove", None)
+        if callable(remove_repair_listener):
+            remove_repair_listener()
         try:
             if store is not None and coordinator is not None:
                 save_runtime_snapshot = getattr(coordinator, "_save_runtime_snapshot", None)
@@ -626,7 +735,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok and not _loaded_runtimes(hass):
         _unregister_services(hass)
 
-    return unload_ok
+    return bool(unload_ok)
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -641,8 +750,9 @@ async def _register_services(hass: HomeAssistant) -> None:
     def require_single_runtime() -> PowerOrchestratorRuntimeData:
         runtimes = _loaded_runtimes(hass)
         if len(runtimes) != 1:
-            raise HomeAssistantError(
-                "Power Orchestrator requires exactly one loaded config entry"
+            raise _translated_error(
+                HomeAssistantError,
+                "entry_not_unique",
             )
         return runtimes[0]
 
@@ -658,12 +768,15 @@ async def _register_services(hass: HomeAssistant) -> None:
         result.update(extra)
         return result
 
-    def service_actor_context(call) -> tuple[str, str, str | None]:
+    def service_actor_context(call: Any) -> tuple[str, str, str | None]:
         """Normalize source and HA context for guarded intent audit records."""
         data = getattr(call, "data", {}) or {}
         source = data.get("source", "service")
         if not isinstance(source, str) or not source.strip():
-            raise ServiceValidationError("source must be a non-empty string")
+            raise _translated_error(
+                ServiceValidationError,
+                "invalid_service_source",
+            )
         context = getattr(call, "context", None)
         user_id = getattr(context, "user_id", None)
         context_id = getattr(context, "id", None)
@@ -671,36 +784,52 @@ async def _register_services(hass: HomeAssistant) -> None:
         normalized_context_id = context_id if isinstance(context_id, str) and context_id else None
         return source.strip(), actor_id, normalized_context_id
 
-    async def handle_force_evaluate(call) -> dict[str, Any]:
+    async def handle_force_evaluate(call: Any) -> dict[str, Any]:
         """Force immediate re-evaluation for the singleton entry."""
         runtime = require_single_runtime()
         try:
             await runtime.coordinator.async_force_evaluate()
         except Exception as exc:
-            raise HomeAssistantError("Power Orchestrator evaluation failed") from exc
+            raise _translated_error(
+                HomeAssistantError,
+                "evaluation_failed",
+            ) from exc
         return service_result(runtime, accepted=True, action="force_evaluate")
 
-    async def handle_set_mode(call) -> dict[str, Any]:
+    async def handle_set_mode(call: Any) -> dict[str, Any]:
         """Set the orchestrator mode for the singleton entry."""
         data = getattr(call, "data", {}) or {}
         mode = data.get("mode")
         if mode not in (MODE_AUTO, MODE_OFF):
-            raise ServiceValidationError("mode must be auto or off")
+            raise _translated_error(
+                ServiceValidationError,
+                "invalid_service_mode",
+            )
         runtime = require_single_runtime()
         try:
             await runtime.coordinator.async_set_mode(mode)
         except ValueError as exc:
-            raise ServiceValidationError(str(exc)) from exc
+            raise _translated_error(
+                ServiceValidationError,
+                "request_rejected",
+                reason=str(exc),
+            ) from exc
         except Exception as exc:
-            raise HomeAssistantError("Power Orchestrator mode change failed") from exc
+            raise _translated_error(
+                HomeAssistantError,
+                "mode_change_failed",
+            ) from exc
         return service_result(runtime, accepted=True, action="set_mode", requested_mode=mode)
 
-    async def handle_request_start(call) -> dict[str, Any]:
+    async def handle_request_start(call: Any) -> dict[str, Any]:
         """Request a guarded logical-device start; never call relay services directly."""
         data = getattr(call, "data", {}) or {}
         device_id = data.get("device_id")
         if not isinstance(device_id, str) or not device_id:
-            raise ServiceValidationError("device_id is required")
+            raise _translated_error(
+                ServiceValidationError,
+                "missing_device_id",
+            )
         source, actor_id, context_id = service_actor_context(call)
         runtime = require_single_runtime()
         try:
@@ -711,9 +840,16 @@ async def _register_services(hass: HomeAssistant) -> None:
                 context_id=context_id,
             )
         except ValueError as exc:
-            raise ServiceValidationError(str(exc)) from exc
+            raise _translated_error(
+                ServiceValidationError,
+                "request_rejected",
+                reason=str(exc),
+            ) from exc
         except Exception as exc:
-            raise HomeAssistantError("Power Orchestrator start request failed") from exc
+            raise _translated_error(
+                HomeAssistantError,
+                "start_request_failed",
+            ) from exc
         return service_result(
             runtime,
             accepted=accepted,
@@ -724,12 +860,15 @@ async def _register_services(hass: HomeAssistant) -> None:
             context_id=context_id,
         )
 
-    async def handle_request_stop(call) -> dict[str, Any]:
+    async def handle_request_stop(call: Any) -> dict[str, Any]:
         """Request a guarded logical-device stop."""
         data = getattr(call, "data", {}) or {}
         device_id = data.get("device_id")
         if not isinstance(device_id, str) or not device_id:
-            raise ServiceValidationError("device_id is required")
+            raise _translated_error(
+                ServiceValidationError,
+                "missing_device_id",
+            )
         source, actor_id, context_id = service_actor_context(call)
         runtime = require_single_runtime()
         try:
@@ -740,9 +879,16 @@ async def _register_services(hass: HomeAssistant) -> None:
                 context_id=context_id,
             )
         except ValueError as exc:
-            raise ServiceValidationError(str(exc)) from exc
+            raise _translated_error(
+                ServiceValidationError,
+                "request_rejected",
+                reason=str(exc),
+            ) from exc
         except Exception as exc:
-            raise HomeAssistantError("Power Orchestrator stop request failed") from exc
+            raise _translated_error(
+                HomeAssistantError,
+                "stop_request_failed",
+            ) from exc
         return service_result(
             runtime,
             accepted=accepted,
@@ -753,12 +899,15 @@ async def _register_services(hass: HomeAssistant) -> None:
             context_id=context_id,
         )
 
-    async def handle_clear_quarantine(call) -> dict[str, Any]:
+    async def handle_clear_quarantine(call: Any) -> dict[str, Any]:
         """Clear a device quarantine only after coordinator safety proof."""
         data = getattr(call, "data", {}) or {}
         device_id = data.get("device_id")
         if not isinstance(device_id, str) or not device_id:
-            raise ServiceValidationError("device_id is required")
+            raise _translated_error(
+                ServiceValidationError,
+                "missing_device_id",
+            )
         source, actor_id, context_id = service_actor_context(call)
         runtime = require_single_runtime()
         try:
@@ -769,9 +918,16 @@ async def _register_services(hass: HomeAssistant) -> None:
                 context_id=context_id,
             )
         except ValueError as exc:
-            raise ServiceValidationError(str(exc)) from exc
+            raise _translated_error(
+                ServiceValidationError,
+                "request_rejected",
+                reason=str(exc),
+            ) from exc
         except Exception as exc:
-            raise HomeAssistantError("Power Orchestrator quarantine clear failed") from exc
+            raise _translated_error(
+                HomeAssistantError,
+                "quarantine_clear_failed",
+            ) from exc
         return service_result(
             runtime,
             accepted=accepted,
@@ -782,13 +938,16 @@ async def _register_services(hass: HomeAssistant) -> None:
             context_id=context_id,
         )
 
-    async def handle_set_execution_mode(call) -> dict[str, Any]:
+    async def handle_set_execution_mode(call: Any) -> dict[str, Any]:
         """Change observe/live ownership; live requires explicit confirmation."""
         data = getattr(call, "data", {}) or {}
         execution_mode = data.get("execution_mode")
         confirm_live = data.get("confirm_live", False) is True
         if execution_mode not in ("observe", "live"):
-            raise ServiceValidationError("execution_mode must be observe or live")
+            raise _translated_error(
+                ServiceValidationError,
+                "invalid_execution_mode",
+            )
         runtime = require_single_runtime()
         try:
             await runtime.coordinator.async_set_execution_mode(
@@ -796,9 +955,16 @@ async def _register_services(hass: HomeAssistant) -> None:
                 confirm_live=confirm_live,
             )
         except ValueError as exc:
-            raise ServiceValidationError(str(exc)) from exc
+            raise _translated_error(
+                ServiceValidationError,
+                "request_rejected",
+                reason=str(exc),
+            ) from exc
         except Exception as exc:
-            raise HomeAssistantError("Power Orchestrator execution-mode change failed") from exc
+            raise _translated_error(
+                HomeAssistantError,
+                "execution_mode_change_failed",
+            ) from exc
         return service_result(
             runtime,
             accepted=True,

@@ -101,6 +101,26 @@ def test_current_power_forecast_w_uses_last_reported_not_last_updated():
     assert current_power_forecast_w(state, now=NOW) == 2000.0
 
 
+def test_forecast_rejects_invalid_reference_time_and_registry_identity():
+    state = make_state(2000, "W")
+    assert current_power_forecast_w(state, now="invalid") is None
+    assert resolve_current_power_forecast_entity(MagicMock(), "") is None
+
+    registry = SimpleNamespace(
+        entities={
+            "not_sensor": _registry_entry(
+                "switch.forecast_now",
+                unique_id="forecast-entry_power_production_now",
+            )
+        }
+    )
+    with patch(
+        "power_orchestrator.forecast.async_get_entity_registry",
+        return_value=registry,
+    ):
+        assert resolve_current_power_forecast_entity(MagicMock(), "forecast-entry") is None
+
+
 def _registry_entry(
     entity_id,
     entry_id="forecast-entry",

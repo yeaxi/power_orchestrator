@@ -1,15 +1,23 @@
 """Pure policy/state tests for the load-shedding contract."""
 from __future__ import annotations
 
+import math
+
+import pytest
+
 from power_orchestrator.policy import (
     DEFAULT_POLICY,
     AuthorizationLease,
     Ownership,
+    PolicyConfig,
     PolicyEngine,
     PolicyPhase,
     ReasonCode,
     ShedStackEntry,
     TelemetryValidity,
+    ThresholdTier,
+    TelemetrySample,
+    validate_threshold_pair,
 )
 
 
@@ -160,3 +168,104 @@ def test_custom_thresholds_are_bounded_and_positive():
     assert PolicyConfig.from_mapping(
         {"thresholds": [{"power_limit": 6200, "duration_s": 0}]}
     ) == DEFAULT_POLICY
+
+
+def test_policy_validation_and_mapping_fallbacks_are_fail_closed():
+    with pytest.raises(ValueError):
+        validate_threshold_pair(0, 1)
+    with pytest.raises(ValueError):
+        validate_threshold_pair(100, math.inf)
+    with pytest.raises(ValueError):
+        validate_threshold_pair(100, 1, previous_power=100)
+
+    with pytest.raises(ValueError):
+        ThresholdTier("", 1, 1, ReasonCode.FAULT)
+    with pytest.raises(ValueError):
+        ThresholdTier("bad", -1, 1, ReasonCode.FAULT)
+    with pytest.raises(ValueError):
+        PolicyConfig(recovery_start_w=7000, recovery_target_w=6000)
+    with pytest.raises(ValueError):
+        PolicyConfig(recovery_low_duration_s=-1)
+    with pytest.raises(ValueError):
+        PolicyConfig(safety_reserve_w=-1)
+    with pytest.raises(ValueError):
+        PolicyConfig(
+            thresholds=(
+                ThresholdTier("a", 10, 1, ReasonCode.FAULT),
+                ThresholdTier("b", 10, 1, ReasonCode.FAULT),
+            )
+        )
+    with pytest.raises(ValueError):
+        PolicyConfig(hard_interlock_w=0)
+    with pytest.raises(ValueError):
+        PolicyConfig(hard_interlock_w=7000)
+
+    assert PolicyConfig.from_mapping({"thresholds": []}) == DEFAULT_POLICY
+    assert PolicyConfig.from_mapping({"thresholds": ["bad"]}) == DEFAULT_POLICY
+    assert PolicyConfig.from_mapping(
+        {"thresholds": [{"power_limit": True, "duration_s": 1}]}
+    ) == DEFAULT_POLICY
+    assert PolicyConfig.from_mapping(
+        {"thresholds": [{"limit_w": 6200, "time_s": 10}]}
+    ).thresholds[0].limit_w == 6200
+    assert PolicyConfig.from_mapping(
+        {"recovery_start": 7000, "recovery_target": 6000}
+    ) == DEFAULT_POLICY
+    assert PolicyConfig.from_mapping(
+        {"hard_interlock": 7000}
+    ) == DEFAULT_POLICY
+
+
+def test_policy_engine_hard_interlock_and_reconciliation_fences():
+    policy = PolicyConfig(hard_interlock_w=9000)
+    engine = PolicyEngine(policy)
+    decision = engine.observe_load(9000, now=0.0)
+    assert decision.triggered is True
+    assert decision.reason_code is ReasonCode.HARD_INTERLOCK
+
+    entry = ShedStackEntry(
+        device_id="d1",
+        operation_id="op-1",
+        pre_state=True,
+        snapshot={},
+        load_generation=4,
+    )
+    engine.append_shed(entry)
+    assert engine.can_shed_again(4) is False
+    assert engine.can_shed_again(5) is True
+    engine.set_post_shed_fence(None)
+    assert engine.reconcile_shed(5, reported_at=10) is False
+    engine.set_post_shed_fence(math.inf)
+    assert engine.reconcile_shed(5, reported_at=10) is False
+    engine.set_post_shed_fence(10)
+    assert engine.reconcile_shed(4, reported_at=11) is False
+    assert engine.reconcile_shed(5, reported_at=10) is False
+    assert engine.reconcile_shed(5, reported_at=11) is True
+    assert engine.can_shed_again(4) is True
+
+    assert engine.pop_restore_target() is entry
+    assert engine.pop_restore_target() is None
+    assert engine.runtime.restore_target is None
+
+
+def test_policy_numeric_fallbacks_and_telemetry_sample_validity():
+    policy = PolicyConfig.from_mapping(
+        {
+            "policy_version": "custom-policy",
+            "recovery_target": "bad",
+            "recovery_start": True,
+            "safety_reserve": "bad",
+            "hard_interlock": "bad",
+        }
+    )
+    assert policy.policy_version == "custom-policy"
+    assert policy.recovery_target_w == 6000.0
+    assert policy.recovery_start_w == 5000.0
+    assert policy.safety_reserve_w == 500.0
+    assert policy.hard_interlock_w == 9000.0
+
+    valid = TelemetrySample("sensor.load", 1.0, "W", 1.0, 1, TelemetryValidity.VALID)
+    invalid = TelemetrySample("sensor.load", None, "W", 1.0, 1, TelemetryValidity.INVALID)
+    assert valid.is_valid is True
+    assert invalid.is_valid is False
+    assert PolicyEngine(DEFAULT_POLICY).observe_load(-1, now=1).reason_code is ReasonCode.TELEMETRY_INVALID

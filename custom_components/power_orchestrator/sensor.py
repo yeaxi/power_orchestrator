@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional, cast
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -10,7 +10,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfPower
+from homeassistant.const import EntityCategory, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -44,13 +44,13 @@ async def async_setup_entry(
     )
 
 
-class PowerOrchestratorSensorBase(CoordinatorEntity, SensorEntity):
+class PowerOrchestratorSensorBase(CoordinatorEntity, SensorEntity):  # type: ignore[misc]
     """Base sensor for Power Orchestrator."""
 
     _attr_has_entity_name = True
     _requires_valid_load = False
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
         self._entry = entry
         self._attr_device_info = {
@@ -61,7 +61,7 @@ class PowerOrchestratorSensorBase(CoordinatorEntity, SensorEntity):
         }
 
     @property
-    def _coordinator(self):
+    def _coordinator(self) -> Any:
         return self.coordinator
 
     @property
@@ -76,15 +76,15 @@ class PowerOrchestratorStatusSensor(PowerOrchestratorSensorBase):
     """Current orchestrator status."""
 
     _attr_translation_key = "status"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry)
         self._attr_unique_id = f"{entry.entry_id}_sensor_status"
-        self._attr_icon = "mdi:heart-pulse"
 
     @property
     def native_value(self) -> str:
-        return self.coordinator.status
+        return cast(str, self.coordinator.status)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -115,14 +115,13 @@ class PowerOrchestratorCurrentLoadSensor(PowerOrchestratorSensorBase):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = UnitOfPower.WATT
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry)
         self._attr_unique_id = f"{entry.entry_id}_sensor_current_load"
-        self._attr_icon = "mdi:flash"
 
     @property
     def native_value(self) -> float | None:
-        return self.coordinator.current_load
+        return cast(Optional[float], self.coordinator.current_load)
 
 
 class PowerOrchestratorAverageLoadSensor(PowerOrchestratorSensorBase):
@@ -135,14 +134,13 @@ class PowerOrchestratorAverageLoadSensor(PowerOrchestratorSensorBase):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = UnitOfPower.WATT
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry)
         self._attr_unique_id = f"{entry.entry_id}_sensor_average_load"
-        self._attr_icon = "mdi:chart-bell-curve"
 
     @property
     def native_value(self) -> float | None:
-        return self.coordinator.average_load
+        return cast(Optional[float], self.coordinator.average_load)
 
 
 class PowerOrchestratorAvailableCapacitySensor(PowerOrchestratorSensorBase):
@@ -155,44 +153,43 @@ class PowerOrchestratorAvailableCapacitySensor(PowerOrchestratorSensorBase):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = UnitOfPower.WATT
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry)
         self._attr_unique_id = f"{entry.entry_id}_sensor_available_capacity"
-        self._attr_icon = "mdi:battery-positive"
 
     @property
     def native_value(self) -> float | None:
-        return self.coordinator.available_capacity
+        return cast(Optional[float], self.coordinator.available_capacity)
 
 
 class PowerOrchestratorLastActionSensor(PowerOrchestratorSensorBase):
     """Last action text."""
 
     _attr_translation_key = "last_action"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry)
         self._attr_unique_id = f"{entry.entry_id}_sensor_last_action"
-        self._attr_icon = "mdi:clipboard-text-clock"
 
     @property
     def native_value(self) -> str:
-        return self.coordinator.last_action
+        return cast(str, self.coordinator.last_action)
 
 
 class PowerOrchestratorExecutionModeSensor(PowerOrchestratorSensorBase):
     """Physical execution boundary: observe or live."""
 
     _attr_translation_key = "execution_mode"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry)
         self._attr_unique_id = f"{entry.entry_id}_sensor_execution_mode"
-        self._attr_icon = "mdi:shield-lock"
 
     @property
     def native_value(self) -> str:
-        return self.coordinator.execution_mode
+        return cast(str, self.coordinator.execution_mode)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -208,15 +205,15 @@ class PowerOrchestratorReasonCodeSensor(PowerOrchestratorSensorBase):
     """Typed policy/safety reason for the current decision."""
 
     _attr_translation_key = "reason_code"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry)
         self._attr_unique_id = f"{entry.entry_id}_sensor_reason_code"
-        self._attr_icon = "mdi:information-outline"
 
     @property
     def native_value(self) -> str:
-        return self.coordinator.reason_code
+        return cast(str, self.coordinator.reason_code)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -233,11 +230,11 @@ class PowerOrchestratorLastOperationSensor(PowerOrchestratorSensorBase):
     """Last guarded action result and bounded journal diagnostics."""
 
     _attr_translation_key = "last_operation"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry)
         self._attr_unique_id = f"{entry.entry_id}_sensor_last_operation"
-        self._attr_icon = "mdi:timeline-check-outline"
 
     @property
     def native_value(self) -> str:

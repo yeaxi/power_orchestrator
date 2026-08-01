@@ -28,11 +28,13 @@ from power_orchestrator.const import (
 from power_orchestrator.coordinator import PowerOrchestratorCoordinator
 from power_orchestrator.policy import (
     DEFAULT_POLICY,
+    AuthorizationLease,
     Ownership,
     PolicyConfig,
     PolicyPhase,
     ReasonCode,
     ShedStackEntry,
+    ThresholdTier,
 )
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 from power_orchestrator.storage import RuntimeStore
@@ -224,6 +226,60 @@ def test_battery_threshold_above_is_ok():
         "20.01", {"unit_of_measurement": "%"}
     )
     assert coordinator.grid_ok is True
+
+
+def test_grid_safety_source_configuration_is_explicit():
+    sensor = _coordinator()
+    assert sensor.grid_safety_source_configured is True
+    sensor._grid_loss_sensor = None
+    assert sensor.grid_safety_source_configured is False
+
+    threshold = _coordinator(
+        grid_loss_mode=GRID_LOSS_MODE_THRESHOLD,
+        grid_loss_sensor=None,
+        battery_soc_sensor="sensor.soc",
+        battery_threshold=20,
+    )
+    assert threshold.grid_safety_source_configured is True
+    threshold._battery_threshold = None
+    assert threshold.grid_safety_source_configured is False
+    threshold._grid_loss_mode = "invalid"
+    assert threshold.grid_safety_source_configured is False
+
+
+def test_state_report_timestamp_and_freshness_fail_closed():
+    coordinator = _coordinator()
+    naive = SimpleNamespace(last_reported=datetime.now())
+    assert coordinator._state_reported_timestamp(naive) is not None
+    assert coordinator._state_reported_timestamp(SimpleNamespace(last_reported=123.5)) == 123.5
+    assert coordinator._state_reported_timestamp(SimpleNamespace(last_reported=True)) is None
+    assert coordinator._state_reported_timestamp(SimpleNamespace(last_reported=float("inf"))) is None
+    assert coordinator._state_reported_timestamp(SimpleNamespace(last_reported="bad")) is None
+
+    assert coordinator._state_is_fresh(_state("on")) is True
+    assert coordinator._state_is_fresh(
+        SimpleNamespace(last_reported=time.time() - SAFETY_INPUT_MAX_AGE_SECONDS - 1)
+    ) is False
+    assert coordinator._state_is_fresh(SimpleNamespace(last_reported=time.time() + 1)) is False
+
+
+def test_pending_start_reservation_is_singleton_and_releasable():
+    coordinator = _coordinator()
+    coordinator._load_sensor_valid = True
+    coordinator._load_samples.append(100.0)
+    coordinator._load_reported_at = 10.0
+    coordinator._load_generation = 3
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+
+    pending = coordinator._reserve_pending_start(device)
+    assert pending.device_id == "d1"
+    assert coordinator.pending_start_power == 1000
+    with pytest.raises(RuntimeError, match="already active"):
+        coordinator._reserve_pending_start(device)
+    coordinator._clear_pending_start()
+    assert coordinator.pending_start_power == 0.0
+
 
 
 def test_battery_threshold_wrong_unit_is_fail_closed():
@@ -1714,6 +1770,54 @@ async def test_pending_start_timeout_enters_recovery_and_stops_device():
 
 
 @pytest.mark.asyncio
+async def test_evaluator_error_fails_closed_and_attempts_emergency_handling():
+    coordinator = _coordinator()
+    coordinator._evaluate = AsyncMock(side_effect=RuntimeError("unexpected"))
+    coordinator._handle_grid_loss = AsyncMock()
+    coordinator._persist_fault_state_if_dirty = AsyncMock()
+    coordinator._notify_faults = AsyncMock()
+    coordinator._retry_fault_notification_dismissals = AsyncMock()
+
+    await coordinator._evaluate_safely()
+
+    assert coordinator.status == STATUS_SAFETY_BLOCKED
+    assert coordinator.load_sensor_valid is False
+    assert coordinator.load_sensor_reason == "evaluation_error"
+    coordinator._handle_grid_loss.assert_awaited_once()
+    coordinator._persist_fault_state_if_dirty.assert_awaited_once()
+    coordinator._notify_faults.assert_awaited_once()
+    coordinator._retry_fault_notification_dismissals.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_evaluation_blocks_without_usable_sample_and_hard_interlock_bypasses_dwell():
+    coordinator = _coordinator()
+    coordinator._refresh_device_states = AsyncMock()
+    coordinator._expire_pending_start_if_needed = AsyncMock()
+    coordinator._read_load_sensor = MagicMock(return_value=1000.0)
+    coordinator._load_sensor_valid = True
+    coordinator._accept_load_report = MagicMock(return_value=False)
+    coordinator.hass.states.get.return_value = _state("on", {})
+    await coordinator._evaluate()
+    assert coordinator.status == STATUS_SAFETY_BLOCKED
+    assert coordinator.load_sensor_reason == "no_usable_sample"
+
+    interlock = _coordinator(policy=PolicyConfig.from_mapping({"hard_interlock": 9000}))
+    interlock._refresh_device_states = AsyncMock()
+    interlock._expire_pending_start_if_needed = AsyncMock()
+    interlock._read_load_sensor = MagicMock(return_value=9000.0)
+    interlock._load_sensor_valid = True
+    interlock._load_reported_at = time.time()
+    interlock._load_samples.append(9000.0)
+    interlock._accept_load_report = MagicMock(return_value=False)
+    interlock.hass.states.get.return_value = _state("on", {})
+    interlock._perform_emergency_all_stop = AsyncMock()
+    await interlock._evaluate()
+    assert interlock.status == STATUS_LOAD_SHEDDING
+    interlock._perform_emergency_all_stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_forced_evaluations_are_serialized():
     coordinator = _coordinator()
     active = 0
@@ -1916,6 +2020,75 @@ def test_startup_treats_prepared_action_as_ambiguous_quarantine():
     assert store.audit_history()[0]["reason"] == "persisted_action_prepared_ambiguous"
 
 
+
+def test_coordinator_restore_and_projection_paths_fail_closed():
+    coordinator = _coordinator()
+    coordinator.restore_fault_notification_state(
+        {"d1": "a" * 200, "unknown": "ignored", "bad": 1},
+        {"d2": "pending", "unknown": "ignored", "bad": 1},
+    )
+    assert coordinator._fault_notification_fingerprints == {"d1": "a" * 128}
+    assert coordinator._fault_notification_pending_fingerprints == {"d2": "pending"}
+
+    coordinator.restore_action_journal(
+        [
+            {"device_id": "unknown", "action_id": "x", "phase": "prepared"},
+            {"device_id": "d1", "action_id": "x", "phase": "invalid"},
+            {"device_id": "d1", "action_id": "prepared-1", "phase": "prepared"},
+            {"device_id": "d2", "action_id": "dispatched-1", "phase": "dispatched"},
+        ],
+        journal_invalid=True,
+    )
+    assert coordinator.action_journal_invalid is True
+    assert coordinator.safety_storage_invalid is True
+    assert coordinator._faulted == {"d1", "d2"}
+    assert coordinator._recovery_blocked == {"d1", "d2"}
+    assert coordinator._fault_reasons["d1"] == "persisted_action_prepared_ambiguous"
+    assert coordinator._fault_reasons["d2"] == "persisted_action_dispatched_unresolved"
+
+    coordinator.restore_device_runtime(
+        ["d1", "unknown"],
+        ["d2", "unknown"],
+        fault_reasons={"d1": "fault", "unknown": "ignored", "bad": 1},
+        storage_invalid=False,
+    )
+    assert coordinator.safety_storage_invalid is False
+    assert coordinator._model.get_device("d1").is_on is None
+    assert coordinator._model.get_device("d2").is_on is None
+
+    coordinator._store.audit_history.return_value = "invalid"
+    coordinator._store.unresolved_actions.return_value = {"invalid": True}
+    data = coordinator._build_data()
+    assert data["audit_history"] == []
+    assert data["journal_unresolved_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_coordinator_dirty_persistence_retains_failure_flags():
+    coordinator = _coordinator()
+    assert await coordinator._persist_runtime_if_dirty() is True
+    coordinator._journal_dirty = True
+    coordinator._save_runtime_snapshot = MagicMock(side_effect=RuntimeError("save"))
+    assert await coordinator._persist_runtime_if_dirty() is False
+    assert coordinator._journal_persistence_blocked is True
+
+    coordinator._save_runtime_snapshot = MagicMock()
+    coordinator._store.async_save = AsyncMock()
+    assert await coordinator._persist_runtime_if_dirty() is True
+    assert coordinator._journal_dirty is False
+
+
+def test_mode_setter_rejects_invalid_and_invalid_storage_auto_arm():
+    coordinator = _coordinator()
+    with pytest.raises(ValueError, match="Unsupported mode"):
+        coordinator.mode = "invalid"
+    coordinator._safety_storage_invalid = True
+    with pytest.raises(ValueError, match="safety storage"):
+        coordinator.mode = MODE_AUTO
+    coordinator.mode = MODE_OFF
+    coordinator._store.set_mode.assert_called_with(MODE_OFF)
+
+
 def test_startup_quarantines_dispatched_action_until_reconciliation():
     store = RuntimeStore(_storage_fake())
     store.record_action(
@@ -1936,3 +2109,892 @@ def test_startup_quarantines_dispatched_action_until_reconciliation():
     assert coordinator.safety_storage_invalid is True
     assert coordinator._model.get_device("d1").is_on is None
     assert coordinator._fault_reasons["d1"] == "persisted_action_dispatched_unresolved"
+
+
+# ── Remaining coordinator lifecycle/error boundaries ────────────────
+
+
+def _prepare_waiting_pending(coordinator, device):
+    coordinator._load_reported_at = 100.0
+    coordinator._load_generation = 0
+    pending = coordinator._reserve_pending_start(device)
+    pending.phase = "waiting_load_telemetry"
+    pending.on_confirmed_reported_at = 150.0
+    coordinator._load_reported_at = 200.0
+    coordinator._load_generation = 1
+    return pending
+
+
+def test_coordinator_typed_properties_expose_controller_state():
+    coordinator = _coordinator(policy=DEFAULT_POLICY)
+    assert coordinator.policy is coordinator._policy
+    assert coordinator.shed_stack == []
+    assert coordinator.startup_safe is False
+    coordinator._startup_safe = True
+    assert coordinator.startup_safe is True
+
+
+@pytest.mark.asyncio
+async def test_pending_reconciliation_handles_missing_and_changed_targets():
+    coordinator = _coordinator()
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    _prepare_waiting_pending(coordinator, device)
+    coordinator._model._devices.pop(device.device_id)
+
+    await coordinator._reconcile_pending_start()
+
+    assert coordinator.status == STATUS_SAFETY_BLOCKED
+    assert coordinator.pending_start_power == 0
+
+    changed = _coordinator(policy=DEFAULT_POLICY)
+    target = changed._model.get_device("d1")
+    other = changed._model.get_device("d2")
+    assert target is not None and other is not None
+    _prepare_waiting_pending(changed, target)
+    pending_entry = ShedStackEntry(
+        device_id=target.device_id,
+        operation_id="restore-1",
+        pre_state=True,
+        snapshot={"switch.d1": {"state": "on"}},
+        load_generation=1,
+    )
+    changed._pending_restore_entry = pending_entry
+    changed._policy_engine.runtime.shed_stack = [
+        ShedStackEntry(
+            device_id=other.device_id,
+            operation_id="restore-2",
+            pre_state=True,
+            snapshot={"switch.d2": {"state": "on"}},
+            load_generation=1,
+        )
+    ]
+
+    await changed._reconcile_pending_start()
+
+    assert changed.status == STATUS_SAFETY_BLOCKED
+    assert "stack target changed" in changed.last_action
+
+
+@pytest.mark.asyncio
+async def test_pending_restore_pop_retries_after_persistence_failure():
+    backing = _storage_fake()
+    store = RuntimeStore(backing)
+    await store.async_load()
+    coordinator = _coordinator(store=store, policy=DEFAULT_POLICY)
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    _prepare_waiting_pending(coordinator, device)
+    entry = ShedStackEntry(
+        device_id=device.device_id,
+        operation_id="restore-1",
+        pre_state=True,
+        snapshot={"switch.d1": {"state": "on"}},
+        load_generation=1,
+    )
+    coordinator._pending_restore_entry = entry
+    coordinator._policy_engine.runtime.shed_stack = [entry]
+    coordinator._save_runtime_snapshot = MagicMock()
+    store.async_save = AsyncMock(side_effect=[OSError("disk full"), None])
+
+    await coordinator._reconcile_pending_start()
+    assert coordinator.status == STATUS_SAFETY_BLOCKED
+    assert coordinator._pending_restore_entry is entry
+    assert coordinator._policy_engine.runtime.shed_stack == [entry]
+
+    await coordinator._reconcile_pending_start()
+    assert coordinator._pending_restore_entry is None
+    assert coordinator.pending_start_power == 0
+
+
+@pytest.mark.asyncio
+async def test_recovery_reconciliation_fail_closed_then_clears_quarantine():
+    missing = _coordinator()
+    device = missing._model.get_device("d1")
+    assert device is not None
+    pending = _prepare_waiting_pending(missing, device)
+    pending.phase = "recovery_blocked"
+    pending.rollback_off_reported_at = 150.0
+    missing._model._devices.pop(device.device_id)
+    await missing._reconcile_pending_start()
+    assert missing.status == STATUS_SAFETY_BLOCKED
+
+    blocked = _coordinator()
+    device = blocked._model.get_device("d1")
+    assert device is not None
+    pending = _prepare_waiting_pending(blocked, device)
+    pending.phase = "recovery_blocked"
+    pending.rollback_off_reported_at = 150.0
+    blocked._recovery_blocked.add(device.device_id)
+    blocked.hass.states.get.return_value = _state("on", {})
+    blocked._load_samples.append(1000.0)
+    blocked._load_sensor_valid = True
+    await blocked._reconcile_pending_start()
+    assert blocked._pending_start is pending
+
+    invalid_power = _coordinator()
+    device = invalid_power._model.get_device("d1")
+    assert device is not None
+    device.power_sensor_id = "sensor.d1_power"
+    pending = _prepare_waiting_pending(invalid_power, device)
+    pending.phase = "recovery_blocked"
+    pending.rollback_off_reported_at = 150.0
+    invalid_power._recovery_blocked.add(device.device_id)
+    invalid_power.hass.states.get.side_effect = lambda entity_id: (
+        _state("off", {}) if entity_id == "switch.d1" else _state("bad", {"unit_of_measurement": "W"})
+    )
+    invalid_power._load_samples.append(1000.0)
+    invalid_power._load_sensor_valid = True
+    invalid_power._read_current_device_power_for_clear = MagicMock(
+        side_effect=ValueError("bad power")
+    )
+    await invalid_power._reconcile_pending_start()
+    assert invalid_power._pending_start is pending
+
+    cleared = _coordinator()
+    device = cleared._model.get_device("d1")
+    assert device is not None
+    device.is_on = False
+    pending = _prepare_waiting_pending(cleared, device)
+    pending.phase = "recovery_blocked"
+    pending.rollback_off_reported_at = 150.0
+    cleared._recovery_blocked.add(device.device_id)
+    cleared.hass.states.get.return_value = _state("off", {})
+    cleared._load_samples.append(1000.0)
+    cleared._load_sensor_valid = True
+    cleared._dismiss_fault_notification = AsyncMock(return_value=False)
+
+    await cleared._reconcile_pending_start()
+
+    assert cleared._pending_start is None
+    assert device.device_id not in cleared._recovery_blocked
+    assert device.device_id in cleared._fault_notifications_pending_dismissal
+
+
+@pytest.mark.asyncio
+async def test_pending_expiry_handles_removed_device_fail_closed():
+    coordinator = _coordinator()
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    pending = coordinator._reserve_pending_start(device)
+    pending.telemetry_deadline_monotonic = time.monotonic() - 1
+    coordinator._model._devices.pop(device.device_id)
+
+    await coordinator._expire_pending_start_if_needed()
+
+    assert coordinator.status == STATUS_SAFETY_BLOCKED
+    assert coordinator.pending_start_power == 0
+
+
+@pytest.mark.parametrize("raw", ["bad", float("nan"), "101"])
+def test_threshold_grid_safety_rejects_non_numeric_or_out_of_range_soc(raw):
+    coordinator = _coordinator(
+        grid_loss_mode=GRID_LOSS_MODE_THRESHOLD,
+        battery_soc_sensor="sensor.battery_soc",
+        battery_threshold=20,
+    )
+    coordinator.hass.states.get.return_value = _state(
+        raw, {"unit_of_measurement": "%"}
+    )
+    assert coordinator.grid_ok is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_keeps_recovery_block_unknown_and_expires_external_ownership():
+    blocked = _coordinator()
+    device = blocked._model.get_device("d1")
+    assert device is not None
+    blocked._recovery_blocked.add(device.device_id)
+    blocked.hass.states.get.return_value = _state("off", {})
+    await blocked._refresh_device_states()
+    assert device.is_on is None
+
+    expired = _coordinator()
+    device = expired._model.get_device("d1")
+    assert device is not None
+    device.ownership = Ownership.EXTERNAL
+    device.ownership_until = time.time() - 1
+    expired.hass.states.get.return_value = _state("off", {})
+    await expired._refresh_device_states()
+    assert device.ownership is Ownership.PLANNER
+    assert device.ownership_until is None
+
+
+@pytest.mark.asyncio
+async def test_grid_loss_handles_confirmed_off_pending_and_persistence_failure():
+    skipped = _coordinator()
+    for device in skipped._model.all_devices():
+        device.is_on = False
+    skipped.hass.states.get.return_value = _state("off", {})
+    await skipped._handle_grid_loss()
+    skipped.hass.services.async_call.assert_not_awaited()
+
+    pending = _coordinator()
+    device = pending._model.get_device("d1")
+    assert device is not None
+    device.is_on = False
+    pending._load_reported_at = 100.0
+    pending._reserve_pending_start(device)
+    pending._turn_off_device = AsyncMock(return_value=True)
+    pending._last_confirmed_reported_at[device.device_id] = 200.0
+    pending.hass.states.get.return_value = _state("off", {})
+    await pending._handle_grid_loss()
+    assert pending._pending_start is not None
+    assert pending._pending_start.phase == "recovery_blocked"
+
+    failed = _coordinator()
+    device = failed._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    failed.hass.states.get.return_value = _state("on", {})
+    failed._turn_off_device = AsyncMock(return_value=False)
+    failed._store.async_save = AsyncMock(side_effect=OSError("disk full"))
+    await failed._handle_grid_loss()
+    assert failed.status == STATUS_SAFETY_BLOCKED
+    assert failed._fault_state_dirty is True
+
+
+@pytest.mark.asyncio
+async def test_manual_override_notification_failure_is_non_fatal():
+    coordinator = _coordinator()
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    coordinator._grid_loss_expected_off.add(device.device_id)
+    coordinator.hass.services.async_call.side_effect = OSError("notify down")
+
+    await coordinator._notify_manual_overrides()
+
+    assert device.device_id not in coordinator._manual_override_notified
+
+
+@pytest.mark.asyncio
+async def test_emergency_stop_skips_confirmed_off_and_marks_pending_stop():
+    coordinator = _coordinator()
+    d1 = coordinator._model.get_device("d1")
+    d2 = coordinator._model.get_device("d2")
+    assert d1 is not None and d2 is not None
+    d1.is_on = False
+    d2.is_on = False
+    coordinator._load_reported_at = 100.0
+    coordinator._reserve_pending_start(d1)
+    d1.is_on = True
+    coordinator.hass.states.get.return_value = _state("off", {})
+    coordinator._turn_off_device = AsyncMock(return_value=True)
+
+    await coordinator._perform_emergency_all_stop()
+
+    coordinator._turn_off_device.assert_awaited_once_with(d1, emergency=True)
+    assert coordinator._pending_start is not None
+    assert coordinator._pending_start.phase == "recovery_blocked"
+
+
+@pytest.mark.asyncio
+async def test_policy_shedding_records_stack_and_failure_quarantines():
+    success = _coordinator(policy=DEFAULT_POLICY)
+    device = success._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    for other in success._model.all_devices():
+        if other is not device:
+            other.is_on = False
+    success.hass.states.get.return_value = _state("on", {})
+    success._last_policy_decision = SimpleNamespace(reason_code=ReasonCode.SHED_FAST_OVERLOAD)
+    success._turn_off_device = AsyncMock(return_value=True)
+    await success._perform_shedding(7000.0)
+    assert success.shed_stack[-1].device_id == device.device_id
+    success._store.save_policy_runtime.assert_called()
+
+    failed = _coordinator(policy=DEFAULT_POLICY)
+    device = failed._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    for other in failed._model.all_devices():
+        if other is not device:
+            other.is_on = False
+    failed._turn_off_device = AsyncMock(return_value=False)
+    await failed._perform_shedding(7000.0)
+    assert device.device_id in failed._faulted
+    assert failed.status == STATUS_SAFETY_BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_adding_load_guard_and_recovery_target_filters():
+    guarded = _coordinator()
+    guarded._last_admission_generation = guarded._load_generation
+    await guarded._perform_adding(1000.0, 5000.0)
+
+    no_target = _coordinator(policy=DEFAULT_POLICY)
+    device = no_target._model.get_device("d1")
+    assert device is not None
+    device.is_on = False
+    no_target._policy_engine.runtime.shed_stack = [
+        ShedStackEntry(device.device_id, "op", True, {}, 1)
+    ]
+    no_target._policy_engine.next_restore_target = MagicMock(return_value=None)
+    await no_target._perform_adding(1000.0, 5000.0)
+    assert no_target._pending_start is None
+
+    blocked = _coordinator(policy=DEFAULT_POLICY)
+    device = blocked._model.get_device("d1")
+    assert device is not None
+    device.is_on = False
+    blocked._recovery_blocked.add(device.device_id)
+    blocked._policy_engine.runtime.shed_stack = [
+        ShedStackEntry(device.device_id, "op", True, {}, 1)
+    ]
+    await blocked._perform_adding(1000.0, 5000.0)
+    assert blocked._pending_start is None
+
+    failed_restore = _coordinator(policy=DEFAULT_POLICY)
+    device = failed_restore._model.get_device("d1")
+    assert device is not None
+    device.is_on = False
+    entry = ShedStackEntry(device.device_id, "op", True, {}, 1)
+    failed_restore._policy_engine.runtime.shed_stack = [entry]
+    failed_restore._turn_on_device = AsyncMock(return_value=False)
+    await failed_restore._perform_adding(1000.0, 5000.0)
+    assert failed_restore._pending_restore_entry is None
+
+
+@pytest.mark.asyncio
+async def test_confirmation_generation_mismatch_and_rollback_exception_are_safe():
+    coordinator = _coordinator()
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    coordinator._active_operations[device.device_id] = 1
+    assert not await coordinator._confirm_device_state(
+        device,
+        "on",
+        operation_id=2,
+        command_issued_at=time.time(),
+        pre_reported_at=None,
+    )
+
+    rollback = _coordinator()
+    device = rollback._model.get_device("d1")
+    assert device is not None
+    rollback._reserve_pending_start(device)
+    rollback._turn_off_device = AsyncMock(side_effect=RuntimeError("relay"))
+    rollback._persist_fault_state_if_dirty = AsyncMock()
+    assert await rollback._rollback_failed_start(device) is False
+    assert rollback._pending_start is not None
+    assert rollback._pending_start.phase == "recovery_blocked"
+
+
+@pytest.mark.asyncio
+async def test_request_start_observe_unknown_and_guard_matrix():
+    observe = _coordinator(execution_mode="observe")
+    with pytest.raises(ValueError, match="unknown"):
+        await observe.async_request_start("missing")
+    assert await observe.async_request_start("d1") is False
+    assert "Observe: start intent" in observe.last_action
+
+    guard_names = [
+        "planner_off",
+        "post_arm",
+        "execution_reconciliation",
+        "pending_start",
+        "post_shed",
+        "generation_consumed",
+        "bad_grid",
+        "bad_load",
+        "missing_current",
+        "device_on",
+        "faulted",
+        "paused",
+        "recovery_not_ready",
+        "external",
+        "manual",
+        "manual_active",
+        "wrong_restore_target",
+        "capacity",
+        "solar",
+    ]
+    for guard_name in guard_names:
+        coordinator = _coordinator(policy=DEFAULT_POLICY, execution_mode="live")
+        device = coordinator._model.get_device("d1")
+        other = coordinator._model.get_device("d2")
+        assert device is not None and other is not None
+        coordinator._mode = "auto"
+        coordinator._startup_safe = False
+        coordinator._load_sensor_valid = True
+        coordinator._load_reported_at = time.time()
+        coordinator._load_samples.append(1000.0)
+        coordinator._load_generation = 1
+        coordinator._last_admission_generation = 0
+        coordinator.hass.states.get.return_value = _state("on", {})
+        device.is_on = False
+        device.ownership = Ownership.PLANNER
+        coordinator._solar_forecast_ok = MagicMock(return_value=True)
+
+        if guard_name == "planner_off":
+            coordinator._mode = "off"
+        elif guard_name == "post_arm":
+            coordinator._post_arm_reconciliation_required = True
+        elif guard_name == "execution_reconciliation":
+            coordinator._execution_mode_reconciliation_required = True
+        elif guard_name == "pending_start":
+            coordinator._reserve_pending_start(device)
+        elif guard_name == "post_shed":
+            coordinator._policy_engine.runtime.pending_post_shed_generation = 2
+        elif guard_name == "generation_consumed":
+            coordinator._last_admission_generation = coordinator._load_generation
+        elif guard_name == "bad_grid":
+            coordinator.hass.states.get.return_value = _state("off", {})
+        elif guard_name == "bad_load":
+            coordinator._load_sensor_valid = False
+        elif guard_name == "missing_current":
+            coordinator._load_samples.clear()
+        elif guard_name == "device_on":
+            device.is_on = True
+        elif guard_name == "faulted":
+            coordinator._faulted.add(device.device_id)
+        elif guard_name == "paused":
+            device.pause_until = time.time() + 30
+        elif guard_name == "recovery_not_ready":
+            coordinator._policy_engine.runtime.shed_stack = [
+                ShedStackEntry(other.device_id, "op", True, {}, 1)
+            ]
+            coordinator._last_policy_decision = SimpleNamespace(recovery_ready=False)
+        elif guard_name == "external":
+            device.ownership = Ownership.EXTERNAL
+            device.ownership_until = time.time() + 30
+        elif guard_name == "manual":
+            device.ownership = Ownership.MANUAL
+        elif guard_name == "manual_active":
+            coordinator._policy_engine.runtime.phase = PolicyPhase.SHEDDING
+        elif guard_name == "wrong_restore_target":
+            coordinator._policy_engine.runtime.shed_stack = [
+                ShedStackEntry(other.device_id, "op", True, {}, 1)
+            ]
+            coordinator._last_policy_decision = SimpleNamespace(recovery_ready=True)
+        elif guard_name == "capacity":
+            device.expected_power = 100000
+        elif guard_name == "solar":
+            coordinator._solar_forecast_ok.return_value = False
+
+        with pytest.raises(ValueError):
+            await coordinator.async_request_start(device.device_id)
+
+    admitted = _coordinator(policy=DEFAULT_POLICY, execution_mode="live")
+    device = admitted._model.get_device("d1")
+    assert device is not None
+    admitted._mode = "auto"
+    admitted._load_sensor_valid = True
+    admitted._load_reported_at = time.time()
+    admitted._load_samples.append(1000.0)
+    admitted._load_generation = 1
+    admitted.hass.states.get.return_value = _state("on", {})
+    device.is_on = False
+    admitted._solar_forecast_ok = MagicMock(return_value=True)
+    admitted._turn_on_device = AsyncMock(return_value=False)
+    assert await admitted.async_request_start(device.device_id) is False
+    admitted._turn_on_device.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_request_stop_guards_pause_and_persistence_failure():
+    coordinator = _coordinator()
+    with pytest.raises(ValueError, match="unknown"):
+        await coordinator.async_request_stop("missing")
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    device.is_on = False
+    assert await coordinator.async_request_stop(device.device_id) is False
+
+    stopped = _coordinator(execution_mode="live")
+    device = stopped._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    stopped._turn_off_device = AsyncMock(return_value=True)
+    assert await stopped.async_request_stop(device.device_id) is True
+    assert device.pause_until is not None
+
+    failed = _coordinator(execution_mode="live")
+    device = failed._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    failed._turn_off_device = AsyncMock(return_value=False)
+    failed._persist_runtime_if_dirty = AsyncMock(return_value=False)
+    with pytest.raises(RuntimeError, match="journal"):
+        await failed.async_request_stop(device.device_id)
+
+
+@pytest.mark.asyncio
+async def test_clear_quarantine_requires_fresh_off_load_and_power_proof():
+    unknown = _coordinator()
+    with pytest.raises(ValueError, match="unknown"):
+        await unknown.async_clear_quarantine("missing")
+
+    clean = _coordinator()
+    assert await clean.async_clear_quarantine("d1") is False
+
+    cases = ["pending", "on", "load", "current", "high"]
+    for case in cases:
+        coordinator = _coordinator(policy=DEFAULT_POLICY)
+        device = coordinator._model.get_device("d1")
+        assert device is not None
+        coordinator._faulted.add(device.device_id)
+        coordinator._load_sensor_valid = True
+        coordinator._load_reported_at = time.time()
+        coordinator._load_samples.append(1000.0)
+        coordinator.hass.states.get.return_value = _state("off", {})
+        if case == "pending":
+            coordinator._reserve_pending_start(device)
+        elif case == "on":
+            coordinator.hass.states.get.return_value = _state("on", {})
+        elif case == "load":
+            coordinator._load_sensor_valid = False
+        elif case == "current":
+            coordinator._load_samples.clear()
+        elif case == "high":
+            coordinator._load_samples.clear()
+            coordinator._load_samples.extend([7000.0])
+        with pytest.raises(ValueError):
+            await coordinator.async_clear_quarantine(device.device_id)
+
+    successful = _coordinator(policy=DEFAULT_POLICY)
+    device = successful._model.get_device("d1")
+    assert device is not None
+    successful._faulted.add(device.device_id)
+    successful._load_sensor_valid = True
+    successful._load_reported_at = time.time()
+    successful._load_samples.append(1000.0)
+    successful.hass.states.get.return_value = _state("off", {})
+    successful._dismiss_fault_notification = AsyncMock(return_value=True)
+    assert await successful.async_clear_quarantine(device.device_id) is True
+    assert device.device_id not in successful._faulted
+
+
+@pytest.mark.asyncio
+async def test_turn_on_climate_and_readback_failure_paths_are_fail_closed():
+    climate = _coordinator(execution_mode="live")
+    device = climate._model.get_device("d1")
+    assert device is not None
+    device.actuator_entity_ids = ("climate.kitchen",)
+    device.snapshot = {"climate.kitchen": {"attributes": {"hvac_mode": "cool"}}}
+    device.is_on = False
+    climate._load_reported_at = 100.0
+    pending = climate._reserve_pending_start(device)
+    climate._persist_runtime_if_dirty = AsyncMock(return_value=True)
+    climate._confirm_device_state = AsyncMock(return_value=True)
+    climate._last_confirmed_reported_at[device.device_id] = 200.0
+    climate.hass.states.get.return_value = _state("off", {})
+    assert await climate._turn_on_device(device) is True
+    assert any(call.args[:2] == ("climate", "set_hvac_mode") for call in climate.hass.services.async_call.await_args_list)
+    assert pending.phase == "waiting_load_telemetry"
+
+    lost = _coordinator(execution_mode="live")
+    device = lost._model.get_device("d1")
+    assert device is not None
+    lost._load_reported_at = 100.0
+    lost._reserve_pending_start(device)
+    lost._persist_runtime_if_dirty = AsyncMock(return_value=True)
+    lost._confirm_device_state = AsyncMock(side_effect=lambda *args, **kwargs: (setattr(lost, "_pending_start", None) or True))
+    lost._rollback_failed_start = AsyncMock(return_value=False)
+    assert await lost._turn_on_device(device) is False
+
+    marker_missing = _coordinator(execution_mode="live")
+    device = marker_missing._model.get_device("d1")
+    assert device is not None
+    marker_missing._load_reported_at = 100.0
+    marker_missing._reserve_pending_start(device)
+    marker_missing._persist_runtime_if_dirty = AsyncMock(return_value=True)
+    marker_missing._confirm_device_state = AsyncMock(return_value=True)
+    marker_missing._rollback_failed_start = AsyncMock(return_value=False)
+    assert await marker_missing._turn_on_device(device) is False
+
+    command_error = _coordinator(execution_mode="live")
+    device = command_error._model.get_device("d1")
+    assert device is not None
+    command_error._load_reported_at = 100.0
+    command_error._reserve_pending_start(device)
+    command_error._persist_runtime_if_dirty = AsyncMock(return_value=True)
+    command_error._rollback_failed_start = AsyncMock(return_value=False)
+    command_error.hass.services.async_call.side_effect = RuntimeError("relay")
+    assert await command_error._turn_on_device(device) is False
+
+
+@pytest.mark.asyncio
+async def test_turn_off_climate_and_observe_event_failures_are_safe():
+    coordinator = _coordinator(execution_mode="live")
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    device.actuator_entity_ids = ("climate.kitchen",)
+    device.is_on = True
+    coordinator._persist_runtime_if_dirty = AsyncMock(return_value=True)
+    coordinator._confirm_device_state = AsyncMock(return_value=True)
+    coordinator.hass.states.get.return_value = _state("on", {})
+    assert await coordinator._turn_off_device(device) is True
+    assert any(call.args[:2] == ("climate", "set_hvac_mode") for call in coordinator.hass.services.async_call.await_args_list)
+
+    observe = _coordinator()
+    observe._persist_runtime_if_dirty = AsyncMock(return_value=False)
+    assert await observe._record_observe_only_action(action="turn_on", reason="observe") is False
+    observe.hass.bus.async_fire.side_effect = RuntimeError("bus unavailable")
+    observe._emit_event("power_orchestrator.test", {})
+
+
+@pytest.mark.asyncio
+async def test_evaluation_success_paths_and_load_sample_pruning():
+    execution = _coordinator()
+    execution._refresh_device_states = AsyncMock()
+    execution._expire_pending_start_if_needed = AsyncMock()
+    execution._read_load_sensor = MagicMock(return_value=1000.0)
+    execution._load_sensor_valid = True
+    issued = time.time() - 2
+    execution._execution_mode_reconciliation_required = True
+    execution._execution_mode_transition_issued_at = issued
+    execution._execution_mode_transition_generation = 0
+    execution._load_reported_at = time.time()
+    execution._load_generation = 1
+    execution._load_samples.append(1000.0)
+    execution._last_confirmed_reported_at["d1"] = time.time()
+    execution.hass.states.get.return_value = _state("on", {})
+    await execution._evaluate()
+    assert execution._execution_mode_reconciliation_required is False
+    assert execution.status == "monitoring"
+
+    legacy_current = _coordinator(execution_mode="observe")
+    legacy_current._refresh_device_states = AsyncMock()
+    legacy_current._expire_pending_start_if_needed = AsyncMock()
+    legacy_current._read_load_sensor = MagicMock(return_value=7000.0)
+    legacy_current._load_sensor_valid = True
+    legacy_current._load_reported_at = time.time()
+    legacy_current.hass.states.get.return_value = _state("on", {})
+    await legacy_current._evaluate()
+    assert legacy_current.status == "observe"
+
+    legacy_average = _coordinator(execution_mode="observe")
+    legacy_average._refresh_device_states = AsyncMock()
+    legacy_average._expire_pending_start_if_needed = AsyncMock()
+    legacy_average._read_load_sensor = MagicMock(return_value=1000.0)
+    legacy_average._load_sensor_valid = True
+    legacy_average._load_reported_at = time.time()
+    legacy_average._load_samples.extend([11000.0, 1000.0])
+    legacy_average._accept_load_report = MagicMock(return_value=False)
+    legacy_average.hass.states.get.return_value = _state("on", {})
+    await legacy_average._evaluate()
+    assert legacy_average.status == "observe"
+
+    recovery = _coordinator(policy=DEFAULT_POLICY)
+    recovery._refresh_device_states = AsyncMock()
+    recovery._expire_pending_start_if_needed = AsyncMock()
+    recovery._read_load_sensor = MagicMock(return_value=1000.0)
+    recovery._load_sensor_valid = True
+    recovery._load_reported_at = time.time()
+    recovery._load_samples.append(1000.0)
+    recovery._policy_engine.runtime.shed_stack = [
+        ShedStackEntry("d1", "op", True, {}, 1)
+    ]
+    recovery._last_policy_decision = SimpleNamespace(recovery_ready=False)
+    recovery.hass.states.get.return_value = _state("on", {})
+    await recovery._evaluate()
+    assert recovery.status == "recovery_wait"
+
+    pruning = _coordinator()
+    pruning._averaging_period = 1
+    pruning._load_samples.append(1.0)
+    pruning._load_sample_times.append(time.monotonic() - 10)
+    pruning._append_load_sample(2.0)
+    assert list(pruning._load_samples) == [2.0]
+
+
+@pytest.mark.asyncio
+async def test_mode_and_execution_mode_persistence_boundaries():
+    coordinator = _coordinator()
+    coordinator._evaluate_safely = AsyncMock()
+    coordinator.async_set_updated_data = MagicMock()
+    await coordinator.async_set_mode("off")
+    assert coordinator.mode == "off"
+    assert coordinator.startup_safe is True
+
+    with pytest.raises(ValueError, match="execution mode"):
+        await coordinator.async_set_execution_mode("invalid")
+    with pytest.raises(ValueError, match="explicit confirmation"):
+        await coordinator.async_set_execution_mode("live")
+
+    observe = _coordinator(execution_mode="observe")
+    observe._persist_runtime_if_dirty = AsyncMock(return_value=False)
+    with pytest.raises(RuntimeError, match="persisted"):
+        await observe.async_request_start("d1")
+
+
+@pytest.mark.asyncio
+async def test_evaluate_safely_handles_evaluator_and_emergency_errors():
+    coordinator = _coordinator()
+    coordinator._evaluate = AsyncMock(side_effect=RuntimeError("evaluator"))
+    coordinator._handle_grid_loss = AsyncMock(side_effect=RuntimeError("stop"))
+    coordinator._persist_fault_state_if_dirty = AsyncMock()
+    coordinator._notify_faults = AsyncMock()
+    coordinator._retry_fault_notification_dismissals = AsyncMock()
+    await coordinator._evaluate_safely()
+    assert coordinator.status == STATUS_SAFETY_BLOCKED
+    assert coordinator.load_sensor_reason == "evaluation_error"
+
+
+@pytest.mark.asyncio
+async def test_policy_evaluation_observe_mode_and_pending_shed_fence_are_fail_closed():
+    policy = PolicyConfig(
+        thresholds=(ThresholdTier("test", 100.0, 0.0, ReasonCode.SHED_FAST_OVERLOAD),)
+    )
+    coordinator = _coordinator(policy=policy, execution_mode="observe")
+    coordinator._refresh_device_states = AsyncMock()
+    coordinator._expire_pending_start_if_needed = AsyncMock()
+    coordinator._read_load_sensor = MagicMock(return_value=7000.0)
+    coordinator._load_sensor_valid = True
+    coordinator._load_reported_at = time.time()
+    coordinator.hass.states.get.return_value = _state("on", {})
+
+    await coordinator._evaluate()
+
+    assert coordinator.status == "observe"
+    coordinator.hass.services.async_call.assert_not_awaited()
+    assert "no physical command" in coordinator.last_action
+
+    fenced = _coordinator(policy=policy)
+    fenced._refresh_device_states = AsyncMock()
+    fenced._expire_pending_start_if_needed = AsyncMock()
+    fenced._read_load_sensor = MagicMock(return_value=7000.0)
+    fenced._load_sensor_valid = True
+    fenced._load_reported_at = time.time()
+    fenced._policy_engine.runtime.pending_post_shed_generation = 99
+    fenced.hass.states.get.return_value = _state("on", {})
+
+    await fenced._evaluate()
+
+    assert fenced.status == "recovery_wait"
+    assert "newer aggregate-load" in fenced.last_action
+
+
+@pytest.mark.asyncio
+async def test_evaluation_waits_for_execution_mode_and_post_arm_reconciliation():
+    for latch in ("execution", "arm"):
+        coordinator = _coordinator()
+        coordinator._refresh_device_states = AsyncMock()
+        coordinator._expire_pending_start_if_needed = AsyncMock()
+        coordinator._read_load_sensor = MagicMock(return_value=1000.0)
+        coordinator._load_sensor_valid = True
+        coordinator._load_reported_at = time.time()
+        coordinator._load_samples.append(1000.0)
+        coordinator.hass.states.get.return_value = _state("on", {})
+        if latch == "execution":
+            coordinator._execution_mode_reconciliation_required = True
+            coordinator._execution_mode_transition_issued_at = time.time() + 10
+            coordinator._execution_mode_transition_generation = 0
+        else:
+            coordinator._post_arm_reconciliation_required = True
+            coordinator._arm_issued_at = time.time() + 10
+            coordinator._arm_load_generation = 0
+
+        await coordinator._evaluate()
+
+        assert coordinator.status == STATUS_SAFETY_BLOCKED
+        assert "reconciliation" in coordinator.last_action or "aggregate load" in coordinator.last_action
+
+
+@pytest.mark.asyncio
+async def test_authorized_external_start_is_reconciled_without_stealing_ownership():
+    coordinator = _coordinator()
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    marker = time.time()
+    state = _state("on", {})
+    state.last_reported = datetime.fromtimestamp(marker, tz=timezone.utc)
+    marker = state.last_reported.timestamp()
+    coordinator.hass.states.get.return_value = state
+    coordinator._authorization_leases[device.device_id] = AuthorizationLease(
+        device_id=device.device_id,
+        operation_id="op-1",
+        allowed_state="on",
+        expires_at=marker + 30,
+        reported_at=marker,
+    )
+
+    await coordinator._handle_external_start(device)
+
+    assert device.ownership is Ownership.PLANNER
+    assert device.ownership_until is None
+    assert device.device_id not in coordinator._faulted
+
+
+@pytest.mark.asyncio
+async def test_manual_start_during_shedding_is_quarantined_and_compensated():
+    coordinator = _coordinator()
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    coordinator._policy_engine.runtime.phase = PolicyPhase.SHEDDING
+    coordinator._turn_off_device = AsyncMock(return_value=True)
+
+    await coordinator._handle_external_start(device)
+
+    assert device.device_id in coordinator._faulted
+    assert device.ownership is Ownership.EXTERNAL
+    assert coordinator.status == STATUS_SAFETY_BLOCKED
+    coordinator._turn_off_device.assert_awaited_once_with(device)
+
+
+@pytest.mark.asyncio
+async def test_device_power_telemetry_reasons_are_fail_closed():
+    cases = [
+        (None, "W", "unavailable_or_stale"),
+        ("3", "V", "unsupported_unit"),
+        (object(), "W", "non_numeric"),
+        (float("nan"), "W", "invalid_value"),
+        ("-1", "W", "negative_value"),
+        ("3.5", "W", "ok"),
+    ]
+    for raw, unit, expected_reason in cases:
+        coordinator = _coordinator()
+        device = coordinator._model.get_device("d1")
+        assert device is not None
+        device.power_sensor_id = "sensor.d1_power"
+        power_state = None if raw is None else _state(raw, {"unit_of_measurement": unit})
+        coordinator.hass.states.get.side_effect = lambda entity_id, ps=power_state: (
+            _state("off", {}) if entity_id == "switch.d1" else ps
+        )
+
+        await coordinator._refresh_device_states()
+
+        assert device.measured_power_reason == expected_reason
+        assert device.measured_power_valid is (expected_reason == "ok")
+
+
+@pytest.mark.asyncio
+async def test_fault_notification_revision_paths_are_idempotent():
+    coordinator = _coordinator()
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    coordinator._faulted.add(device.device_id)
+    reason = coordinator._fault_notification_reason(device.device_id)
+    fingerprint = coordinator._fault_notification_fingerprint(device.device_id, reason)
+    coordinator._fault_notification_pending_fingerprints[device.device_id] = fingerprint
+    coordinator._fault_notifications_pending_dismissal.add(device.device_id)
+
+    await coordinator._notify_faults()
+
+    assert device.device_id in coordinator._fault_notifications_sent
+    coordinator.hass.services.async_call.assert_not_awaited()
+
+    coordinator._fault_notification_fingerprints.pop(device.device_id)
+    coordinator._fault_notifications_sent.add(device.device_id)
+    await coordinator._notify_faults()
+    coordinator.hass.services.async_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_emergency_all_stop_marks_failed_devices_safety_blocked():
+    coordinator = _coordinator()
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    coordinator.hass.states.get.side_effect = lambda entity_id: _state("off", {})
+    coordinator._turn_off_device = AsyncMock(side_effect=RuntimeError("relay unavailable"))
+
+    await coordinator._perform_emergency_all_stop()
+
+    assert coordinator.status == STATUS_SAFETY_BLOCKED
+    assert device.device_id in coordinator._faulted
+    assert device.is_on is None

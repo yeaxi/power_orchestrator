@@ -65,6 +65,32 @@ def test_managed_device_from_dict():
     assert d.priority == 2
 
 
+def test_managed_device_from_dict_normalizes_legacy_values():
+    d = ManagedDevice.from_dict(
+        {
+            "device_id": "dev3",
+            "name": "Legacy",
+            "entity": "switch.legacy",
+            "actuators": {"invalid": True},
+            "ownership": "invalid",
+            "ownership_until": True,
+        }
+    )
+    assert d.actuator_entity_ids == ()
+    assert d.ownership.value == "unknown"
+    assert d.ownership_until is None
+
+    string_actuator = ManagedDevice.from_dict(
+        {
+            "device_id": "dev4",
+            "name": "String actuator",
+            "entity": "switch.primary",
+            "actuators": "switch.secondary",
+        }
+    )
+    assert string_actuator.actuator_entity_ids == ("switch.secondary",)
+
+
 def test_power_model_add_device():
     m = PowerModel()
     d = ManagedDevice(device_id="dev1", name="Dev1", entity_id="switch.dev1", expected_power=1000)

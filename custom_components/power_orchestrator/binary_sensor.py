@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -36,14 +37,15 @@ async def async_setup_entry(
     )
 
 
-class PowerOrchestratorGridOkSensor(CoordinatorEntity, BinarySensorEntity):
+class PowerOrchestratorGridOkSensor(CoordinatorEntity, BinarySensorEntity):  # type: ignore[misc]
     """Grid OK binary sensor."""
 
     _attr_has_entity_name = True
     _attr_device_class = BinarySensorDeviceClass.POWER
     _attr_translation_key = "grid_ok"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_binary_sensor_grid_ok"
@@ -61,16 +63,16 @@ class PowerOrchestratorGridOkSensor(CoordinatorEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        return self.coordinator.grid_ok
+        return cast(bool, self.coordinator.grid_ok)
 
 
-class _QuarantineSensorBase(CoordinatorEntity, BinarySensorEntity):
+class _QuarantineSensorBase(CoordinatorEntity, BinarySensorEntity):  # type: ignore[misc]
     """Base class for typed persisted safety-state diagnostics."""
 
     _attr_has_entity_name = True
-    _attr_icon = "mdi:alert-circle"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, coordinator, entry, suffix: str) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry, suffix: str) -> None:
         super().__init__(coordinator)
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_binary_sensor_{suffix}"
@@ -91,7 +93,7 @@ class PowerOrchestratorFaultSensor(_QuarantineSensorBase):
 
     _attr_translation_key = "faulted"
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry, "faulted")
 
     @property
@@ -113,7 +115,7 @@ class PowerOrchestratorRecoveryBlockedSensor(_QuarantineSensorBase):
 
     _attr_translation_key = "recovery_blocked"
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry, "recovery_blocked")
 
     @property
@@ -136,9 +138,8 @@ class PowerOrchestratorActionJournalHealthySensor(_QuarantineSensorBase):
 
     _attr_translation_key = "action_journal_healthy"
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry, "action_journal_healthy")
-        self._attr_icon = "mdi:clipboard-check-outline"
 
     @property
     def is_on(self) -> bool:

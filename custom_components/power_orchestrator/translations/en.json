@@ -7,30 +7,68 @@
     },
     "set_mode": {
       "name": "Set planner mode",
-      "description": "Arm or disarm normal planning. The emergency stop remains active."
+      "description": "Arm or disarm normal planning. The emergency stop remains active.",
+      "fields": {
+        "mode": {
+          "name": "Planner mode",
+          "description": "Auto arms normal planning; off keeps normal planner actions disarmed. This is separate from observe/live physical execution policy."
+        }
+      }
     },
     "request_start": {
       "name": "Request logical-device start",
       "description": "Guarded start request through the integration with telemetry, ownership, reserve, and readback checks.",
       "fields": {
-        "device_id": {"name": "Logical device ID", "description": "Stable device_id, not a raw switch entity ID."},
-        "source": {"name": "Request source", "description": "Audit label such as dashboard, automation, or user."}
+        "device_id": {
+          "name": "Logical device ID",
+          "description": "Stable device_id, not a raw switch entity ID."
+        },
+        "source": {
+          "name": "Request source",
+          "description": "Audit label such as dashboard, automation, or user."
+        }
       }
     },
     "request_stop": {
       "name": "Request logical-device stop",
       "description": "Guarded stop request through the integration; do not call a raw relay service.",
       "fields": {
-        "device_id": {"name": "Logical device ID", "description": "Stable device_id, not a raw switch entity ID."},
-        "source": {"name": "Request source", "description": "Audit label for the caller."}
+        "device_id": {
+          "name": "Logical device ID",
+          "description": "Stable device_id, not a raw switch entity ID."
+        },
+        "source": {
+          "name": "Request source",
+          "description": "Audit label for the caller."
+        }
       }
     },
     "set_execution_mode": {
       "name": "Set physical execution policy",
       "description": "Choose observe or live. Live requires explicit confirmation.",
       "fields": {
-        "execution_mode": {"name": "Execution policy", "description": "Observe records decisions only; live permits guarded physical commands."},
-        "confirm_live": {"name": "Confirm live ownership", "description": "Must be true to enter live execution."}
+        "execution_mode": {
+          "name": "Execution policy",
+          "description": "Observe records decisions only; live permits guarded physical commands."
+        },
+        "confirm_live": {
+          "name": "Confirm live ownership",
+          "description": "Must be true to enter live execution."
+        }
+      }
+    },
+    "clear_quarantine": {
+      "name": "Clear device quarantine",
+      "description": "Clear a persisted quarantine only after verified fresh OFF state, valid aggregate telemetry, and safe measured power.",
+      "fields": {
+        "device_id": {
+          "name": "Logical device ID",
+          "description": "Stable logical device_id, not a raw entity ID."
+        },
+        "source": {
+          "name": "Clear source",
+          "description": "Audit label for the explicit operator request."
+        }
       }
     }
   },
@@ -180,6 +218,44 @@
           "grid_loss_sensor": "Used only in binary-sensor mode. It must be fresh and report ON for normal operation; OFF, unknown, stale, or missing input triggers an emergency stop of optional devices.",
           "battery_soc": "Used in battery-threshold mode. It must be a fresh sensor with a percent unit; SoC at or below the threshold, unknown, stale, or invalid input blocks starts and triggers the safety stop.",
           "battery_threshold": "Battery SoC percentage at or below which the system treats the safety source as lost. A higher value protects the battery more but blocks automatic starts more often."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Power Orchestrator",
+        "description": "Update safety sources, thresholds, managed devices, and runtime limits without removing the integration.",
+        "data": {
+          "load_sensor": "Whole-house load sensor",
+          "max_load": "Maximum total load (W)",
+          "averaging_period": "Averaging period (s)",
+          "safety_reserve": "Safety reserve (W)",
+          "hysteresis": "Hysteresis (W)",
+          "pause_period": "Pause period (s)",
+          "grid_loss_mode": "Grid-loss safety mode",
+          "grid_loss_sensor": "Grid-loss binary sensor",
+          "battery_soc": "Battery state-of-charge sensor",
+          "battery_threshold": "Battery threshold (%)",
+          "solar_power": "Optional solar telemetry sensor",
+          "solar_forecast_entry": "Forecast.Solar config entry",
+          "battery_power": "Optional battery telemetry sensor",
+          "devices": "Managed logical devices",
+          "threshold_count": "Number of overload thresholds (1–10)"
+        },
+        "data_description": {
+          "load_sensor": "Authoritative whole-house power sensor. Invalid, stale, unknown, or wrong-unit values block normal starts.",
+          "max_load": "Hard total-load ceiling in watts used for admission and shedding.",
+          "averaging_period": "Average-load window; it never extends independent safety freshness limits.",
+          "safety_reserve": "Watts held back below the maximum to protect headroom.",
+          "hysteresis": "Additional capacity margin required before a new device may start.",
+          "pause_period": "Seconds a planner-stopped device remains paused before normal recovery.",
+          "grid_loss_mode": "Select the authoritative grid-loss safety source.",
+          "grid_loss_sensor": "Required in sensor mode; it must be fresh and ON for normal operation.",
+          "battery_soc": "Required in battery-threshold mode; it must be fresh, valid, and above the threshold.",
+          "battery_threshold": "SoC at or below which normal starts are blocked and safety shedding applies.",
+          "solar_power": "Optional measured PV telemetry; it never authorizes a start.",
+          "solar_forecast_entry": "Forecast.Solar source for exact current-power forecast validation.",
+          "battery_power": "Optional battery telemetry used for context and diagnostics.",
+          "devices": "Complete logical-device mappings, including control entities, expected watts, actuator groups, priorities, and solar policy.",
+          "threshold_count": "Number of finite, strictly increasing power/time threshold pairs."
         }
       }
     },
@@ -345,6 +421,59 @@
           "off": "Off"
         }
       }
+    }
+  },
+  "exceptions": {
+    "invalid_service_source": {
+      "message": "The request source must be a non-empty string."
+    },
+    "invalid_service_mode": {
+      "message": "The planner mode must be auto or off."
+    },
+    "invalid_execution_mode": {
+      "message": "The execution mode must be observe or live."
+    },
+    "entry_not_loaded": {
+      "message": "Power Orchestrator is not loaded."
+    },
+    "entry_not_unique": {
+      "message": "Exactly one loaded Power Orchestrator entry is required."
+    },
+    "operation_failed": {
+      "message": "The Power Orchestrator operation failed."
+    },
+    "start_request_failed": {
+      "message": "The guarded start request failed."
+    },
+    "stop_request_failed": {
+      "message": "The guarded stop request failed."
+    },
+    "quarantine_clear_failed": {
+      "message": "The quarantine clear request failed."
+    },
+    "execution_mode_change_failed": {
+      "message": "The execution-mode change failed."
+    },
+    "evaluation_failed": {
+      "message": "The Power Orchestrator evaluation failed."
+    },
+    "mode_change_failed": {
+      "message": "The planner-mode change failed."
+    },
+    "missing_device_id": {
+      "message": "A logical device ID is required."
+    },
+    "request_rejected": {
+      "message": "The request was rejected: {reason}."
+    },
+    "invalid_select_option": {
+      "message": "Unsupported planner mode: {option}."
+    }
+  },
+  "issues": {
+    "quarantine_requires_reconciliation": {
+      "title": "Power Orchestrator requires device reconciliation",
+      "description": "Device {device_id} is quarantined because its last action or ownership state could not be proven safe after a restart or failed readback."
     }
   }
 }

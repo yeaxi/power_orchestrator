@@ -82,3 +82,47 @@ async def test_config_flow_user_form_loads_with_real_home_assistant(hass):
 
     assert result["type"] == "form"
     assert result["step_id"] == "user"
+
+
+@pytest.mark.usefixtures("hass", "enable_custom_integrations")
+async def test_diagnostics_and_reconfigure_are_compatible_with_real_home_assistant(hass):
+    """Exercise the new Gold-contract APIs against the real HA runtime."""
+    source = Path(__file__).parents[1] / "custom_components" / DOMAIN
+    destination = Path(hass.config.path("custom_components", DOMAIN))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, destination, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Power Orchestrator diagnostics smoke",
+        data={
+            CONF_LOAD_SENSOR: "sensor.test_load",
+            CONF_MAX_LOAD: 5000,
+            CONF_AVERAGING_PERIOD: 30,
+            CONF_SAFETY_RESERVE: 200,
+            CONF_HYSTERESIS: 100,
+            CONF_DEVICES: [],
+            CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
+            CONF_GRID_LOSS_SENSOR: "binary_sensor.test_grid",
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "reconfigure", "entry_id": entry.entry_id},
+    )
+    assert result["type"] == "form"
+    assert result["step_id"] == "reconfigure"
+
+    from power_orchestrator.diagnostics import async_get_config_entry_diagnostics
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+    assert diagnostics["integration"] == DOMAIN
+    assert diagnostics["runtime"]["loaded"] is True
+    assert "entry_data" in diagnostics
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()

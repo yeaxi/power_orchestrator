@@ -1,12 +1,21 @@
 """Select platform for Power Orchestrator."""
 
-from __future__ import annotations
+from typing import Any, cast
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+try:
+    from homeassistant.exceptions import ServiceValidationError
+except ImportError:  # pragma: no cover - local Home Assistant test doubles
+    class ServiceValidationError(ValueError):  # type: ignore[no-redef]
+        """Fallback validation error for local entity tests."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args)
 
 from .const import DOMAIN, MODE_AUTO, MODE_OFF
 
@@ -28,18 +37,17 @@ async def async_setup_entry(
     )
 
 
-class PowerOrchestratorModeSelect(CoordinatorEntity, SelectEntity):
+class PowerOrchestratorModeSelect(CoordinatorEntity, SelectEntity):  # type: ignore[misc]
     """Mode selector: auto / off."""
 
     _attr_has_entity_name = True
     _attr_translation_key = "mode"
 
-    def __init__(self, coordinator, entry) -> None:
+    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_select_mode"
         self._attr_options = [MODE_AUTO, MODE_OFF]
-        self._attr_icon = "mdi:tune-variant"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "Power Orchestrator",
@@ -49,11 +57,15 @@ class PowerOrchestratorModeSelect(CoordinatorEntity, SelectEntity):
 
     @property
     def current_option(self) -> str:
-        return self.coordinator.mode
+        return cast(str, self.coordinator.mode)
 
     async def async_select_option(self, option: str) -> None:
         """Change the mode."""
         if option not in self._attr_options:
-            raise ValueError(f"Unsupported mode: {option}")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="invalid_select_option",
+                translation_placeholders={"option": option},
+            )
         await self.coordinator.async_set_mode(option)
         self.async_write_ha_state()

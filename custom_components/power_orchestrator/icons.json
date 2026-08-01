@@ -1,0 +1,23 @@
+{
+  "entity": {
+    "sensor": {
+      "status": {"default": "mdi:heart-pulse"},
+      "current_load": {"default": "mdi:flash"},
+      "average_load": {"default": "mdi:chart-bell-curve"},
+      "available_capacity": {"default": "mdi:battery-positive"},
+      "last_action": {"default": "mdi:clipboard-text-clock"},
+      "execution_mode": {"default": "mdi:shield-lock"},
+      "reason_code": {"default": "mdi:alert-circle-outline"},
+      "last_operation": {"default": "mdi:timeline-check-outline"}
+    },
+    "binary_sensor": {
+      "grid_ok": {"default": "mdi:transmission-tower"},
+      "faulted": {"default": "mdi:alert-circle"},
+      "recovery_blocked": {"default": "mdi:lock-alert"},
+      "action_journal_healthy": {"default": "mdi:clipboard-check-outline"}
+    },
+    "select": {
+      "mode": {"default": "mdi:state-machine"}
+    }
+  }
+}

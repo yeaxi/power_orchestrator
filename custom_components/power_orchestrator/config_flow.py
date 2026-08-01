@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import voluptuous as vol
 from homeassistant import config_entries
@@ -61,7 +61,7 @@ def _gen_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-async def _discover_energy(hass):
+async def _discover_energy(hass: Any) -> dict[str, Any]:
     """Discover sensors from Energy Dashboard."""
     result: dict[str, Any] = {
         "grid_power": None,
@@ -115,15 +115,15 @@ async def _discover_energy(hass):
     return result
 
 
-def _friendly(hass, eid):
+def _friendly(hass: Any, eid: Any) -> str | None:
     """Get friendly name or fallback."""
     if not eid:
         return ""
     s = hass.states.get(eid)
     if not s:
-        return eid
+        return str(eid)
     name = (s.attributes or {}).get("friendly_name")
-    return name if isinstance(name, str) and name else eid
+    return name if isinstance(name, str) and name else str(eid)
 
 
 def _sensor_entity_id(value: Any) -> str | None:
@@ -138,7 +138,7 @@ def _sensor_entity_id(value: Any) -> str | None:
     value = value.strip()
     if not value.startswith("sensor.") or len(value) <= len("sensor."):
         return None
-    return value
+    return cast(str, value)
 
 
 _CANONICAL_THRESHOLD_INPUTS: tuple[dict[str, float], ...] = (
@@ -279,7 +279,7 @@ def _entity_id(value: Any, domains: frozenset[str]) -> str | None:
     domain, separator, object_id = value.partition(".")
     if not separator or domain not in domains or not object_id:
         return None
-    return value
+    return cast(str, value)
 
 
 def _normalize_options_devices(value: Any) -> list[dict[str, Any]]:
@@ -412,7 +412,7 @@ def _normalize_options_devices(value: Any) -> list[dict[str, Any]]:
 
 
 class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
-    config_entries.ConfigFlow,
+    config_entries.ConfigFlow,  # type: ignore[misc]
     domain=DOMAIN,
 ):
     """Power Orchestrator config flow."""
@@ -457,7 +457,9 @@ class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
 
     # ── Step 1 ─────────────────────────────────────────────────────
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> Any:
         """Step 1: Pick sensors. Auto-discovered values are pre-filled."""
         if user_input is None:
             entries_fn = getattr(getattr(self.hass, "config_entries", None), "async_entries", None)
@@ -524,7 +526,9 @@ class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
 
     # ── Step 2 ─────────────────────────────────────────────────────
 
-    def _load_monitoring_form(self, errors=None):
+    def _load_monitoring_form(
+        self, errors: dict[str, str] | None = None
+    ) -> Any:
         """Render load monitoring and up to ten custom threshold pairs."""
         default_sensor = self._discovered.get("grid_power", "")
         threshold_defaults = _threshold_defaults(
@@ -589,7 +593,9 @@ class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
             },
         )
 
-    async def async_step_load_monitoring(self, user_input=None):
+    async def async_step_load_monitoring(
+        self, user_input: dict[str, Any] | None = None
+    ) -> Any:
         """Step 2: Load monitoring and threshold policy settings."""
         if user_input is not None:
             thresholds, threshold_error = _parse_threshold_input(user_input)
@@ -625,7 +631,9 @@ class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
             or "Unnamed device"
         )
 
-    def _device_selection_form(self, errors=None):
+    def _device_selection_form(
+        self, errors: dict[str, str] | None = None
+    ) -> Any:
         """Show discovered Energy Dashboard devices for confirmation/removal."""
         candidates = [
             device
@@ -665,7 +673,11 @@ class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
             },
         )
 
-    def _device_config_form(self, candidate=None, errors=None):
+    def _device_config_form(
+        self,
+        candidate: dict[str, Any] | None = None,
+        errors: dict[str, str] | None = None,
+    ) -> Any:
         """Show control settings for one discovered or custom device."""
         candidate = candidate or {}
         candidate_name = self._device_name(candidate) if candidate else ""
@@ -763,7 +775,9 @@ class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
 
     # ── Step 3 ─────────────────────────────────────────────────────
 
-    async def async_step_devices(self, user_input=None):
+    async def async_step_devices(
+        self, user_input: dict[str, Any] | None = None
+    ) -> Any:
         """Step 3: Confirm discovered devices, then configure their controls."""
         if self._devices_phase == "selection":
             if user_input is None:
@@ -826,7 +840,9 @@ class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
         """Return the form field for a one-based priority position."""
         return f"priority_{index + 1}"
 
-    def _priority_form(self, errors=None):
+    def _priority_form(
+        self, errors: dict[str, str] | None = None
+    ) -> Any:
         """Build one named selector for every priority position."""
         lines = "\n".join(
             f"  {i + 1}. {d.get(CONF_DEVICE_NAME) or _friendly(self.hass, d.get(CONF_DEVICE_ENTITY, ''))}"
@@ -870,7 +886,9 @@ class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
             description_placeholders={"device_list": lines},
         )
 
-    async def async_step_priority(self, user_input=None):
+    async def async_step_priority(
+        self, user_input: dict[str, Any] | None = None
+    ) -> Any:
         """Step 4: Assign named devices to priority positions."""
         if user_input is not None:
             selected_ids = [
@@ -896,7 +914,9 @@ class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
 
     # ── Step 5 ─────────────────────────────────────────────────────
 
-    def _grid_loss_form(self, errors=None):
+    def _grid_loss_form(
+        self, errors: dict[str, str] | None = None
+    ) -> Any:
         """Render grid-loss form with explicit safety-source selectors."""
         bat_info = ""
         soc = self._discovered.get(CONF_BATTERY_SOC)
@@ -931,7 +951,9 @@ class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
             description_placeholders={"battery_info": bat_info},
         )
 
-    async def async_step_grid_loss(self, user_input=None):
+    async def async_step_grid_loss(
+        self, user_input: dict[str, Any] | None = None
+    ) -> Any:
         """Step 5: Grid loss behavior."""
         if user_input is not None:
             mode = user_input.get(CONF_GRID_LOSS_MODE, GRID_LOSS_MODE_SENSOR)
@@ -968,167 +990,224 @@ class PowerOrchestratorConfigFlow(  # type: ignore[call-arg]
 
         return self._grid_loss_form()
 
+    async def async_step_reconfigure(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> Any:
+        """Reconfigure all safety/runtime settings without removing the entry."""
+        try:
+            entry = self._get_reconfigure_entry()
+        except Exception:
+            # Older local test doubles do not expose the HA helper.  The
+            # production path above is authoritative and fail-closed on a
+            # missing/unknown entry.
+            context = getattr(self, "context", {}) or {}
+            entry_id = context.get("entry_id") if isinstance(context, dict) else None
+            get_entry = getattr(getattr(self.hass, "config_entries", None), "async_get_entry", None)
+            entry = get_entry(entry_id) if callable(get_entry) and entry_id else None
+        if entry is None:
+            return self.async_abort(reason="entry_not_loaded")
+
+        schema = _options_schema_for_entry(entry)
+        if user_input is None:
+            return self.async_show_form(
+                step_id="reconfigure",
+                data_schema=schema,
+            )
+
+        # Reuse the validated OptionsFlow result through its public step API;
+        # persistence is completed by the synchronous HA callback below.
+        options_flow = PowerOrchestratorOptionsFlow(entry)
+        result = await options_flow.async_step_init(user_input)
+        if result.get("type") != "create_entry":
+            return self.async_show_form(
+                step_id="reconfigure",
+                data_schema=schema,
+                errors=result.get("errors", {}),
+            )
+
+        normalized = result.get("data", {})
+        return self.async_update_and_abort(
+            entry,
+            data=normalized,
+            options={},
+            reason="reconfigure_successful",
+        )
+
     @staticmethod
-    @callback
-    def async_get_options_flow(config_entry):
+    @callback  # type: ignore[untyped-decorator]
+    def async_get_options_flow(config_entry: Any) -> Any:
         return PowerOrchestratorOptionsFlow(config_entry)
 
 
-class PowerOrchestratorOptionsFlow(config_entries.OptionsFlow):
+def _entry_current(entry: Any, key: str, default: Any = None) -> Any:
+    """Return an option value, falling back to the config-entry data."""
+    options = getattr(entry, "options", {}) or {}
+    data = getattr(entry, "data", {}) or {}
+    return options.get(key, data.get(key, default))
+
+
+def _options_schema_for_entry(entry: Any) -> vol.Schema:
+    """Build the options schema used for both initial and error forms."""
+    threshold_defaults = _threshold_defaults(
+        _entry_current(entry, CONF_THRESHOLDS, None)
+    )
+    fields: dict[Any, Any] = {
+        vol.Required(
+            CONF_LOAD_SENSOR,
+            default=_entry_current(entry, CONF_LOAD_SENSOR, ""),
+        ): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor")
+        ),
+        vol.Optional(
+            CONF_DEVICES,
+            default=_entry_current(entry, CONF_DEVICES, []),
+        ): selector.ObjectSelector(),
+        vol.Optional(
+            "solar_power",
+            default=_entry_current(entry, "solar_power", ""),
+        ): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor")
+        ),
+        vol.Optional(
+            "solar_forecast_entry",
+            default=_entry_current(entry, "solar_forecast_entry", ""),
+        ): selector.ConfigEntrySelector(
+            selector.ConfigEntrySelectorConfig(integration="forecast_solar")
+        ),
+        vol.Optional(
+            "battery_power",
+            default=_entry_current(entry, "battery_power", ""),
+        ): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor")
+        ),
+        vol.Required(
+            CONF_MAX_LOAD,
+            default=_entry_current(entry, CONF_MAX_LOAD, 5000),
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=100,
+                max=50000,
+                mode="box",
+                unit_of_measurement="W",
+            )
+        ),
+        vol.Required(
+            CONF_AVERAGING_PERIOD,
+            default=_entry_current(entry,
+                CONF_AVERAGING_PERIOD,
+                DEFAULT_AVERAGING_PERIOD,
+            ),
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=1,
+                max=300,
+                mode="box",
+                unit_of_measurement="s",
+            )
+        ),
+        vol.Required(
+            CONF_SAFETY_RESERVE,
+            default=_entry_current(entry,
+                CONF_SAFETY_RESERVE,
+                DEFAULT_SAFETY_RESERVE,
+            ),
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0,
+                max=5000,
+                mode="box",
+                unit_of_measurement="W",
+            )
+        ),
+        vol.Required(
+            CONF_HYSTERESIS,
+            default=_entry_current(entry, CONF_HYSTERESIS, DEFAULT_HYSTERESIS),
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0,
+                max=5000,
+                mode="box",
+                unit_of_measurement="W",
+            )
+        ),
+        vol.Required(
+            CONF_PAUSE_PERIOD,
+            default=_entry_current(entry, CONF_PAUSE_PERIOD, DEFAULT_PAUSE_PERIOD),
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0,
+                max=3600,
+                mode="box",
+                unit_of_measurement="s",
+            )
+        ),
+        vol.Required(
+            CONF_GRID_LOSS_MODE,
+            default=_entry_current(entry,
+                CONF_GRID_LOSS_MODE,
+                GRID_LOSS_MODE_SENSOR,
+            ),
+        ): selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=[
+                    selector.SelectOptionDict(
+                        value=GRID_LOSS_MODE_SENSOR,
+                        label="Grid loss sensor (binary sensor)",
+                    ),
+                    selector.SelectOptionDict(
+                        value=GRID_LOSS_MODE_THRESHOLD,
+                        label="Battery threshold (SoC %)",
+                    ),
+                ]
+            )
+        ),
+        vol.Optional(
+            CONF_GRID_LOSS_SENSOR,
+            default=_entry_current(entry, CONF_GRID_LOSS_SENSOR, ""),
+        ): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="binary_sensor")
+        ),
+        vol.Optional(
+            CONF_BATTERY_SOC,
+            default=_entry_current(entry, CONF_BATTERY_SOC, ""),
+        ): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor")
+        ),
+        vol.Optional(
+            CONF_BATTERY_THRESHOLD,
+            default=_entry_current(entry, CONF_BATTERY_THRESHOLD, 20),
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0,
+                max=100,
+                mode="box",
+                unit_of_measurement="%",
+            )
+        ),
+    }
+    fields.update(_threshold_form_fields(threshold_defaults))
+    return vol.Schema(fields)
+
+
+class PowerOrchestratorOptionsFlow(config_entries.OptionsFlow):  # type: ignore[misc]
     """Options flow for runtime thresholds and safety sources."""
 
-    def __init__(self, config_entry):
+    def __init__(self, config_entry: Any) -> None:
         self._entry = config_entry
 
-    def _current(self, key: str, default=None):
+    def _current(self, key: str, default: Any = None) -> Any:
         options = getattr(self._entry, "options", {}) or {}
         data = getattr(self._entry, "data", {}) or {}
         return options.get(key, data.get(key, default))
 
-    def _options_schema(self):
-        """Build the options schema used for both initial and error forms."""
-        threshold_defaults = _threshold_defaults(
-            self._current(CONF_THRESHOLDS, None)
-        )
-        fields: dict[Any, Any] = {
-            vol.Required(
-                CONF_LOAD_SENSOR,
-                default=self._current(CONF_LOAD_SENSOR, ""),
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="sensor")
-            ),
-            vol.Optional(
-                CONF_DEVICES,
-                default=self._current(CONF_DEVICES, []),
-            ): selector.ObjectSelector(),
-            vol.Optional(
-                "solar_power",
-                default=self._current("solar_power", ""),
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="sensor")
-            ),
-            vol.Optional(
-                "solar_forecast_entry",
-                default=self._current("solar_forecast_entry", ""),
-            ): selector.ConfigEntrySelector(
-                selector.ConfigEntrySelectorConfig(integration="forecast_solar")
-            ),
-            vol.Optional(
-                "battery_power",
-                default=self._current("battery_power", ""),
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="sensor")
-            ),
-            vol.Required(
-                CONF_MAX_LOAD,
-                default=self._current(CONF_MAX_LOAD, 5000),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=100,
-                    max=50000,
-                    mode="box",
-                    unit_of_measurement="W",
-                )
-            ),
-            vol.Required(
-                CONF_AVERAGING_PERIOD,
-                default=self._current(
-                    CONF_AVERAGING_PERIOD,
-                    DEFAULT_AVERAGING_PERIOD,
-                ),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=1,
-                    max=300,
-                    mode="box",
-                    unit_of_measurement="s",
-                )
-            ),
-            vol.Required(
-                CONF_SAFETY_RESERVE,
-                default=self._current(
-                    CONF_SAFETY_RESERVE,
-                    DEFAULT_SAFETY_RESERVE,
-                ),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=5000,
-                    mode="box",
-                    unit_of_measurement="W",
-                )
-            ),
-            vol.Required(
-                CONF_HYSTERESIS,
-                default=self._current(CONF_HYSTERESIS, DEFAULT_HYSTERESIS),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=5000,
-                    mode="box",
-                    unit_of_measurement="W",
-                )
-            ),
-            vol.Required(
-                CONF_PAUSE_PERIOD,
-                default=self._current(CONF_PAUSE_PERIOD, DEFAULT_PAUSE_PERIOD),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=3600,
-                    mode="box",
-                    unit_of_measurement="s",
-                )
-            ),
-            vol.Required(
-                CONF_GRID_LOSS_MODE,
-                default=self._current(
-                    CONF_GRID_LOSS_MODE,
-                    GRID_LOSS_MODE_SENSOR,
-                ),
-            ): selector.SelectSelector(
-                selector.SelectSelectorConfig(
-                    options=[
-                        selector.SelectOptionDict(
-                            value=GRID_LOSS_MODE_SENSOR,
-                            label="Grid loss sensor (binary sensor)",
-                        ),
-                        selector.SelectOptionDict(
-                            value=GRID_LOSS_MODE_THRESHOLD,
-                            label="Battery threshold (SoC %)",
-                        ),
-                    ]
-                )
-            ),
-            vol.Optional(
-                CONF_GRID_LOSS_SENSOR,
-                default=self._current(CONF_GRID_LOSS_SENSOR, ""),
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="binary_sensor")
-            ),
-            vol.Optional(
-                CONF_BATTERY_SOC,
-                default=self._current(CONF_BATTERY_SOC, ""),
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="sensor")
-            ),
-            vol.Optional(
-                CONF_BATTERY_THRESHOLD,
-                default=self._current(CONF_BATTERY_THRESHOLD, 20),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=100,
-                    mode="box",
-                    unit_of_measurement="%",
-                )
-            ),
-        }
-        fields.update(_threshold_form_fields(threshold_defaults))
-        return vol.Schema(fields)
+    def _options_schema(self) -> vol.Schema:
+        """Build the shared options schema."""
+        return _options_schema_for_entry(self._entry)
 
-
-    async def async_step_init(self, user_input=None):
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> Any:
         if user_input is not None:
             mode = user_input.get(
                 CONF_GRID_LOSS_MODE,

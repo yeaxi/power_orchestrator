@@ -82,3 +82,100 @@ def test_translation_resources_have_matching_config_and_options_shapes():
     assert "battery_soc" in strings["options"]["step"]["init"]["data"]
     assert "uk" not in ukrainian
     assert "config" in ukrainian and "options" in ukrainian
+
+
+def test_quality_scale_is_declared_and_complete():
+    """Track the full official IQS rule set for the Platinum target."""
+    import yaml
+
+    manifest = json.loads((INTEGRATION / "manifest.json").read_text())
+    quality = yaml.safe_load((INTEGRATION / "quality_scale.yaml").read_text())
+    rules = quality["rules"]
+    expected = {
+        "action-setup",
+        "action-exceptions",
+        "appropriate-polling",
+        "async-dependency",
+        "brands",
+        "common-modules",
+        "config-entry-unloading",
+        "config-flow-test-coverage",
+        "config-flow",
+        "dependency-transparency",
+        "devices",
+        "diagnostics",
+        "discovery-update-info",
+        "discovery",
+        "docs-actions",
+        "docs-configuration-parameters",
+        "docs-data-update",
+        "docs-examples",
+        "docs-high-level-description",
+        "docs-installation-instructions",
+        "docs-installation-parameters",
+        "docs-known-limitations",
+        "docs-removal-instructions",
+        "docs-supported-devices",
+        "docs-supported-functions",
+        "docs-troubleshooting",
+        "docs-use-cases",
+        "docs-conditions",
+        "docs-triggers",
+        "dynamic-devices",
+        "entity-category",
+        "entity-device-class",
+        "entity-disabled-by-default",
+        "entity-event-setup",
+        "entity-translations",
+        "entity-unique-id",
+        "entity-unavailable",
+        "exception-translations",
+        "has-entity-name",
+        "icon-translations",
+        "inject-websession",
+        "integration-owner",
+        "log-when-unavailable",
+        "parallel-updates",
+        "reauthentication-flow",
+        "reconfiguration-flow",
+        "repair-issues",
+        "runtime-data",
+        "stale-devices",
+        "strict-typing",
+        "test-before-configure",
+        "test-before-setup",
+        "test-coverage",
+        "unique-config-entry",
+    }
+    assert manifest["quality_scale"] == "platinum"
+    assert set(rules) == expected
+    assert all(
+        value == "done"
+        or (isinstance(value, dict) and value.get("status") in {"done", "exempt"})
+        for value in rules.values()
+    )
+
+
+def test_platinum_runtime_resources_are_present():
+    """Require the HA-facing Platinum contract files and resource sections."""
+    assert (INTEGRATION / "diagnostics.py").is_file()
+    icons = json.loads((INTEGRATION / "icons.json").read_text())
+    assert icons["entity"]["sensor"]["last_operation"]["default"]
+    assert icons["entity"]["binary_sensor"]["action_journal_healthy"]["default"]
+
+    strings = json.loads((INTEGRATION / "strings.json").read_text())
+    assert strings["exceptions"]
+    assert "reconfigure" in strings["config"]["step"]
+    assert "issues" in strings
+    assert "services" in strings
+
+    readme = (ROOT / "README.md").read_text()
+    for heading in (
+        "## Use cases",
+        "## Supported functionality",
+        "## Data updates",
+        "## Troubleshooting",
+        "## Known limitations",
+        "## Removal",
+    ):
+        assert heading in readme

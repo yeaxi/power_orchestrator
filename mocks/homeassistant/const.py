@@ -11,5 +11,12 @@ STATE_OFF = "off"
 STATE_UNKNOWN = "unknown"
 STATE_UNAVAILABLE = "unavailable"
 
+class EntityCategory:
+    """Subset of Home Assistant entity categories used by the integration."""
+
+    CONFIG = "config"
+    DIAGNOSTIC = "diagnostic"
+
+
 class UnitOfPower:
     WATT = "W"

@@ -52,13 +52,23 @@ The config flow walks you through 5 steps:
 4. **Priority & Pause** — choose a named device for each priority position (position 1 is highest priority, the last position is shed first), then set pause period
 5. **Grid Loss Behavior** — choose between a grid loss binary sensor or battery SoC threshold
 
+The **Options** flow exposes the same safety-relevant settings after installation. The **Reconfigure** flow is available from the config-entry menu and updates the entry without removing it. Changes to load sources, safety sources, devices, actuator groups, expected power, priorities, thresholds, or pause timing trigger a guarded reload. Existing persisted quarantine, action journal, and execution-mode state remain fail-closed and are not cleared by reconfiguration.
+
+Every field has an inline UI description. In particular:
+
+- `expected_power` is the admission reservation; it is not silently replaced by measured power.
+- measured-power sensors are optional telemetry and may be explicitly cleared;
+- `only_from_solar` uses the exact current Forecast.Solar forecast, not actual PV production;
+- an actuator group is confirmed only when every actuator reports the expected state;
+- unknown, unavailable, stale, wrong-unit, non-finite, negative, or future telemetry blocks normal starts.
+
 ## How It Works
 
 ### Turn-On Logic
 
 A device is enabled only when **all** conditions are met:
 
-1. `average_load + expected_power + safety_reserve < max_load`
+1. `max(current_load, average_load) + expected_power + safety_reserve + hysteresis < max_load`
 2. Pause timer expired
 3. Solar rule satisfied (if enabled): fresh Forecast.Solar **estimated current power** (`power_production_now`, normalized to W) is at least the device's expected power
 4. The configured safety source is valid and reports a safe state
@@ -76,28 +86,122 @@ When `average_load > max_load`, the lowest-priority currently-on device is turne
 
 The planner mode (`auto`/`off`) is separate from the physical execution mode (`live`/`observe`). `observe` is the safe shadow mode: it evaluates policy and records intended actions, but **never sends a physical Home Assistant service call**, including grid-loss, hard-interlock, evaluator-error, rollback, or `emergency=True` paths. `live` enables the same guarded commands after explicit confirmation and fresh telemetry reconciliation. Existing automations can therefore remain enabled while the integration is evaluated in `observe`.
 
-When grid is lost in `live` mode (or battery SoC falls below the configured threshold), optional devices are stopped with bounded readback. A failed or unconfirmed stop is reported as `safety_blocked`; it is never treated as success.
+## Supported functionality
+
+Power Orchestrator manages logical loads that already exist in Home Assistant. It does not create proxy switches or replace the underlying device integrations.
+
+Supported control entities:
+
+- `switch`, `light`, and `input_boolean` as the primary on/off actuator;
+- optional `climate` plus switch/light/input_boolean actuator groups;
+- one optional measured-power `sensor` per logical device;
+- one whole-house load `sensor`;
+- a grid-loss `binary_sensor` or a battery SoC `sensor` as the authoritative safety source;
+- optional Forecast.Solar current-power forecast and PV/battery telemetry.
+
+Supported actions are `force_evaluate`, `set_mode`, `request_start`, `request_stop`, `clear_quarantine`, and `set_execution_mode`. All actions use the integration's guarded coordinator boundary; dashboards and automations must not call raw relay or climate services for managed devices.
 
 ## Entities
 
-| Entity | Type | Description |
-|---|---|---|
-| `select.power_orchestrator_mode` | Select | `auto` / `off` |
-| `sensor.power_orchestrator_status` | Sensor | monitoring / load_shedding / grid_loss / adding_load / safety_blocked |
-| `sensor.power_orchestrator_current_load` | Sensor | Instantaneous load (W) |
-| `sensor.power_orchestrator_average_load` | Sensor | Average load over period (W) |
-| `sensor.power_orchestrator_available_capacity` | Sensor | Remaining headroom (W) |
-| `sensor.power_orchestrator_last_action` | Sensor | Human-readable last action |
-| `binary_sensor.power_orchestrator_grid_ok` | Binary Sensor | Grid present / absent; false for missing or stale safety input |
+All entities belong to one `Power Orchestrator` device and use stable unique IDs containing the config-entry ID.
 
-The coordinator also exposes `load_sensor_valid` and `load_sensor_reason` in its data payload for diagnostics. `safety_blocked` is used when a required input or physical readback cannot be trusted.
+| Entity | Type | Category | Description |
+|---|---|---|---|
+| `select.power_orchestrator_mode` | Select | configuration | Planner mode: `auto` / `off` |
+| `sensor.power_orchestrator_status` | Sensor | diagnostic | Current planner/safety status |
+| `sensor.power_orchestrator_current_load` | Sensor | measurement | Fresh instantaneous aggregate load (W) |
+| `sensor.power_orchestrator_average_load` | Sensor | measurement | Average aggregate load over the configured window (W) |
+| `sensor.power_orchestrator_available_capacity` | Sensor | measurement | Remaining guarded headroom (W) |
+| `sensor.power_orchestrator_last_action` | Sensor | diagnostic | Last bounded action summary |
+| `sensor.power_orchestrator_execution_mode` | Sensor | diagnostic | `observe` or `live`; physical boundary |
+| `sensor.power_orchestrator_reason_code` | Sensor | diagnostic | Typed policy/safety reason |
+| `sensor.power_orchestrator_last_operation` | Sensor | diagnostic | Last operation plus bounded journal projection |
+| `binary_sensor.power_orchestrator_grid_ok` | Binary Sensor | diagnostic | Grid/safety source valid and safe |
+| `binary_sensor.power_orchestrator_faulted` | Binary Sensor | diagnostic | At least one logical device has a durable fault |
+| `binary_sensor.power_orchestrator_recovery_blocked` | Binary Sensor | diagnostic | Recovery is blocked pending reconciliation |
+| `binary_sensor.power_orchestrator_action_journal_healthy` | Binary Sensor | diagnostic | Durable action journal can accept lifecycle writes |
+
+The coordinator also exposes `load_sensor_valid`, `load_sensor_reason`, `faulted_devices`, `recovery_blocked_devices`, and bounded journal state for diagnostics. `safety_blocked` is used when a required input, persistence state, or physical readback cannot be trusted.
 
 ## Services
 
-| Service | Description |
-|---|---|
-| `power_orchestrator.force_evaluate` | Trigger immediate re-evaluation |
-| `power_orchestrator.set_mode` | Set mode: `auto` or `off` |
+All service calls return a stable optional response containing `accepted`, `action`, `mode`, `execution_mode`, `reason_code`, and the last action where supported. A response with `accepted=true` in `observe` mode records an intent only; it is not evidence of a physical state change.
+
+| Service | Required fields | Description |
+|---|---|---|
+| `power_orchestrator.force_evaluate` | none | Trigger an immediate guarded evaluation |
+| `power_orchestrator.set_mode` | `mode` | Set planner mode to `auto` or `off`; this never bypasses emergency guards |
+| `power_orchestrator.request_start` | `device_id`, optional `source` | Request a guarded logical-device start; observe mode records only |
+| `power_orchestrator.request_stop` | `device_id`, optional `source` | Request a guarded logical-device stop; raw physical services remain prohibited |
+| `power_orchestrator.clear_quarantine` | `device_id`, optional `source` | Clear a durable quarantine only after fresh OFF, load, measured-power, and persistence proof |
+| `power_orchestrator.set_execution_mode` | `execution_mode`, optional `confirm_live` | Select `observe` or `live`; entering `live` requires explicit confirmation and fresh safety reconciliation |
+
+The service schemas in `services.yaml` are UI metadata. Runtime handlers validate all fields again, map invalid input to translated `ServiceValidationError`, and map operation/storage failures to translated `HomeAssistantError`.
+
+## Use cases
+
+### Shadow migration from existing automations
+
+1. Install and configure the integration with `planner_mode=off` and `execution_mode=observe`.
+2. Keep existing automations enabled and compare the coordinator's intended actions with current automation behavior.
+3. Review `status`, `reason_code`, `last_operation`, and the action journal for a complete telemetry cycle.
+4. Do not enable `live` or remove the existing automation until separate approval and physical verification are complete.
+
+### Solar-only water-heating load
+
+Configure a boiler with `only_from_solar=true`, an expected power reservation, and a Forecast.Solar config entry. The integration uses the exact current forecast for admission; measured PV production is runtime telemetry only.
+
+### Whole-house overload protection
+
+Configure the aggregate load sensor, safety reserve, hysteresis, and one-to-ten overload thresholds. When a threshold matures, the coordinator sheds at most one logical load per evaluation barrier and retains durable recovery order.
+
+### Recovery after a failed readback
+
+A failed or ambiguous command leaves the device faulted/recovery-blocked. The issue registry, diagnostic entities, and persistent notification identify the device. `clear_quarantine` is accepted only after independent fresh OFF/load/measured-power evidence.
+
+## Data updates
+
+The coordinator performs periodic evaluation using its configured update interval and also reacts to relevant Home Assistant state changes. State-change bursts are coalesced into one worker. A new load report generation can authorize at most one normal start; the coordinator waits for causal post-command telemetry before releasing the barrier.
+
+Telemetry freshness budgets are independent from the averaging period. Increasing the averaging window never makes an old grid, battery, actuator, forecast, or load sample safe. Invalid samples clear the relevant admission path and fail closed.
+
+## Troubleshooting
+
+### Status is `safety_blocked`
+
+Check `sensor.power_orchestrator_reason_code`, `load_sensor_reason`, `grid_ok`, `faulted`, `recovery_blocked`, and the action journal health sensor. Typical causes are missing/unknown/stale input, unsupported units, invalid Forecast.Solar data, a persisted storage fault, or an unconfirmed actuator readback.
+
+### A device is quarantined
+
+Do not force the underlying switch or climate entity through a raw service. Verify every actuator in the logical group is actually OFF, verify a fresh aggregate load sample and measured-power sample, then call `clear_quarantine` with the stable logical `device_id`. If any proof is missing or stale, the request remains blocked by design.
+
+### A service is rejected
+
+Confirm the config entry is loaded, exactly one Power Orchestrator entry exists, the logical device ID is correct, and the requested mode is valid. Validation and operation errors are translated through Home Assistant resources.
+
+### Diagnostics download
+
+Use the config-entry diagnostics action from Home Assistant. The diagnostics payload is bounded and redacts credential-like keys. It is safe to attach to an issue after reviewing entity IDs and local deployment information.
+
+## Known limitations
+
+- This is a HACS/custom integration and has not received an official Home Assistant Core quality-scale review; the repository targets the Platinum checklist but must not self-award the official tier.
+- Software load shedding is not a substitute for hardware overcurrent protection, breakers, or an electrician's safety assessment.
+- Forecast.Solar is used only when its exact current-power entity and freshness/units are verified; unavailable forecast data blocks solar-only starts.
+- Existing automations remain external owners. A manual/external start is not silently adopted as planner ownership.
+- `observe` never sends physical Home Assistant service calls, including emergency, grid-loss, rollback, and hard-interlock paths.
+- Actual PV production is not an admission signal because curtailment makes production load-dependent.
+- A persisted quarantine intentionally requires an explicit, evidence-based clear; restarting Home Assistant does not clear it.
+- The integration manages configured Home Assistant entities and does not discover the physical relay's device protocol itself.
+
+## Removal
+
+1. Set planner mode to `off` and keep execution mode at `observe`.
+2. Wait for any in-flight evaluation to finish; do not use raw relay services as a substitute for guarded stop logic.
+3. In Settings → Devices & Services, open **Power Orchestrator**, choose the config-entry menu, and select **Delete**.
+4. If installed through HACS, remove the repository after deleting the config entry and restart Home Assistant.
+5. For a manual installation, delete `custom_components/power_orchestrator/` only after the config entry is removed, then restart Home Assistant.
+6. Existing automations are not modified by removal; review them separately before changing the household control plan.
 
 ## Design Principles
 

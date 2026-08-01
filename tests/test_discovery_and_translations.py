@@ -71,6 +71,7 @@ def test_translation_resources_follow_home_assistant_strings_schema():
             "devices",
             "priority",
             "grid_loss",
+            "reconfigure",
         }
         assert "summary" in config["step"]["user"]["description"]
         assert "sensor_name" in config["step"]["load_monitoring"]["description"]
@@ -96,6 +97,12 @@ def test_onboarding_has_field_description_for_every_config_step_field():
         "priority": {*(f"priority_{i}" for i in range(1, 11)), "pause_period"},
         "grid_loss": {
             "grid_loss_mode", "grid_loss_sensor", "battery_soc", "battery_threshold",
+        },
+        "reconfigure": {
+            "load_sensor", "max_load", "averaging_period", "safety_reserve", "hysteresis",
+            "pause_period", "grid_loss_mode", "grid_loss_sensor", "battery_soc",
+            "battery_threshold", "solar_power", "solar_forecast_entry", "battery_power",
+            "devices", "threshold_count",
         },
     }
 

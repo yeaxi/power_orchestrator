@@ -233,6 +233,28 @@ def test_read_load_sensor_unavailable():
     assert c._read_load_sensor() == 0.0
 
 
+@pytest.mark.parametrize(
+    "raw, unit, reason",
+    [("3500", "V", "unsupported_unit"), ("bad", "W", "non_numeric"), ("nan", "W", "invalid_value"), ("-1", "W", "invalid_value")],
+)
+def test_read_load_sensor_rejects_invalid_values(raw, unit, reason):
+    c = make_coordinator()
+    state = MagicMock()
+    state.state = raw
+    state.attributes = {"unit_of_measurement": unit}
+    c.hass.states.get.return_value = state
+    assert c._read_load_sensor() == 0.0
+    assert c.load_sensor_reason == reason
+
+
+def test_actuator_state_normalization_is_conservative():
+    c = make_coordinator()
+    assert c._actuator_state_on("climate.room", MagicMock(state="off")) is False
+    assert c._actuator_state_on("climate.room", MagicMock(state="heat")) is True
+    assert c._actuator_state_on("switch.room", MagicMock(state="unknown")) is None
+    assert c._actuator_state_on("switch.room", MagicMock(state="maybe")) is None
+
+
 # ── Average load tests ──────────────────────────────────────────────
 
 

@@ -5,7 +5,7 @@ import asyncio
 import json
 import os
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,8 +14,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "custom_compone
 
 from power_orchestrator import (
     HomeAssistantError,
-    _register_services,
     ServiceValidationError,
+    _async_setup_entry_impl,
+    _lifecycle_state,
+    _loaded_runtimes,
+    _register_services,
+    _repair_device_ids,
+    _safe_number,
+    _sync_repair_issues,
+    _translated_error,
+    _valid_entity_id,
+    async_migrate_entry,
+    async_setup,
     async_setup_entry,
     async_unload_entry,
 )
@@ -38,13 +48,17 @@ from power_orchestrator.const import (
     GRID_LOSS_MODE_THRESHOLD,
     MODE_OFF,
 )
-from power_orchestrator.select import PowerOrchestratorModeSelect
+from power_orchestrator.select import (
+    PowerOrchestratorModeSelect,
+    async_setup_entry as async_setup_select,
+)
 from power_orchestrator.sensor import (
     PowerOrchestratorAverageLoadSensor,
     PowerOrchestratorAvailableCapacitySensor,
     PowerOrchestratorCurrentLoadSensor,
     PowerOrchestratorExecutionModeSensor,
     PowerOrchestratorLastOperationSensor,
+    PowerOrchestratorLastActionSensor,
     PowerOrchestratorReasonCodeSensor,
     PowerOrchestratorStatusSensor,
     async_setup_entry as async_setup_sensor,
@@ -63,6 +77,57 @@ class _FakeStore:
     async def async_save(self, data):
         self.data = data
         self.saves += 1
+
+
+class _LegacyError(Exception):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_init_helpers_fail_closed_and_global_setup_contracts():
+    assert str(_translated_error(_LegacyError, "legacy_key")) == "legacy_key"
+    translated = _translated_error(HomeAssistantError, "current_key", reason="bad input")
+    assert isinstance(translated, HomeAssistantError)
+    assert _repair_device_ids({"devices": ["d1", "", 1]}, "devices") == {"d1"}
+    assert _repair_device_ids({"devices": "invalid"}, "devices") == set()
+    assert _valid_entity_id("switch.ok", frozenset({"switch"})) is True
+    assert _valid_entity_id("sensor.no", frozenset({"switch"})) is False
+    assert _valid_entity_id(None, frozenset({"switch"})) is False
+    assert _safe_number("2.5", default=1, minimum=0, maximum=3) == 2.5
+    assert _safe_number(True, default=1, minimum=0, maximum=3) == 1
+    assert _safe_number("bad", default=1, minimum=0, maximum=3) == 1
+    assert _safe_number(float("inf"), default=1, minimum=0, maximum=3) == 1
+
+    hass = SimpleNamespace(data=[])
+    state = _lifecycle_state(hass)
+    assert isinstance(hass.data, dict)
+    assert isinstance(state["lock"], asyncio.Lock)
+    assert isinstance(state["reservations"], set)
+
+    no_entries = SimpleNamespace(config_entries=SimpleNamespace(async_entries=lambda _: {"bad": 1}))
+    assert _loaded_runtimes(no_entries) == []
+    no_api = SimpleNamespace(config_entries=SimpleNamespace())
+    assert _loaded_runtimes(no_api) == []
+
+    malformed_coordinator = SimpleNamespace(data=[])
+    malformed_hass = SimpleNamespace(data=[])
+    issue_module = ModuleType("homeassistant.helpers.issue_registry")
+    issue_module.IssueSeverity = SimpleNamespace(ERROR="error")
+    issue_module.async_create_issue = MagicMock()
+    issue_module.async_delete_issue = MagicMock()
+    with patch.dict(sys.modules, {"homeassistant.helpers.issue_registry": issue_module}):
+        _sync_repair_issues(
+            malformed_hass,
+            malformed_coordinator,
+            MagicMock(all_devices=lambda: []),
+        )
+    assert isinstance(malformed_hass.data, dict)
+
+    setup_hass = MagicMock()
+    with patch("power_orchestrator._register_services", new=AsyncMock()) as register:
+        assert await async_setup(setup_hass, {}) is True
+    register.assert_awaited_once_with(setup_hass)
+    assert await async_migrate_entry(setup_hass, SimpleNamespace()) is True
 
 
 @pytest.mark.asyncio
@@ -265,6 +330,21 @@ async def test_mode_select_rejects_unknown_option_and_persists_valid_option():
     await entity.async_select_option("off")
     coordinator.async_set_mode.assert_awaited_once_with("off")
     entity.async_write_ha_state.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_mode_select_setup_requires_runtime_and_exposes_current_option():
+    entry = SimpleNamespace(entry_id="entry-select", runtime_data=None)
+    with pytest.raises(RuntimeError, match="runtime data is unavailable"):
+        await async_setup_select(MagicMock(), entry, MagicMock())
+
+    add_entities = MagicMock()
+    coordinator = MagicMock()
+    coordinator.mode = "off"
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+    await async_setup_select(MagicMock(), entry, add_entities)
+    entity = add_entities.call_args.args[0][0]
+    assert entity.current_option == "off"
 
 
 @pytest.mark.asyncio
@@ -508,6 +588,81 @@ async def test_setup_defaults_new_entry_to_off_before_first_refresh():
 
     assert coordinator.mode == MODE_OFF
     coordinator.async_config_entry_first_refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_setup_coalesces_relevant_state_events_and_registers_cleanup():
+    hass = MagicMock()
+    hass.data = {}
+    hass.async_create_task = None
+    hass.config_entries.async_entries.return_value = []
+    hass.config_entries.async_forward_entry_setups = AsyncMock()
+    hass.config_entries.async_reload = AsyncMock()
+    hass.bus.async_listen = MagicMock(return_value="unsubscribe")
+    entry = SimpleNamespace(
+        entry_id="entry-events",
+        data={
+            CONF_LOAD_SENSOR: "sensor.load",
+            "grid_loss_mode": GRID_LOSS_MODE_SENSOR,
+            "grid_loss_sensor": "binary_sensor.grid",
+            "devices": [
+                {
+                    "device_id": "d1",
+                    "name": "Device",
+                    "entity": "switch.d1",
+                    "expected_power": 1000,
+                    "power_sensor": "sensor.d1_power",
+                }
+            ],
+        },
+        options={},
+        async_on_unload=MagicMock(),
+        add_update_listener=MagicMock(return_value="update-unsubscribe"),
+    )
+    runtime_store = MagicMock()
+    runtime_store.async_load = AsyncMock()
+    runtime_store.restore_mode.return_value = None
+    runtime_store.restore_execution_mode.return_value = None
+    runtime_store.restore_device_runtime.return_value = (set(), set())
+    runtime_store.restore_fault_reasons.return_value = {}
+    runtime_store.restore_fault_notification_state.return_value = ({}, {})
+    runtime_store.unresolved_actions.return_value = []
+    runtime_store.action_journal_invalid = False
+    coordinator = MagicMock()
+    coordinator.async_config_entry_first_refresh = AsyncMock()
+    coordinator.async_force_evaluate = AsyncMock()
+    coordinator.async_add_listener = MagicMock(return_value=None)
+
+    with (
+        patch("power_orchestrator.Store"),
+        patch("power_orchestrator.RuntimeStore", return_value=runtime_store),
+        patch("power_orchestrator.PowerOrchestratorCoordinator", return_value=coordinator),
+        patch("power_orchestrator._register_services", new=AsyncMock()),
+    ):
+        assert await async_setup_entry(hass, entry) is True
+
+    state_listener = hass.bus.async_listen.call_args.args[1]
+    await state_listener(SimpleNamespace(data={"entity_id": "sensor.unwatched"}))
+    coordinator.async_force_evaluate.assert_not_awaited()
+
+    relevant = SimpleNamespace(data={"entity_id": "sensor.load"})
+    await state_listener(relevant)
+    await state_listener(relevant)
+    await asyncio.sleep(0)
+    assert coordinator.async_force_evaluate.await_count == 1
+
+    cleanup_callbacks = [
+        call.args[0]
+        for call in entry.async_on_unload.call_args_list
+        if callable(call.args[0])
+    ]
+    assert any(
+        getattr(callback, "__name__", "") == "_cancel_state_worker"
+        for callback in cleanup_callbacks
+    )
+    update_listener = entry.add_update_listener.call_args.args[0]
+    await update_listener(hass, entry)
+    hass.config_entries.async_reload.assert_awaited_once_with(entry.entry_id)
 
 
 @pytest.mark.asyncio
@@ -784,6 +939,104 @@ async def test_global_services_route_singleton_entry():
 
 
 @pytest.mark.asyncio
+async def test_global_services_translate_handler_failures_and_normalize_context():
+    hass = MagicMock()
+    coordinator = MagicMock()
+    coordinator.async_force_evaluate = AsyncMock()
+    coordinator.async_set_mode = AsyncMock()
+    coordinator.async_request_start = AsyncMock(return_value=False)
+    coordinator.async_request_stop = AsyncMock(return_value=False)
+    coordinator.async_clear_quarantine = AsyncMock(return_value=False)
+    coordinator.async_set_execution_mode = AsyncMock()
+    hass.config_entries.async_entries.return_value = [
+        SimpleNamespace(runtime_data=SimpleNamespace(coordinator=coordinator))
+    ]
+    hass.services.has_service.return_value = False
+    handlers = {}
+    hass.services.async_register.side_effect = lambda domain, service, handler, **kwargs: handlers.update(
+        {service: handler}
+    )
+    await _register_services(hass)
+
+    coordinator.async_force_evaluate.side_effect = RuntimeError("evaluation")
+    with pytest.raises(HomeAssistantError):
+        await handlers["force_evaluate"](SimpleNamespace(data={}))
+    coordinator.async_force_evaluate.side_effect = None
+
+    coordinator.async_set_mode.side_effect = ValueError("mode rejected")
+    with pytest.raises(ServiceValidationError):
+        await handlers["set_mode"](SimpleNamespace(data={"mode": MODE_OFF}))
+    coordinator.async_set_mode.side_effect = RuntimeError("mode failed")
+    with pytest.raises(HomeAssistantError):
+        await handlers["set_mode"](SimpleNamespace(data={"mode": MODE_OFF}))
+    coordinator.async_set_mode.side_effect = None
+
+    with pytest.raises(ServiceValidationError):
+        await handlers["request_start"](SimpleNamespace(data={"device_id": "d1", "source": " "}))
+    default_result = await handlers["request_start"](
+        SimpleNamespace(
+            data={"device_id": "d1"},
+            context=SimpleNamespace(user_id="", id=""),
+        )
+    )
+    assert default_result["actor_id"] == "system"
+    assert default_result["context_id"] is None
+    coordinator.async_request_start.side_effect = ValueError("start rejected")
+    with pytest.raises(ServiceValidationError):
+        await handlers["request_start"](SimpleNamespace(data={"device_id": "d1"}))
+    coordinator.async_request_start.side_effect = RuntimeError("start failed")
+    with pytest.raises(HomeAssistantError):
+        await handlers["request_start"](SimpleNamespace(data={"device_id": "d1"}))
+    coordinator.async_request_start.side_effect = None
+
+    with pytest.raises(ServiceValidationError):
+        await handlers["request_stop"](SimpleNamespace(data={}))
+    coordinator.async_request_stop.side_effect = ValueError("stop rejected")
+    with pytest.raises(ServiceValidationError):
+        await handlers["request_stop"](SimpleNamespace(data={"device_id": "d1"}))
+    coordinator.async_request_stop.side_effect = RuntimeError("stop failed")
+    with pytest.raises(HomeAssistantError):
+        await handlers["request_stop"](SimpleNamespace(data={"device_id": "d1"}))
+    coordinator.async_request_stop.side_effect = None
+
+    with pytest.raises(ServiceValidationError):
+        await handlers["clear_quarantine"](SimpleNamespace(data={}))
+    coordinator.async_clear_quarantine.side_effect = ValueError("clear rejected")
+    with pytest.raises(ServiceValidationError):
+        await handlers["clear_quarantine"](SimpleNamespace(data={"device_id": "d1"}))
+    coordinator.async_clear_quarantine.side_effect = RuntimeError("clear failed")
+    with pytest.raises(HomeAssistantError):
+        await handlers["clear_quarantine"](SimpleNamespace(data={"device_id": "d1"}))
+    coordinator.async_clear_quarantine.side_effect = None
+
+    with pytest.raises(ServiceValidationError):
+        await handlers["set_execution_mode"](SimpleNamespace(data={"execution_mode": "armed"}))
+    coordinator.async_set_execution_mode.side_effect = ValueError("execution rejected")
+    with pytest.raises(ServiceValidationError):
+        await handlers["set_execution_mode"](
+            SimpleNamespace(data={"execution_mode": "live", "confirm_live": True})
+        )
+    coordinator.async_set_execution_mode.side_effect = RuntimeError("execution failed")
+    with pytest.raises(HomeAssistantError):
+        await handlers["set_execution_mode"](
+            SimpleNamespace(data={"execution_mode": "observe"})
+        )
+    coordinator.async_set_execution_mode.side_effect = None
+    result = await handlers["set_execution_mode"](
+        SimpleNamespace(data={"execution_mode": "observe"})
+    )
+    assert result["accepted"] is True
+
+
+@pytest.mark.asyncio
+async def test_global_services_skip_registration_when_already_present():
+    hass = MagicMock()
+    hass.services.has_service.return_value = True
+    await _register_services(hass)
+    hass.services.async_register.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_global_services_ignore_unloaded_runtime_and_fail_closed_without_loaded_target():
     hass = MagicMock()
     coordinator = MagicMock()
@@ -922,3 +1175,186 @@ async def test_unload_cleans_runtime_when_persistence_fails():
     assert await async_unload_entry(hass, entry) is True
     coordinator.async_shutdown.assert_awaited_once()
     assert entry.runtime_data is None
+
+
+@pytest.mark.asyncio
+async def test_internal_setup_guard_rejects_loaded_runtime_before_any_side_effect():
+    hass = MagicMock()
+    hass.config_entries.async_entries.return_value = [
+        SimpleNamespace(runtime_data=SimpleNamespace(coordinator=MagicMock()))
+    ]
+    entry = SimpleNamespace(entry_id="duplicate", runtime_data=None)
+
+    assert await _async_setup_entry_impl(hass, entry) is False
+    hass.config_entries.async_forward_entry_setups.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_setup_normalizes_non_mapping_and_logical_actuator_inputs():
+    hass = MagicMock()
+    hass.data = {}
+    hass.config_entries.async_entries.return_value = []
+    hass.config_entries.async_forward_entry_setups = AsyncMock()
+    hass.bus.async_listen = MagicMock(return_value="unsubscribe")
+    entry = SimpleNamespace(
+        entry_id="entry-actuators",
+        data={
+            CONF_LOAD_SENSOR: "sensor.load",
+            "grid_loss_mode": GRID_LOSS_MODE_SENSOR,
+            CONF_DEVICES: [
+                "not-a-device-mapping",
+                {
+                    "device_id": "non-list-actuators",
+                    "name": "Device A",
+                    "entity": "switch.device_a",
+                    "actuators": 123,
+                    "expected_power": 1000,
+                },
+                {
+                    "device_id": "string-actuator",
+                    "name": "Device B",
+                    "entity": "switch.device_b",
+                    "actuators": "switch.device_b_aux",
+                    "expected_power": 1000,
+                },
+                {
+                    "device_id": "duplicate-actuator",
+                    "name": "Invalid duplicate",
+                    "entity": "switch.device_c",
+                    "actuators": ["switch.device_c"],
+                    "expected_power": 1000,
+                },
+                {
+                    "device_id": "invalid-actuator",
+                    "name": "Invalid domain",
+                    "entity": "switch.device_d",
+                    "actuators": ["sensor.device_d_power"],
+                    "expected_power": 1000,
+                },
+            ],
+        },
+        options={},
+        async_on_unload=MagicMock(),
+        add_update_listener=MagicMock(return_value="update-unsubscribe"),
+    )
+    runtime_store = MagicMock()
+    runtime_store.async_load = AsyncMock()
+    runtime_store.restore_mode.return_value = None
+    runtime_store.restore_execution_mode.return_value = None
+    runtime_store.restore_device_runtime.return_value = (set(), set())
+    runtime_store.restore_fault_reasons.return_value = {}
+    runtime_store.restore_fault_notification_state.return_value = ({}, {})
+    runtime_store.unresolved_actions.return_value = []
+    coordinator = MagicMock()
+    coordinator.async_config_entry_first_refresh = AsyncMock()
+
+    with (
+        patch("power_orchestrator.Store"),
+        patch("power_orchestrator.RuntimeStore", return_value=runtime_store),
+        patch("power_orchestrator.PowerOrchestratorCoordinator", return_value=coordinator) as factory,
+        patch("power_orchestrator._register_services", new=AsyncMock()),
+    ):
+        assert await async_setup_entry(hass, entry) is True
+
+    model = factory.call_args.kwargs["model"]
+    assert {device.device_id for device in model.all_devices()} == {
+        "non-list-actuators",
+        "string-actuator",
+    }
+    assert model.get_device("non-list-actuators").actuator_entity_ids == ()
+    assert model.get_device("string-actuator").actuator_entity_ids == (
+        "switch.device_b_aux",
+    )
+
+
+@pytest.mark.asyncio
+async def test_unload_false_preserves_runtime_and_listener():
+    hass = MagicMock()
+    hass.config_entries.async_unload_platforms = AsyncMock(return_value=False)
+    hass.config_entries.async_entries.return_value = []
+    listener_remove = MagicMock()
+    store = MagicMock()
+    store.async_save = AsyncMock()
+    coordinator = MagicMock()
+    coordinator.async_shutdown = AsyncMock()
+    runtime = SimpleNamespace(
+        store=store,
+        coordinator=coordinator,
+        repair_listener_remove=listener_remove,
+    )
+    entry = SimpleNamespace(entry_id="entry-unload-false", runtime_data=runtime)
+
+    assert await async_unload_entry(hass, entry) is False
+    assert entry.runtime_data is runtime
+    listener_remove.assert_not_called()
+    store.async_save.assert_not_awaited()
+    coordinator.async_shutdown.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unload_removes_repair_listener_and_uses_policy_fallback():
+    hass = MagicMock()
+    hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
+    hass.config_entries.async_entries.return_value = []
+    listener_remove = MagicMock()
+    store = MagicMock()
+    store.async_save = AsyncMock()
+    store.save_policy_runtime = MagicMock()
+    coordinator = SimpleNamespace(
+        _policy_engine=object(),
+        async_shutdown=AsyncMock(),
+    )
+    entry = SimpleNamespace(
+        entry_id="entry-fallback-save",
+        runtime_data=SimpleNamespace(
+            store=store,
+            coordinator=coordinator,
+            repair_listener_remove=listener_remove,
+        ),
+    )
+
+    assert await async_unload_entry(hass, entry) is True
+    listener_remove.assert_called_once()
+    store.save_policy_runtime.assert_called_once_with(coordinator._policy_engine)
+    store.async_save.assert_awaited_once()
+    coordinator.async_shutdown.assert_awaited_once()
+    assert entry.runtime_data is None
+
+
+@pytest.mark.asyncio
+async def test_platform_setup_requires_runtime_and_entity_projections_are_typed():
+    with pytest.raises(RuntimeError, match="runtime data is unavailable"):
+        await async_setup_sensor(MagicMock(), SimpleNamespace(runtime_data=None), MagicMock())
+    with pytest.raises(RuntimeError, match="runtime data is unavailable"):
+        await async_setup_binary(MagicMock(), SimpleNamespace(runtime_data=None), MagicMock())
+
+    coordinator = SimpleNamespace(
+        hass=MagicMock(),
+        status="idle",
+        mode=MODE_OFF,
+        grid_ok=True,
+        grid_safety_source_configured=True,
+        load_sensor_valid=False,
+        load_sensor_reason="missing",
+        startup_safe=True,
+        pending_start_power=0.0,
+        last_action="none",
+        execution_mode="observe",
+        current_load=None,
+        data={},
+    )
+    entry = SimpleNamespace(entry_id="entry-entities")
+    status = PowerOrchestratorStatusSensor(coordinator, entry)
+    last_action = PowerOrchestratorLastActionSensor(coordinator, entry)
+    fault = PowerOrchestratorFaultSensor(coordinator, entry)
+    journal = PowerOrchestratorActionJournalHealthySensor(coordinator, entry)
+
+    assert status._coordinator is coordinator
+    assert status.native_value == "idle"
+    assert last_action.native_value == "none"
+    assert fault.available is True
+    assert journal.extra_state_attributes == {
+        "unresolved_count": 0,
+        "invalid": False,
+        "persistence_blocked": False,
+    }

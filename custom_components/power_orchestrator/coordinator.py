@@ -78,7 +78,7 @@ class _PendingStart:
     telemetry_deadline_monotonic: float = 0.0
 
 
-class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # type: ignore[misc]
     """Orchestrator coordinator — evaluates and manages loads."""
 
     def __init__(
@@ -274,7 +274,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return whether automatic physical starts are still startup-blocked."""
         return self._startup_safe
 
-    @mode.setter  # type: ignore[no-redef, attr-defined]
+    @mode.setter  # type: ignore[no-redef, attr-defined, untyped-decorator]
     def mode(self, value: str) -> None:
         if value not in (MODE_AUTO, MODE_OFF):
             raise ValueError(f"Unsupported mode: {value}")
@@ -1153,10 +1153,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if normalized in {STATE_UNKNOWN, STATE_UNAVAILABLE, ""}:
             return None
         if entity_id.split(".", 1)[0] == "climate":
-            return normalized != STATE_OFF
+            return bool(normalized != STATE_OFF)
         if normalized not in {STATE_ON, STATE_OFF}:
             return None
-        return normalized == STATE_ON
+        return bool(normalized == STATE_ON)
 
     def _logical_device_state(self, device: ManagedDevice) -> bool | None:
         """Return ON only when every actuator in a logical group is ON."""

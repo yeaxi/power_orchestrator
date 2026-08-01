@@ -261,4 +261,31 @@ The local, non-live quality gate currently covers:
 - config/options flow validation;
 - safety, freshness, readback, persistence, one-device-per-cycle and service lifecycle tests.
 
+Latest captured local evidence on the current working tree:
+
+```text
+coverage run --branch -m pytest tests/ -q
+425 passed in 11.51s
+TOTAL branch coverage: 95%
+coordinator.py branch coverage: 95%
+strict mypy: Success: no issues found in 13 source files
+ruff: All checks passed!
+compileall: passed
+resource JSON: valid
+```
+
+The quality virtualenv used for the mocked suite does not include
+`pytest_homeassistant_custom_component`, so it cannot run the real-HA tests while its
+local `mocks` path is active. A separate disposable Python 3.14 environment with the
+Home Assistant test stack ran the clean real-HA path successfully:
+
+```text
+PYTHONPATH=custom_components pytest -c /dev/null -o asyncio_mode=auto \
+  -o cache_dir=/tmp/power-orchestrator-ha-pytest-cache tests_real_ha/test_loader.py -q
+3 passed in 0.24s
+```
+
+This is compatibility smoke evidence only, not official Home Assistant Core review or
+official quality-scale certification.
+
 A local pass is not a substitute for the controlled live HA verification above.
