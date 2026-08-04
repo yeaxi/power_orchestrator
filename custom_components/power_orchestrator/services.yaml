@@ -1,15 +1,15 @@
 force_evaluate:
   name: Force evaluate
-  description: "Force immediate re-evaluation of all loads. This does not bypass safety gates or execution policy."
+  description: "Force immediate re-evaluation of load-shedding safety. This does not bypass safety gates or execution policy."
   fields: {}
 
 set_mode:
-  name: Set planner mode
-  description: "Arm or disarm normal policy evaluation. Off blocks normal starts; emergency safety stops remain active."
+  name: Set automation mode
+  description: "Persistently arm or disarm normal load-shedding policy evaluation. Emergency safety stops remain active."
   fields:
     mode:
-      name: Planner mode
-      description: "Auto arms normal policy evaluation; off keeps normal planner actions disarmed. This is separate from observe/live physical execution policy."
+      name: Automation mode
+      description: "Auto runs load-shedding evaluation; off disarms normal policy decisions. This setting survives Home Assistant restart."
       required: true
       selector:
         select:
@@ -17,30 +17,13 @@ set_mode:
             - "auto"
             - "off"
 
-request_start:
-  name: Request logical-device start
-  description: "Request a guarded start through Power Orchestrator. The integration validates telemetry, ownership, reserve, and readback before any physical command."
-  fields:
-    device_id:
-      name: Logical device ID
-      description: "Stable configured device_id, not a raw switch entity ID."
-      required: true
-      selector:
-        text: {}
-    source:
-      name: Request source
-      description: "Audit label for the caller, such as dashboard, automation, or user."
-      required: false
-      selector:
-        text: {}
-
 request_stop:
   name: Request logical-device stop
-  description: "Request a guarded logical-device stop through the integration; do not call a physical relay service directly."
+  description: "Request a guarded logical-device stop through the integration; the integration never enables a load."
   fields:
     device_id:
       name: Logical device ID
-      description: "Stable configured device_id, not a raw switch entity ID."
+      description: "Stable configured device_id, not a raw entity ID."
       required: true
       selector:
         text: {}
@@ -53,28 +36,28 @@ request_stop:
 
 clear_quarantine:
   name: Clear device quarantine
-  description: "Clear a persisted fault/recovery quarantine only after the integration verifies fresh device OFF readback, valid aggregate load, and safe measured power. This never turns a device on."
+  description: "Clear a persisted fault only after fresh OFF readback, valid aggregate load, and safe measured power are verified. This never enables a device."
   fields:
     device_id:
       name: Logical device ID
-      description: "Stable configured device_id of the quarantined logical device; raw physical relay entity IDs are not accepted."
+      description: "Stable configured device_id of the quarantined logical device."
       required: true
       selector:
         text: {}
     source:
       name: Clear source
-      description: "Audit label for the explicit clear request, such as dashboard or operator."
+      description: "Audit label for the explicit clear request."
       required: false
       selector:
         text: {}
 
 set_execution_mode:
   name: Set physical execution policy
-  description: "Select observe or live execution. Observe never emits normal physical commands; live requires explicit confirmation."
+  description: "Select observe or live execution. Observe never emits physical commands; live permits guarded load-shedding stops after explicit confirmation."
   fields:
     execution_mode:
       name: Execution policy
-      description: "Observe performs decisions and audit only; live permits guarded normal commands after all safety checks."
+      description: "Observe performs decisions and audit only; live permits guarded stop commands."
       required: true
       selector:
         select:
@@ -83,7 +66,7 @@ set_execution_mode:
             - "live"
     confirm_live:
       name: Confirm live ownership
-      description: "Must be true to enter live execution. Existing transitional automations must remain coordinated and rollback evidence must be ready."
+      description: "Must be true to enter live execution."
       required: false
       selector:
         boolean: {}

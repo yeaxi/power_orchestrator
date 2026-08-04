@@ -60,7 +60,8 @@ def test_controlled_ha_verification_procedure_is_present():
     ):
         assert heading in procedure
     assert "service calls" in procedure
-    assert "turn_on" in procedure
+    assert "turn_off" in procedure
+    assert "no normal automatic enabling" in procedure.lower()
     assert "not a substitute for the controlled live HA verification" in procedure
 
 

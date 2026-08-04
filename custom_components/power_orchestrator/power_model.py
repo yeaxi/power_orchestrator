@@ -1,7 +1,8 @@
-"""Logical load model — expected power, measured telemetry, and ownership."""
+"""Logical load model for the load-shedding controller."""
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -11,69 +12,47 @@ from .policy import Ownership
 
 @dataclass
 class ManagedDevice:
-    """A logical optional load with one or more physical actuators."""
+    """A logical optional load that the controller may switch off."""
 
-    # Config (persisted in config entry)
     device_id: str
     name: str
     entity_id: str
-    expected_power: int = 0  # W, used for admission decisions
-    only_from_solar: bool = False
+    expected_power: int = 0
     power_sensor_id: str | None = None
-    priority: int = 1  # normal-start priority; lower starts first
-    shed_priority: int | None = None  # lower sheds first; independent from start priority
-    restore_priority: int | None = None  # optional fallback; normal recovery is LIFO
+    priority: int = 1
+    shed_priority: int | None = None
     actuator_entity_ids: tuple[str, ...] = ()
-    hvac_mode_on: str = "heat"
 
-    # Runtime state (reconciled from HA after start/restart)
-    is_on: bool | None = None  # None = state unknown/unavailable
-    measured_power: float = 0.0  # compatibility projection; validity is separate
+    # Runtime state is always reconciled from Home Assistant telemetry.
+    is_on: bool | None = None
+    measured_power: float = 0.0
     measured_power_valid: bool = False
     measured_power_reason: str = "not_sampled"
-    pause_until: float | None = None  # utc timestamp
+    pause_until: float | None = None
     last_turn_off_time: float | None = None
     ownership: Ownership = Ownership.UNKNOWN
     ownership_until: float | None = None
-    snapshot: dict[str, Any] | None = None
 
     @property
     def control_entity_ids(self) -> tuple[str, ...]:
-        """Return the physical members of this logical load exactly once."""
+        """Return every physical member of this logical load exactly once."""
         return tuple(dict.fromkeys((self.entity_id, *self.actuator_entity_ids)))
 
     @property
     def pause_active(self) -> bool:
-        """Return True if the device is in pause period."""
-        if self.pause_until is None:
-            return False
-        return time.time() < self.pause_until
-
-    def capture_runtime_snapshot(self, states: dict[str, Any]) -> dict[str, Any]:
-        """Capture only the actuator state needed for exact recovery."""
-        self.snapshot = {
-            entity_id: {
-                "state": getattr(states.get(entity_id), "state", None),
-                "attributes": dict(
-                    getattr(states.get(entity_id), "attributes", {}) or {}
-                ),
-            }
-            for entity_id in self.control_entity_ids
-        }
-        return self.snapshot
+        """Return whether the load is temporarily protected from rapid cycling."""
+        return self.pause_until is not None and time.time() < self.pause_until
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize config and safe diagnostic projections."""
+        """Serialize configuration and bounded diagnostic projections."""
         return {
             "device_id": self.device_id,
             "name": self.name,
             "entity": self.entity_id,
             "expected_power": self.expected_power,
-            "only_from_solar": self.only_from_solar,
             "power_sensor": self.power_sensor_id,
             "priority": self.priority,
             "shed_priority": self.shed_priority,
-            "restore_priority": self.restore_priority,
             "actuators": list(self.actuator_entity_ids),
             "is_on": self.is_on,
             "measured_power": self.measured_power if self.measured_power_valid else None,
@@ -82,12 +61,15 @@ class ManagedDevice:
             "ownership": self.ownership.value,
             "ownership_until": self.ownership_until,
             "pause_until": self.pause_until,
-            "has_snapshot": self.snapshot is not None,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ManagedDevice":
-        """Create from a validated or legacy config dict."""
+        """Create a device from a normalized current or legacy config record.
+
+        Unknown legacy policy fields are deliberately ignored.  In particular,
+        the runtime model contains only device state and shedding metadata; no activation policy.
+        """
         raw_actuators = data.get("actuators", ())
         if isinstance(raw_actuators, str):
             raw_actuators = (raw_actuators,)
@@ -96,35 +78,67 @@ class ManagedDevice:
         actuators = tuple(
             value for value in raw_actuators if isinstance(value, str) and value
         )
-        ownership = data.get("ownership", Ownership.UNKNOWN)
+        ownership_raw = data.get("ownership", Ownership.UNKNOWN)
         try:
-            ownership = Ownership(ownership)
-        except ValueError:
+            ownership = Ownership(ownership_raw)
+        except (TypeError, ValueError):
             ownership = Ownership.UNKNOWN
+
+        def finite_timestamp(value: Any) -> float | None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            converted = float(value)
+            return converted if math.isfinite(converted) else None
+
+        expected_raw = data.get("expected_power", 0)
+        try:
+            expected_power = int(float(expected_raw))
+        except (TypeError, ValueError):
+            expected_power = 0
+        expected_power = max(0, min(expected_power, 50000))
+
+        priority_raw = data.get("priority", 1)
+        try:
+            priority = max(1, int(float(priority_raw)))
+        except (TypeError, ValueError):
+            priority = 1
+        shed_raw = data.get("shed_priority")
+        try:
+            shed_priority = max(1, int(float(shed_raw))) if shed_raw is not None else None
+        except (TypeError, ValueError):
+            shed_priority = None
+
+        entity_id = data.get("entity")
+        device_id = data.get("device_id")
+        name = data.get("name")
+        if not isinstance(entity_id, str) or not entity_id:
+            raise ValueError("device record is missing device_id")
+        if not isinstance(device_id, str) or not device_id:
+            raise ValueError("device record is missing device_id")
+        if not isinstance(name, str) or not name:
+            raise ValueError("device record is missing name")
+
         return cls(
-            device_id=data["device_id"],
-            name=data["name"],
-            entity_id=data["entity"],
-            expected_power=data.get("expected_power", 0),
-            only_from_solar=data.get("only_from_solar", False),
-            power_sensor_id=data.get("power_sensor"),
-            priority=data.get("priority", 1),
-            shed_priority=data.get("shed_priority"),
-            restore_priority=data.get("restore_priority"),
-            actuator_entity_ids=actuators,
-            hvac_mode_on=data.get("hvac_mode_on", "heat"),
-            ownership=ownership,
-            ownership_until=(
-                float(data["ownership_until"])
-                if isinstance(data.get("ownership_until"), (int, float))
-                and not isinstance(data.get("ownership_until"), bool)
+            device_id=device_id,
+            name=name,
+            entity_id=entity_id,
+            expected_power=expected_power,
+            power_sensor_id=(
+                data.get("power_sensor")
+                if isinstance(data.get("power_sensor"), str)
                 else None
             ),
+            priority=priority,
+            shed_priority=shed_priority,
+            actuator_entity_ids=actuators,
+            ownership=ownership,
+            ownership_until=finite_timestamp(data.get("ownership_until")),
+            pause_until=finite_timestamp(data.get("pause_until")),
         )
 
 
 class PowerModel:
-    """Tracks logical loads for one whole-house coordinator."""
+    """Tracks logical loads for one whole-house controller."""
 
     def __init__(self) -> None:
         self._devices: dict[str, ManagedDevice] = {}
@@ -135,48 +149,46 @@ class PowerModel:
     def get_device(self, device_id: str) -> ManagedDevice | None:
         return self._devices.get(device_id)
 
-    def get_sorted_devices(self) -> list[ManagedDevice]:
-        """Return devices sorted by normal-start priority (lowest first)."""
-        return sorted(self._devices.values(), key=lambda d: (d.priority, d.device_id))
-
     def get_shed_devices(self) -> list[ManagedDevice]:
-        """Return devices sorted by independent safety-shed rank."""
+        """Return configured loads in deterministic shedding order."""
         return sorted(
             self._devices.values(),
-            key=lambda d: (
-                d.shed_priority if d.shed_priority is not None else d.priority,
-                d.device_id,
+            key=lambda device: (
+                device.shed_priority
+                if device.shed_priority is not None
+                else device.priority,
+                device.device_id,
             ),
         )
 
+    def get_sorted_devices(self) -> list[ManagedDevice]:
+        """Compatibility alias for callers that need configured priority order."""
+        return self.get_shed_devices()
+
     def get_sorted_devices_reversed(self) -> list[ManagedDevice]:
-        """Legacy reverse-start order, retained for emergency compatibility."""
-        return sorted(
-            self._devices.values(),
-            key=lambda d: (d.priority, d.device_id),
-            reverse=True,
-        )
+        """Return the inverse deterministic order for emergency iteration."""
+        return list(reversed(self.get_shed_devices()))
 
     def get_on_devices(self) -> list[ManagedDevice]:
-        return [d for d in self._devices.values() if d.is_on is True]
+        return [device for device in self._devices.values() if device.is_on is True]
 
     def get_off_devices(self) -> list[ManagedDevice]:
-        return [d for d in self._devices.values() if d.is_on is False]
+        return [device for device in self._devices.values() if device.is_on is False]
 
     @property
     def total_measured_power(self) -> float:
         return sum(
-            d.measured_power
-            for d in self._devices.values()
-            if d.is_on is True and d.measured_power_valid
+            device.measured_power
+            for device in self._devices.values()
+            if device.is_on is True and device.measured_power_valid
         )
 
     @property
     def total_expected_power(self) -> int:
         return sum(
-            d.expected_power
-            for d in self._devices.values()
-            if d.is_on is True and not d.pause_active
+            device.expected_power
+            for device in self._devices.values()
+            if device.is_on is True and not device.pause_active
         )
 
     def all_devices(self) -> list[ManagedDevice]:

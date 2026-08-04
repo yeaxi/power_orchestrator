@@ -1,133 +1,76 @@
-"""Tests for HA 2026.7 discovery and config-flow translation resources."""
+"""Tests for discovery and Home Assistant translation resources."""
+from __future__ import annotations
+
 import json
-import os
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "custom_components"))
-
-from power_orchestrator.config_flow import _discover_energy
-
+from power_orchestrator.config_flow import _discover_inputs
 
 PROJECT_ROOT = Path(__file__).parents[1]
-TRANSLATIONS_DIR = PROJECT_ROOT / "custom_components" / "power_orchestrator" / "translations"
+INTEGRATION = PROJECT_ROOT / "custom_components" / "power_orchestrator"
+TRANSLATIONS_DIR = INTEGRATION / "translations"
 
 
 @pytest.mark.asyncio
-async def test_energy_device_without_dashboard_name_uses_state_friendly_name():
-    """Optional Energy Dashboard names must fall back to HA state friendly_name."""
+async def test_energy_discovery_keeps_only_grid_battery_and_load_devices() -> None:
     hass = MagicMock()
     state = MagicMock()
-    state.attributes = {"friendly_name": "Parents boiler power"}
+    state.attributes = {"friendly_name": "Parents boiler energy"}
     hass.states.get.return_value = state
 
     async def mock_get_manager(_hass):
         manager = MagicMock()
         manager.data = {
-            "energy_sources": [],
+            "energy_sources": [
+                {"type": "grid", "power_config": {"stat_rate": "sensor.grid_power"}},
+                {"type": "battery", "stat_soc": "sensor.battery_soc", "stat_power": "sensor.battery_power"},
+            ],
             "device_consumption": [
-                {"stat_consumption": "sensor.parents_boiler_energy"}
+                {"stat_consumption": "sensor.parents_energy", "stat_rate": "sensor.parents_power"}
             ],
         }
         return manager
 
     with patch("homeassistant.components.energy.async_get_manager", mock_get_manager):
-        result = await _discover_energy(hass)
+        result = await _discover_inputs(hass)
 
-    assert result["devices"] == [
-        {
-            "entity_id": "sensor.parents_boiler_energy",
-            "name": None,
-            "power_sensor": None,
-        }
-    ]
+    assert result == {
+        "grid_power": "sensor.grid_power",
+        "battery_soc": "sensor.battery_soc",
+        "devices": [{
+            "entity_id": "sensor.parents_energy",
+            "name": "Parents boiler energy",
+            "power_sensor": "sensor.parents_power",
+        }],
+    }
+    assert "solar_power" not in result
+    assert "solar_forecast" not in result
 
 
-
-def test_translation_resources_follow_home_assistant_strings_schema():
-    """strings.json and locale files must expose config at the root."""
-    strings_path = PROJECT_ROOT / "custom_components" / "power_orchestrator" / "strings.json"
-    assert strings_path.exists()
-    strings = json.loads(strings_path.read_text())
-    assert "config" in strings
-    assert "en" not in strings
-
+def test_translation_resources_are_valid_and_have_matching_steps() -> None:
+    strings = json.loads((INTEGRATION / "strings.json").read_text())
     english = json.loads((TRANSLATIONS_DIR / "en.json").read_text())
     ukrainian = json.loads((TRANSLATIONS_DIR / "uk.json").read_text())
-    assert "config" in english
-    assert "config" in ukrainian
-    assert "en" not in english
-    assert "en" not in ukrainian
+    assert set(strings["config"]["step"]) == {"user", "load_monitoring", "devices", "priority", "grid_loss", "reconfigure"}
     assert english["config"] == strings["config"]
-
-    for locale_data in (strings, english, ukrainian):
-        config = locale_data["config"]
-        assert set(config["step"]) == {
-            "user",
-            "load_monitoring",
-            "devices",
-            "priority",
-            "grid_loss",
-            "reconfigure",
-        }
-        assert "summary" in config["step"]["user"]["description"]
-        assert "sensor_name" in config["step"]["load_monitoring"]["description"]
-        assert "count" in config["step"]["devices"]["description"]
-        assert "discovered" in config["step"]["devices"]["description"]
-        assert "device_list" in config["step"]["priority"]["description"]
-        assert "battery_info" in config["step"]["grid_loss"]["description"]
+    assert set(ukrainian["config"]["step"]) == set(strings["config"]["step"])
 
 
-def test_onboarding_has_field_description_for_every_config_step_field():
-    """Every onboarding field must explain its behavior below the field in HA UI."""
+def test_every_config_field_has_inline_description_in_all_locales() -> None:
     expected = {
-        "user": {
-            "grid_power", "solar_power", "solar_forecast", "battery_soc", "battery_power",
-        },
-        "load_monitoring": {
-            "load_sensor", "max_load", "averaging_period", "safety_reserve", "hysteresis",
-        },
-        "devices": {
-            "discovered_devices", "add_custom_device", "entity", "name", "expected_power",
-            "power_sensor", "only_from_solar", "add_another",
-        },
-        "priority": {*(f"priority_{i}" for i in range(1, 11)), "pause_period"},
-        "grid_loss": {
-            "grid_loss_mode", "grid_loss_sensor", "battery_soc", "battery_threshold",
-        },
-        "reconfigure": {
-            "load_sensor", "max_load", "averaging_period", "safety_reserve", "hysteresis",
-            "pause_period", "grid_loss_mode", "grid_loss_sensor", "battery_soc",
-            "battery_threshold", "solar_power", "solar_forecast_entry", "battery_power",
-            "devices", "threshold_count",
-        },
+        "user": {"grid_power", "battery_soc"},
+        "load_monitoring": {"load_sensor", "max_load", "averaging_period", "safety_reserve", "hysteresis", "threshold_count"},
+        "devices": {"discovered_devices", "add_custom_device", "entity", "name", "expected_power", "power_sensor", "actuators", "add_another"},
+        "priority": {*(f"priority_{index}" for index in range(1, 11)), "pause_period"},
+        "grid_loss": {"grid_loss_mode", "grid_loss_sensor", "battery_soc", "battery_threshold"},
+        "reconfigure": {"load_sensor", "max_load", "averaging_period", "safety_reserve", "hysteresis", "pause_period", "grid_loss_mode", "grid_loss_sensor", "battery_soc", "battery_threshold", "devices", "threshold_count"},
     }
-
-    locale_paths = {
-        "strings": PROJECT_ROOT / "custom_components" / "power_orchestrator" / "strings.json",
-        "en": TRANSLATIONS_DIR / "en.json",
-        "uk": TRANSLATIONS_DIR / "uk.json",
-    }
-    for locale_name, locale_path in locale_paths.items():
-        locale_data = json.loads(locale_path.read_text())
-        steps = locale_data["config"]["step"]
-        for step_id, fields in expected.items():
-            descriptions = steps[step_id].get("data_description", {})
-            assert fields <= descriptions.keys(), f"{locale_name}/{step_id} is missing descriptions"
-            assert all(
-                isinstance(descriptions[field], str) and descriptions[field].strip()
-                for field in fields
-            ), f"{locale_name}/{step_id} has an empty field description"
-
-    power_sensor_descriptions = [
-        json.loads(path.read_text())["config"]["step"]["devices"]["data_description"]["power_sensor"]
-        for path in locale_paths.values()
-    ]
-    assert any("auto" in text.lower() or "авто" in text.lower() for text in power_sensor_descriptions)
-    assert any(
-        "override" in text.lower() or "замін" in text.lower() or "інш" in text.lower()
-        for text in power_sensor_descriptions
-    )
+    for path in ((INTEGRATION / "strings.json"), (TRANSLATIONS_DIR / "en.json"), (TRANSLATIONS_DIR / "uk.json")):
+        data = json.loads(path.read_text())
+        for step, fields in expected.items():
+            descriptions = data["config"]["step"][step].get("data_description", {})
+            assert fields <= descriptions.keys(), f"{path}: {step}"
+            assert all(isinstance(descriptions[field], str) and descriptions[field].strip() for field in fields)

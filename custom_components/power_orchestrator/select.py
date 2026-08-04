@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - local Home Assistant test doubles
             super().__init__(*args)
 
 from .const import DOMAIN, MODE_AUTO, MODE_OFF
+from .coordinator import PowerOrchestratorCoordinator
 
 
 async def async_setup_entry(
@@ -56,8 +57,12 @@ class PowerOrchestratorModeSelect(CoordinatorEntity, SelectEntity):  # type: ign
         }
 
     @property
+    def _power_coordinator(self) -> PowerOrchestratorCoordinator:
+        return cast(PowerOrchestratorCoordinator, self.coordinator)
+
+    @property
     def current_option(self) -> str:
-        return cast(str, self.coordinator.mode)
+        return cast(str, self._power_coordinator.mode)
 
     async def async_select_option(self, option: str) -> None:
         """Change the mode."""
@@ -67,5 +72,5 @@ class PowerOrchestratorModeSelect(CoordinatorEntity, SelectEntity):  # type: ign
                 translation_key="invalid_select_option",
                 translation_placeholders={"option": option},
             )
-        await self.coordinator.async_set_mode(option)
+        await self._power_coordinator.async_set_mode(option)
         self.async_write_ha_state()

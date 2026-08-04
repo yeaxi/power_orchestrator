@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from homeassistant.components.binary_sensor import (
-    BinarySensorDeviceClass,
-    BinarySensorEntity,
-)
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
@@ -15,6 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
+from .coordinator import PowerOrchestratorCoordinator
 
 
 async def async_setup_entry(
@@ -22,7 +20,8 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up binary sensors."""
+    """Set up load-shedding safety diagnostics."""
+    del hass
     runtime = getattr(entry, "runtime_data", None)
     if runtime is None:
         raise RuntimeError("Power Orchestrator runtime data is unavailable")
@@ -31,14 +30,13 @@ async def async_setup_entry(
         [
             PowerOrchestratorGridOkSensor(coordinator, entry),
             PowerOrchestratorFaultSensor(coordinator, entry),
-            PowerOrchestratorRecoveryBlockedSensor(coordinator, entry),
             PowerOrchestratorActionJournalHealthySensor(coordinator, entry),
         ]
     )
 
 
 class PowerOrchestratorGridOkSensor(CoordinatorEntity, BinarySensorEntity):  # type: ignore[misc]
-    """Grid OK binary sensor."""
+    """Grid-safety source state."""
 
     _attr_has_entity_name = True
     _attr_device_class = BinarySensorDeviceClass.POWER
@@ -47,7 +45,6 @@ class PowerOrchestratorGridOkSensor(CoordinatorEntity, BinarySensorEntity):  # t
 
     def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
-        self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_binary_sensor_grid_ok"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
@@ -57,24 +54,26 @@ class PowerOrchestratorGridOkSensor(CoordinatorEntity, BinarySensorEntity):  # t
         }
 
     @property
+    def _power_coordinator(self) -> PowerOrchestratorCoordinator:
+        return cast(PowerOrchestratorCoordinator, self.coordinator)
+
+    @property
     def available(self) -> bool:
-        """A missing safety source is configuration fault, not grid loss."""
-        return bool(self.coordinator.grid_safety_source_configured)
+        return bool(self._power_coordinator.grid_safety_source_configured)
 
     @property
     def is_on(self) -> bool:
-        return cast(bool, self.coordinator.grid_ok)
+        return cast(bool, self._power_coordinator.grid_ok)
 
 
-class _QuarantineSensorBase(CoordinatorEntity, BinarySensorEntity):  # type: ignore[misc]
-    """Base class for typed persisted safety-state diagnostics."""
+class _DiagnosticSensorBase(CoordinatorEntity, BinarySensorEntity):  # type: ignore[misc]
+    """Base class for persisted safety diagnostics."""
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator: Any, entry: ConfigEntry, suffix: str) -> None:
         super().__init__(coordinator)
-        self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_binary_sensor_{suffix}"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
@@ -84,11 +83,13 @@ class _QuarantineSensorBase(CoordinatorEntity, BinarySensorEntity):  # type: ign
         }
 
     @property
+    def _power_coordinator(self) -> PowerOrchestratorCoordinator:
+        return cast(PowerOrchestratorCoordinator, self.coordinator)
+
+    @property
     def available(self) -> bool:
         return True
-
-
-class PowerOrchestratorFaultSensor(_QuarantineSensorBase):
+class PowerOrchestratorFaultSensor(_DiagnosticSensorBase):
     """True when at least one logical device has a persistent fault."""
 
     _attr_translation_key = "faulted"
@@ -98,43 +99,19 @@ class PowerOrchestratorFaultSensor(_QuarantineSensorBase):
 
     @property
     def is_on(self) -> bool:
-        data = self.coordinator.data or {}
-        return bool(data.get("faulted_devices", ()))
+        return bool((self._power_coordinator.data or {}).get("faulted_devices", ()))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        data = self.coordinator.data or {}
+        data = self._power_coordinator.data or {}
         return {
             "device_ids": list(data.get("faulted_devices", ())),
             "device_reasons": dict(data.get("fault_reasons", {})),
         }
 
 
-class PowerOrchestratorRecoveryBlockedSensor(_QuarantineSensorBase):
-    """True when at least one logical device is blocked from recovery."""
-
-    _attr_translation_key = "recovery_blocked"
-
-    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
-        super().__init__(coordinator, entry, "recovery_blocked")
-
-    @property
-    def is_on(self) -> bool:
-        data = self.coordinator.data or {}
-        return bool(data.get("recovery_blocked_devices", ()))
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        data = self.coordinator.data or {}
-        return {
-            "device_ids": list(data.get("recovery_blocked_devices", ())),
-            "device_reasons": dict(data.get("fault_reasons", {})),
-            "next_restore_target": data.get("next_restore_target"),
-        }
-
-
-class PowerOrchestratorActionJournalHealthySensor(_QuarantineSensorBase):
-    """True only when the action journal can accept safe lifecycle writes."""
+class PowerOrchestratorActionJournalHealthySensor(_DiagnosticSensorBase):
+    """True only when journal-backed safety state is healthy."""
 
     _attr_translation_key = "action_journal_healthy"
 
@@ -143,15 +120,12 @@ class PowerOrchestratorActionJournalHealthySensor(_QuarantineSensorBase):
 
     @property
     def is_on(self) -> bool:
-        data = self.coordinator.data or {}
-        return not (
-            data.get("action_journal_invalid", False)
-            or data.get("journal_persistence_blocked", False)
-        )
+        data = self._power_coordinator.data or {}
+        return not (data.get("action_journal_invalid", False) or data.get("journal_persistence_blocked", False))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        data = self.coordinator.data or {}
+        data = self._power_coordinator.data or {}
         return {
             "unresolved_count": data.get("journal_unresolved_count", 0),
             "invalid": data.get("action_journal_invalid", False),

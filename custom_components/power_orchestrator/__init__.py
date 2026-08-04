@@ -1,4 +1,4 @@
-"""Power Orchestrator integration."""
+"""Power Orchestrator integration entry point."""
 
 from __future__ import annotations
 
@@ -13,29 +13,16 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-
-try:
-    from homeassistant.core import SupportsResponse
-except ImportError:  # pragma: no cover - older/local HA test doubles
-    class SupportsResponse:  # type: ignore[no-redef]
-        """Compatibility value for service response registration."""
-
-        OPTIONAL = "optional"
-
 from homeassistant.helpers.storage import Store
 
 try:
     from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-except ImportError:  # pragma: no cover - local test doubles do not ship exceptions
+except ImportError:  # pragma: no cover - local test doubles
     class HomeAssistantError(Exception):  # type: ignore[no-redef]
-        """Fallback exception for the local Home Assistant test doubles."""
+        """Fallback Home Assistant error."""
 
-        pass
-
-    class ServiceValidationError(HomeAssistantError):  # type: ignore[no-redef, misc]
-        """Fallback validation error for the local Home Assistant test doubles."""
-
-        pass
+    class ServiceValidationError(HomeAssistantError):  # type: ignore[no-redef]
+        """Fallback service validation error."""
 
 from .const import (
     CONF_AVERAGING_PERIOD,
@@ -44,10 +31,8 @@ from .const import (
     CONF_DEVICE_ACTUATORS,
     CONF_DEVICE_ENTITY,
     CONF_DEVICE_EXPECTED_POWER,
-    CONF_DEVICE_HVAC_MODE_ON,
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
-    CONF_DEVICE_ONLY_SOLAR,
     CONF_DEVICE_POWER_SENSOR,
     CONF_DEVICES,
     CONF_EXECUTION_MODE,
@@ -58,9 +43,9 @@ from .const import (
     CONF_MAX_LOAD,
     CONF_PAUSE_PERIOD,
     CONF_PRIORITY,
-    CONF_RESTORE_PRIORITY,
     CONF_SAFETY_RESERVE,
     CONF_SHED_PRIORITY,
+    CONF_THRESHOLDS,
     DEFAULT_AVERAGING_PERIOD,
     DEFAULT_EXECUTION_MODE,
     DEFAULT_HYSTERESIS,
@@ -70,7 +55,6 @@ from .const import (
     EXECUTION_MODE_LIVE,
     EXECUTION_MODE_OBSERVE,
     GRID_LOSS_MODE_SENSOR,
-    GRID_LOSS_MODE_THRESHOLD,
     MAX_RUNTIME_PAUSE_SECONDS,
     MODE_AUTO,
     MODE_OFF,
@@ -78,29 +62,21 @@ from .const import (
     STORAGE_VERSION,
 )
 from .coordinator import PowerOrchestratorCoordinator
-from .forecast import (
-    resolve_current_power_forecast_entity as _resolve_forecast_entity_shared,
-)
 from .policy import PolicyConfig
 from .power_model import ManagedDevice, PowerModel
 from .runtime import PowerOrchestratorRuntimeData
 from .storage import RuntimeStore
 
 _LOGGER = logging.getLogger(__name__)
-
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SELECT]
-_LIFECYCLE_KEY = f"{DOMAIN}_lifecycle"
-_REPAIR_ISSUE_IDS_KEY = f"{DOMAIN}_repair_issue_ids"
-
 _REGISTERED_SERVICES = (
     "force_evaluate",
     "set_mode",
-    "request_start",
     "request_stop",
     "clear_quarantine",
     "set_execution_mode",
 )
-
+_REPAIR_ISSUE_IDS_KEY = f"{DOMAIN}_repair_issue_ids"
 _ALLOWED_CONTROL_DOMAINS = frozenset({"switch", "light", "input_boolean"})
 _ALLOWED_ACTUATOR_DOMAINS = frozenset({"switch", "light", "input_boolean", "climate"})
 
@@ -111,949 +87,543 @@ def _translated_error(
     *,
     reason: str | None = None,
 ) -> Exception:
-    """Build a localized HA exception while supporting local test doubles."""
+    """Construct a translated HA exception with local-test compatibility."""
     placeholders = {"reason": reason} if reason else None
-    factory = cast(Any, exception_type)
     try:
-        created: Exception = factory(
+        return cast(Any, exception_type)(
             translation_domain=DOMAIN,
             translation_key=translation_key,
             translation_placeholders=placeholders,
         )
-        return created
     except TypeError:
-        return exception_type(translation_key)
+        return exception_type(reason or translation_key)
 
 
-def _repair_issue_id(device_id: str) -> str:
-    """Return a collision-resistant, stable issue ID for a device."""
-    digest = hashlib.sha256(device_id.encode("utf-8")).hexdigest()[:20]
+def _loaded_runtimes(hass: HomeAssistant) -> list[PowerOrchestratorRuntimeData]:
+    """Return only runtimes with a usable coordinator."""
+    container = getattr(hass, "data", {}).get(DOMAIN, {})
+    if not isinstance(container, dict):
+        return []
+    result: list[PowerOrchestratorRuntimeData] = []
+    for value in container.values():
+        if getattr(value, "coordinator", None) is not None:
+            result.append(value)
+    return result
+
+
+def _lifecycle_state(hass: HomeAssistant) -> dict[str, Any]:
+    """Return the integration lifecycle registry, repairing malformed state."""
+    data = getattr(hass, "data", None)
+    if not isinstance(data, dict):
+        data = {}
+        setattr(hass, "data", data)
+    key = f"{DOMAIN}_lifecycle"
+    lifecycle = data.get(key)
+    if not isinstance(lifecycle, dict):
+        lifecycle = {}
+        data[key] = lifecycle
+    return lifecycle
+
+
+def _repair_issue_id(entry_id: str, device_id: str) -> str:
+    """Return a stable issue identifier without exposing logical IDs."""
+    digest = hashlib.sha256(f"{entry_id}:{device_id}".encode()).hexdigest()[:20]
     return f"quarantine_{digest}"
 
 
-def _repair_device_ids(data: Mapping[str, Any], key: str) -> set[str]:
-    """Return valid persisted device IDs from one quarantine collection."""
-    values = data.get(key, ())
-    if not isinstance(values, (list, tuple, set, frozenset)):
+def _repair_device_ids(hass: HomeAssistant, entry: ConfigEntry) -> set[str]:
+    """Return currently faulted/quarantined logical IDs for diagnostics."""
+    del hass
+    runtime = getattr(entry, "runtime_data", None)
+    coordinator = getattr(runtime, "coordinator", None)
+    if coordinator is None:
         return set()
-    return {
-        device_id
-        for device_id in values
-        if isinstance(device_id, str) and device_id
-    }
+    data = getattr(coordinator, "data", None)
+    if isinstance(data, Mapping):
+        values: set[str] = set()
+        for key in ("faulted_devices", "quarantined_devices"):
+            raw = data.get(key, ())
+            if isinstance(raw, (list, tuple, set, frozenset)):
+                values.update(item for item in raw if isinstance(item, str) and item)
+        if values:
+            return values
+    return set(getattr(coordinator, "_faulted", set())) | set(
+        getattr(coordinator, "_quarantined", set())
+    )
 
 
-def _sync_repair_issues(
-    hass: HomeAssistant,
-    coordinator: PowerOrchestratorCoordinator,
-    model: PowerModel,
-) -> None:
-    """Mirror durable quarantine state into the Home Assistant issue registry."""
+def _sync_repair_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Mirror durable quarantine into persistent Home Assistant issues."""
     try:
         from homeassistant.helpers.issue_registry import (
             IssueSeverity,
             async_create_issue,
             async_delete_issue,
+            async_get,
         )
     except ImportError:  # pragma: no cover - local Home Assistant test doubles
         return
-
-    data = getattr(coordinator, "data", None) or {}
-    if not isinstance(data, Mapping):
-        data = {}
-    active_ids = set().union(
-        _repair_device_ids(data, "faulted_devices"),
-        _repair_device_ids(data, "recovery_blocked_devices"),
-    )
-    # The persisted coordinator state is authoritative.  Keep an issue even
-    # when a device mapping was removed: deleting it would hide an unresolved
-    # physical action and would weaken the fail-closed boundary.
-    desired_issue_ids = {_repair_issue_id(device_id) for device_id in active_ids}
+    active_ids = _repair_device_ids(hass, entry)
+    desired_ids = {_repair_issue_id(entry.entry_id, device_id) for device_id in active_ids}
     hass_data = getattr(hass, "data", None)
     if not isinstance(hass_data, dict):
         hass_data = {}
         setattr(hass, "data", hass_data)
-    previous_issue_ids = set(hass_data.get(_REPAIR_ISSUE_IDS_KEY, ()))
+    previous_by_entry = hass_data.setdefault(_REPAIR_ISSUE_IDS_KEY, {})
+    if not isinstance(previous_by_entry, dict):
+        previous_by_entry = {}
+        hass_data[_REPAIR_ISSUE_IDS_KEY] = previous_by_entry
+    previous_ids = previous_by_entry.get(entry.entry_id, set())
+    if not isinstance(previous_ids, set):
+        previous_ids = set(previous_ids) if isinstance(previous_ids, (list, tuple)) else set()
+    try:
+        registry = async_get(hass)
+        issues = getattr(registry, "issues", {})
+        registered_ids: set[str] = set()
+        if isinstance(issues, Mapping):
+            for key in issues:
+                if (
+                    isinstance(key, tuple)
+                    and len(key) == 2
+                    and key[0] == DOMAIN
+                    and isinstance(key[1], str)
+                    and key[1].startswith("quarantine_")
+                ):
+                    registered_ids.add(key[1])
+    except Exception:  # pragma: no cover - issue registry is non-safety-critical
+        _LOGGER.debug("Unable to inspect Power Orchestrator repair issues", exc_info=True)
+        return
+    try:
+        for device_id in sorted(active_ids):
+            async_create_issue(
+                hass,
+                DOMAIN,
+                _repair_issue_id(entry.entry_id, device_id),
+                is_fixable=False,
+                is_persistent=True,
+                issue_domain=DOMAIN,
+                learn_more_url="https://github.com/yeaxi/power_orchestrator#troubleshooting",
+                severity=IssueSeverity.ERROR,
+                translation_key="quarantine_requires_reconciliation",
+                translation_placeholders={"device_id": device_id},
+            )
+        for issue_id in sorted((previous_ids | registered_ids) - desired_ids):
+            async_delete_issue(hass, DOMAIN, issue_id)
+    except Exception:  # pragma: no cover - issue registry is non-safety-critical
+        _LOGGER.debug("Unable to synchronize Power Orchestrator repair issues", exc_info=True)
+        return
+    previous_by_entry[entry.entry_id] = desired_ids
 
-    for device_id in sorted(active_ids):
-        async_create_issue(
-            hass,
-            DOMAIN,
-            _repair_issue_id(device_id),
-            is_fixable=False,
-            is_persistent=True,
-            issue_domain=DOMAIN,
-            learn_more_url="https://github.com/yeaxi/power_orchestrator#troubleshooting",
-            severity=IssueSeverity.ERROR,
-            translation_key="quarantine_requires_reconciliation",
-            translation_placeholders={"device_id": device_id},
-        )
 
-    for issue_id in sorted(previous_issue_ids - desired_issue_ids):
-        async_delete_issue(hass, DOMAIN, issue_id)
-    hass_data[_REPAIR_ISSUE_IDS_KEY] = desired_issue_ids
-
-
-def _lifecycle_state(hass: HomeAssistant) -> dict[str, Any]:
-    """Return domain-scoped setup lock and in-flight reservations."""
-    data = getattr(hass, "data", None)
-    if not isinstance(data, dict):
-        data = {}
-        setattr(hass, "data", data)
-    state = data.get(_LIFECYCLE_KEY)
-    if not isinstance(state, dict):
-        state = {}
-        data[_LIFECYCLE_KEY] = state
-    lock = state.get("lock")
-    if not isinstance(lock, asyncio.Lock):
-        lock = asyncio.Lock()
-        state["lock"] = lock
-    reservations = state.get("reservations")
-    if not isinstance(reservations, set):
-        reservations = set()
-        state["reservations"] = reservations
-    return state
-
-
-def _loaded_runtimes(hass: HomeAssistant) -> list[PowerOrchestratorRuntimeData]:
-    """Return runtime data for currently loaded entries."""
-    entries_fn = getattr(getattr(hass, "config_entries", None), "async_entries", None)
-    if not callable(entries_fn):
-        return []
-    entries = entries_fn(DOMAIN)
-    if not isinstance(entries, (list, tuple, set)):
-        return []
-    runtimes = []
+def _sync_repair_issues_for_runtime(
+    hass: HomeAssistant, runtime: PowerOrchestratorRuntimeData
+) -> None:
+    """Synchronize issues when a service mutates runtime without a state event."""
+    entries_api = getattr(getattr(hass, "config_entries", None), "async_entries", None)
+    if not callable(entries_api):
+        return
+    try:
+        entries = entries_api(DOMAIN)
+    except Exception:  # pragma: no cover - defensive HA compatibility guard
+        return
+    if not isinstance(entries, (list, tuple)):
+        return
     for entry in entries:
-        state = getattr(entry, "state", None)
-        state_value = getattr(state, "value", state)
-        if state is not None and state_value not in ("loaded", "LOADED"):
-            continue
-        runtime = getattr(entry, "runtime_data", None)
-        if runtime is not None:
-            runtimes.append(runtime)
-    return runtimes
+        if getattr(entry, "runtime_data", None) is runtime:
+            _sync_repair_issues(hass, entry)
+            return
 
 
-async def async_setup(
-    hass: HomeAssistant,
-    config: dict[str, Any] | None = None,
-) -> bool:
-    """Set up global services before any config entry is loaded."""
-    await _register_services(hass)
+async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
+    """Initialize the integration registry."""
+    del config
+    hass.data.setdefault(DOMAIN, {})
+    hass.data.setdefault(f"{DOMAIN}_lifecycle", {})
     return True
 
 
-def _valid_entity_id(value: object, domains: frozenset[str]) -> bool:
-    """Return True only for a syntactically valid entity in an allowed domain."""
-    if not isinstance(value, str):
-        return False
-    domain, separator, object_id = value.partition(".")
-    return bool(separator and domain in domains and object_id)
+def _valid_entity_id(value: Any, domains: frozenset[str]) -> str | None:
+    if not isinstance(value, str) or value.count(".") != 1:
+        return None
+    domain, object_id = value.split(".", 1)
+    if domain not in domains or not object_id:
+        return None
+    return value
 
 
-def _safe_number(
-    value: object,
-    *,
-    default: float,
-    minimum: float,
-    maximum: float,
-) -> float:
-    """Coerce a persisted numeric setting, failing closed on bad bounds."""
-    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+def _safe_number(value: Any, *, default: float, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool):
         return default
     try:
-        number = float(value)
+        converted = float(value)
     except (TypeError, ValueError):
         return default
-    if not math.isfinite(number) or number < minimum or number > maximum:
+    if not math.isfinite(converted) or not minimum <= converted <= maximum:
         return default
-    return number
+    return converted
+
+
+def _normalize_devices(raw_devices: Any) -> list[dict[str, Any]]:
+    """Normalize only fields needed for load shedding."""
+    if not isinstance(raw_devices, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_entities: set[str] = set()
+    for index, raw in enumerate(raw_devices):
+        if not isinstance(raw, Mapping):
+            continue
+        device_id = raw.get(CONF_DEVICE_ID)
+        entity_id = _valid_entity_id(raw.get(CONF_DEVICE_ENTITY), _ALLOWED_CONTROL_DOMAINS)
+        if not isinstance(device_id, str) or not device_id.strip() or entity_id is None:
+            continue
+        device_id = device_id.strip()
+        if device_id in seen_ids or entity_id in seen_entities:
+            continue
+        actuators_raw = raw.get(CONF_DEVICE_ACTUATORS, ())
+        if isinstance(actuators_raw, str):
+            actuators_raw = (actuators_raw,)
+        if not isinstance(actuators_raw, (list, tuple)):
+            actuators_raw = ()
+        actuators: list[str] = []
+        for actuator in actuators_raw:
+            valid = _valid_entity_id(actuator, _ALLOWED_ACTUATOR_DOMAINS)
+            if valid and valid not in {entity_id, *actuators, *seen_entities}:
+                actuators.append(valid)
+        expected = int(math.ceil(_safe_number(
+            raw.get(CONF_DEVICE_EXPECTED_POWER),
+            default=1,
+            minimum=1,
+            maximum=50000,
+        )))
+        power_sensor = _valid_entity_id(raw.get(CONF_DEVICE_POWER_SENSOR), frozenset({"sensor"}))
+        name = raw.get(CONF_DEVICE_NAME)
+        if not isinstance(name, str) or not name.strip():
+            name = entity_id
+        priority = int(_safe_number(raw.get(CONF_PRIORITY, index + 1), default=index + 1, minimum=1, maximum=100000))
+        shed_priority = int(_safe_number(raw.get(CONF_SHED_PRIORITY, priority), default=priority, minimum=1, maximum=100000))
+        normalized.append(
+            {
+                CONF_DEVICE_ID: device_id,
+                CONF_DEVICE_NAME: name.strip(),
+                CONF_DEVICE_ENTITY: entity_id,
+                CONF_DEVICE_EXPECTED_POWER: expected,
+                CONF_DEVICE_POWER_SENSOR: power_sensor,
+                CONF_PRIORITY: priority,
+                CONF_SHED_PRIORITY: shed_priority,
+                CONF_DEVICE_ACTUATORS: actuators,
+            }
+        )
+        seen_ids.add(device_id)
+        seen_entities.update((entity_id, *actuators))
+    return normalized
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Serialize singleton setup and reserve the entry before any await."""
+    """Load one singleton entry and restore its persisted mode before refresh."""
     lifecycle = _lifecycle_state(hass)
-    lock = lifecycle["lock"]
-    reservations: set[str] = lifecycle["reservations"]
+    lock = lifecycle.get("lock")
+    if not isinstance(lock, asyncio.Lock):
+        lock = asyncio.Lock()
+        lifecycle["lock"] = lock
+    reservations = lifecycle.get("reservations")
+    if not isinstance(reservations, set):
+        reservations = set()
+        lifecycle["reservations"] = reservations
     async with lock:
         if (
             _loaded_runtimes(hass)
             or getattr(entry, "runtime_data", None) is not None
-            or reservations
+            or entry.entry_id in reservations
         ):
-            _LOGGER.error(
-                "Power Orchestrator is a whole-house singleton; refusing a second config entry"
-            )
+            _LOGGER.error("Refusing a second Power Orchestrator entry")
             return False
         reservations.add(entry.entry_id)
     try:
         return await _async_setup_entry_impl(hass, entry)
+    except Exception:
+        _LOGGER.exception("Power Orchestrator setup failed")
+        entry.runtime_data = None
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        return False
     finally:
         async with lock:
             reservations.discard(entry.entry_id)
 
 
 async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Power Orchestrator from a config entry after arbitration."""
-    if _loaded_runtimes(hass) or getattr(entry, "runtime_data", None) is not None:
-        _LOGGER.error(
-            "Power Orchestrator is a whole-house singleton; refusing a second config entry"
-        )
-        return False
-
-    # Config-entry reloads can occur after global services were removed by the
-    # last unload; restore the guarded service boundary idempotently.
-    await _register_services(hass)
-
-    raw_data = getattr(entry, "data", {}) or {}
-    data = dict(raw_data) if isinstance(raw_data, Mapping) else {}
-    options = getattr(entry, "options", {}) or {}
-    if isinstance(options, Mapping):
-        data.update(options)
-
-    # ── Build power model from config ──────────────────────────────
+    data = dict(entry.data or {})
+    data.update(dict(entry.options or {}))
+    devices = _normalize_devices(data.get(CONF_DEVICES, []))
     model = PowerModel()
-    devices_config = data.get(CONF_DEVICES, [])
-    if not isinstance(devices_config, (list, tuple)):
-        devices_config = []
-    seen_device_ids: set[str] = set()
-    seen_control_entities: set[str] = set()
-    for i, dev_cfg in enumerate(devices_config):
-        if not isinstance(dev_cfg, Mapping):
-            continue
-        entity_id = dev_cfg.get(CONF_DEVICE_ENTITY)
-        if not isinstance(entity_id, str) or not _valid_entity_id(
-            entity_id, _ALLOWED_CONTROL_DOMAINS
-        ):
-            _LOGGER.warning("Skipping device with invalid control entity: %r", entity_id)
-            continue
-        raw_actuators = dev_cfg.get(CONF_DEVICE_ACTUATORS, ())
-        if isinstance(raw_actuators, str):
-            raw_actuators = (raw_actuators,)
-        if not isinstance(raw_actuators, (list, tuple)):
-            raw_actuators = ()
-        actuator_ids: list[str] = []
-        invalid_actuator = False
-        for actuator in raw_actuators:
-            if not _valid_entity_id(actuator, _ALLOWED_ACTUATOR_DOMAINS):
-                invalid_actuator = True
-                break
-            if actuator == entity_id or actuator in actuator_ids:
-                invalid_actuator = True
-                break
-            actuator_ids.append(actuator)
-        if invalid_actuator:
-            _LOGGER.error("Skipping device with invalid/duplicate logical actuator: %r", dev_cfg)
-            continue
-        all_control_entities = (entity_id, *actuator_ids)
-        if any(control in seen_control_entities for control in all_control_entities):
-            _LOGGER.error("Duplicate physical control entity in Power Orchestrator config: %s", all_control_entities)
-            return False
-        seen_control_entities.update(all_control_entities)
-        try:
-            expected_power = float(dev_cfg.get(CONF_DEVICE_EXPECTED_POWER, 0))
-        except (TypeError, ValueError):
-            _LOGGER.warning("Skipping device with invalid expected power: %r", dev_cfg)
-            continue
-        if not math.isfinite(expected_power) or not 1 <= expected_power <= 50000:
-            _LOGGER.warning("Skipping device with invalid expected power: %r", dev_cfg)
-            continue
-        device_id = dev_cfg.get(CONF_DEVICE_ID)
-        if not isinstance(device_id, str) or not device_id:
-            device_id = f"dev_{i}"
-        if device_id in seen_device_ids:
-            _LOGGER.warning("Skipping duplicate device ID: %s", device_id)
-            continue
-        seen_device_ids.add(device_id)
-        name = dev_cfg.get(CONF_DEVICE_NAME)
-        if not isinstance(name, str) or not name.strip():
-            name = entity_id
-        power_sensor = dev_cfg.get(CONF_DEVICE_POWER_SENSOR)
-        if not _valid_entity_id(power_sensor, frozenset({"sensor"})):
-            power_sensor = None
-        priority = int(
-            _safe_number(
-                dev_cfg.get(CONF_PRIORITY, i + 1),
-                default=float(i + 1),
-                minimum=1,
-                maximum=100000,
-            )
-        )
-        shed_priority = int(
-            _safe_number(
-                dev_cfg.get(CONF_SHED_PRIORITY, priority),
-                default=float(priority),
-                minimum=1,
-                maximum=100000,
-            )
-        )
-        restore_priority_raw = dev_cfg.get(CONF_RESTORE_PRIORITY)
-        restore_priority = (
-            int(_safe_number(restore_priority_raw, default=float(priority), minimum=1, maximum=100000))
-            if restore_priority_raw is not None
-            else None
-        )
-        hvac_mode_on = dev_cfg.get(CONF_DEVICE_HVAC_MODE_ON, "heat")
-        if not isinstance(hvac_mode_on, str) or not hvac_mode_on:
-            hvac_mode_on = "heat"
-        model.add_device(
-            ManagedDevice(
-                device_id=device_id,
-                name=name,
-                entity_id=entity_id,
-                expected_power=max(1, int(math.ceil(expected_power))),
-                only_from_solar=dev_cfg.get(CONF_DEVICE_ONLY_SOLAR) is True,
-                power_sensor_id=power_sensor,
-                priority=priority,
-                shed_priority=shed_priority,
-                restore_priority=restore_priority,
-                actuator_entity_ids=tuple(actuator_ids),
-                hvac_mode_on=hvac_mode_on,
-            )
-        )
+    for device_data in devices:
+        model.add_device(ManagedDevice.from_dict(device_data))
 
-    load_sensor = data.get(CONF_LOAD_SENSOR)
-    if not isinstance(load_sensor, str) or not _valid_entity_id(
-        load_sensor, frozenset({"sensor"})
-    ):
-        _LOGGER.error("Invalid load sensor; normal load admission is disabled")
-        load_sensor = ""
-    max_load = _safe_number(
-        data.get(CONF_MAX_LOAD, 5000),
-        default=0,
-        minimum=100,
-        maximum=50000,
-    )
-    averaging_period = _safe_number(
-        data.get(CONF_AVERAGING_PERIOD, DEFAULT_AVERAGING_PERIOD),
-        default=DEFAULT_AVERAGING_PERIOD,
-        minimum=1,
-        maximum=300,
-    )
-    safety_reserve = _safe_number(
-        data.get(CONF_SAFETY_RESERVE, DEFAULT_SAFETY_RESERVE),
-        default=max_load,
-        minimum=0,
-        maximum=5000,
-    )
-    hysteresis = _safe_number(
-        data.get(CONF_HYSTERESIS, DEFAULT_HYSTERESIS),
-        default=max_load,
-        minimum=0,
-        maximum=5000,
-    )
-    pause_period = _safe_number(
-        data.get(CONF_PAUSE_PERIOD, DEFAULT_PAUSE_PERIOD),
-        default=DEFAULT_PAUSE_PERIOD,
-        minimum=0,
-        maximum=MAX_RUNTIME_PAUSE_SECONDS,
-    )
-    grid_loss_mode = data.get(CONF_GRID_LOSS_MODE, GRID_LOSS_MODE_SENSOR)
-    if grid_loss_mode not in (GRID_LOSS_MODE_SENSOR, GRID_LOSS_MODE_THRESHOLD):
-        _LOGGER.error("Invalid grid-loss mode; safety source is disabled")
-        grid_loss_mode = GRID_LOSS_MODE_SENSOR
-    grid_loss_sensor = data.get(CONF_GRID_LOSS_SENSOR)
-    if not _valid_entity_id(grid_loss_sensor, frozenset({"binary_sensor"})):
-        grid_loss_sensor = None
-    battery_soc_sensor = data.get(CONF_BATTERY_SOC)
-    if not _valid_entity_id(battery_soc_sensor, frozenset({"sensor"})):
-        battery_soc_sensor = None
-    battery_threshold = _safe_number(
-        data.get(CONF_BATTERY_THRESHOLD, 20),
-        default=100,
-        minimum=0,
-        maximum=100,
-    )
-    solar_production_entity = data.get("solar_power")
-    if not _valid_entity_id(solar_production_entity, frozenset({"sensor"})):
-        solar_production_entity = None
-
-    policy_data = dict(data)
-    policy_data["safety_reserve"] = safety_reserve
-    policy = PolicyConfig.from_mapping(policy_data)
-    configured_execution_mode = data.get(CONF_EXECUTION_MODE, DEFAULT_EXECUTION_MODE)
-    if configured_execution_mode not in (EXECUTION_MODE_OBSERVE, EXECUTION_MODE_LIVE):
-        configured_execution_mode = DEFAULT_EXECUTION_MODE
-
-    # ── Runtime store ──────────────────────────────────────────────
-    store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry.entry_id}")
-    runtime_store = RuntimeStore(store)
-    await runtime_store.async_load()
-    persisted_execution_mode = runtime_store.restore_execution_mode()
-    if persisted_execution_mode not in (EXECUTION_MODE_OBSERVE, EXECUTION_MODE_LIVE):
-        persisted_execution_mode = None
-    execution_mode = persisted_execution_mode or configured_execution_mode
-    runtime_store.restore_pause_timestamps(
-        model,
-        max_pause_seconds=pause_period,
-    )
-
-    # ── Resolve forecast config entry → entity ──────────────────────
-    forecast_entry_id = data.get("solar_forecast_entry")
-    if not isinstance(forecast_entry_id, str) or not forecast_entry_id:
-        forecast_entry_id = None
-    if forecast_entry_id:
-        # The config entry ID is authoritative: entity IDs may be renamed.
-        solar_forecast_entity = _resolve_forecast_entity(hass, forecast_entry_id)
-    else:
-        # Legacy entity-only configuration cannot prove exact Forecast.Solar
-        # identity, so keep solar-only admission fail-closed.
-        solar_forecast_entity = None
-
-    # ── Coordinator ────────────────────────────────────────────────
+    store = RuntimeStore(Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{entry.entry_id}"))
+    await store.async_load()
+    policy = PolicyConfig.from_mapping(data)
+    execution_mode = store.restore_execution_mode() or data.get(CONF_EXECUTION_MODE, DEFAULT_EXECUTION_MODE)
+    if execution_mode not in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE):
+        execution_mode = DEFAULT_EXECUTION_MODE
     coordinator = PowerOrchestratorCoordinator(
         hass=hass,
         model=model,
-        store=runtime_store,
-        load_sensor=load_sensor,
-        max_load=max_load,
-        averaging_period=averaging_period,
-        safety_reserve=safety_reserve,
-        hysteresis=hysteresis,
-        pause_period=pause_period,
-        grid_loss_mode=grid_loss_mode,
-        grid_loss_sensor=grid_loss_sensor,
-        battery_threshold=battery_threshold,
-        battery_soc_sensor=battery_soc_sensor,
-        solar_forecast_entity=solar_forecast_entity,
-        solar_production_entity=solar_production_entity,
+        store=store,
+        load_sensor=str(data.get(CONF_LOAD_SENSOR, "")),
+        max_load=_safe_number(data.get(CONF_MAX_LOAD), default=5000, minimum=100, maximum=50000),
+        averaging_period=_safe_number(data.get(CONF_AVERAGING_PERIOD), default=DEFAULT_AVERAGING_PERIOD, minimum=1, maximum=300),
+        safety_reserve=_safe_number(data.get(CONF_SAFETY_RESERVE), default=DEFAULT_SAFETY_RESERVE, minimum=0, maximum=5000),
+        hysteresis=_safe_number(data.get(CONF_HYSTERESIS), default=DEFAULT_HYSTERESIS, minimum=0, maximum=5000),
+        pause_period=_safe_number(data.get(CONF_PAUSE_PERIOD), default=DEFAULT_PAUSE_PERIOD, minimum=0, maximum=MAX_RUNTIME_PAUSE_SECONDS),
+        grid_loss_mode=data.get(CONF_GRID_LOSS_MODE, GRID_LOSS_MODE_SENSOR),
+        grid_loss_sensor=data.get(CONF_GRID_LOSS_SENSOR),
+        battery_threshold=data.get(CONF_BATTERY_THRESHOLD),
+        battery_soc_sensor=data.get(CONF_BATTERY_SOC),
         entry_id=entry.entry_id,
         policy=policy,
         execution_mode=execution_mode,
     )
-
-    restored_device_runtime = runtime_store.restore_device_runtime(model)
-    if (
-        isinstance(restored_device_runtime, (tuple, list))
-        and len(restored_device_runtime) == 2
-        and all(isinstance(value, (set, frozenset, list, tuple)) for value in restored_device_runtime)
-    ):
-        faulted_devices = set(restored_device_runtime[0])
-        recovery_blocked_devices = set(restored_device_runtime[1])
-    else:
-        _LOGGER.error("Invalid persisted device runtime; restoring all devices quarantined")
-        faulted_devices = set()
-        recovery_blocked_devices = set()
+    coordinator._safety_storage_invalid = store.safety_storage_invalid
+    store.restore_pause_timestamps(model, MAX_RUNTIME_PAUSE_SECONDS)
+    faulted, quarantined = store.restore_device_runtime(model)
     coordinator.restore_device_runtime(
-        faulted_devices,
-        recovery_blocked_devices,
-        fault_reasons=runtime_store.restore_fault_reasons(model),
-        storage_invalid=runtime_store.safety_storage_invalid,
+        faulted,
+        quarantined,
+        fault_reasons=store.restore_fault_reasons(model),
+        storage_invalid=store.safety_storage_invalid,
     )
-    restored_notification_state = runtime_store.restore_fault_notification_state(model)
-    if (
-        isinstance(restored_notification_state, (tuple, list))
-        and len(restored_notification_state) == 2
-        and all(isinstance(value, dict) for value in restored_notification_state)
-    ):
-        coordinator.restore_fault_notification_state(*restored_notification_state)
-    else:
-        coordinator.restore_fault_notification_state({}, {})
-    unresolved_reader = getattr(runtime_store, "unresolved_actions", None)
-    unresolved_actions = unresolved_reader() if callable(unresolved_reader) else []
-    if not isinstance(unresolved_actions, (list, tuple)):
-        unresolved_actions = []
-    journal_invalid = getattr(runtime_store, "action_journal_invalid", False) is True
-    coordinator.restore_action_journal(
-        unresolved_actions,
-        journal_invalid=journal_invalid,
-    )
-    runtime_store.restore_policy_runtime(coordinator._policy_engine, model)
-    restored_mode = runtime_store.restore_mode()
-    if restored_mode == MODE_AUTO:
-        _LOGGER.warning(
-            "Persisted auto mode found; keeping startup-safe off until explicit re-arm"
-        )
-    coordinator.mode = MODE_OFF  # type: ignore[misc]
+    active_notifications, pending_notifications = store.restore_fault_notification_state(model)
+    coordinator.restore_fault_notification_state(active_notifications, pending_notifications)
+    coordinator.restore_action_journal(store.unresolved_actions())
+    store.restore_policy_runtime(coordinator._policy_engine, model)
+    restored_mode = MODE_OFF if store.safety_storage_invalid else store.restore_mode()
+    coordinator.mode = restored_mode if restored_mode in (MODE_AUTO, MODE_OFF) else MODE_OFF
+
+    runtime = PowerOrchestratorRuntimeData(coordinator=coordinator, model=model, store=store)
+    entry.runtime_data = runtime
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+    await _register_services(hass)
+
+    tracked_entities = {data.get(CONF_LOAD_SENSOR), data.get(CONF_GRID_LOSS_SENSOR), data.get(CONF_BATTERY_SOC)}
+    for device in model.all_devices():
+        tracked_entities.update(device.control_entity_ids)
+        if device.power_sensor_id:
+            tracked_entities.add(device.power_sensor_id)
+    tracked_entities.discard(None)
+
+    async def _state_changed(event: Any) -> None:
+        entity_id = getattr(event, "data", {}).get("entity_id") if event is not None else None
+        if entity_id in tracked_entities:
+            await coordinator.async_force_evaluate()
+            _sync_repair_issues(hass, entry)
+
+    bus = getattr(hass, "bus", None)
+    listen = getattr(bus, "async_listen", None)
+    if callable(listen):
+        remove_listener = listen("state_changed", _state_changed)
+        runtime.repair_listener_remove = remove_listener if callable(remove_listener) else None
+        unload_listener = runtime.repair_listener_remove
+        if callable(entry.async_on_unload) and callable(unload_listener):
+            entry.async_on_unload(unload_listener)
 
     try:
         await coordinator.async_config_entry_first_refresh()
-    except Exception:
-        shutdown = getattr(coordinator, "async_shutdown", None)
-        if callable(shutdown):
-            try:
-                await shutdown()
-            except Exception:
-                _LOGGER.exception("Failed to shut down coordinator after first-refresh failure")
-        if not _loaded_runtimes(hass):
-            _unregister_services(hass)
-        raise
-
-    # ── Store references ────────────────────────────────────────────
-    repair_listener_remove = None
-    add_update_listener = getattr(coordinator, "async_add_listener", None)
-    if callable(add_update_listener):
-        repair_listener_remove = add_update_listener(
-            lambda: _sync_repair_issues(hass, coordinator, model)
-        )
-    _sync_repair_issues(hass, coordinator, model)
-    runtime_data = PowerOrchestratorRuntimeData(
-        coordinator=coordinator,
-        model=model,
-        store=runtime_store,
-        repair_listener_remove=(
-            repair_listener_remove if callable(repair_listener_remove) else None
-        ),
-    )
-    entry.runtime_data = runtime_data
-
-    # ── Forward setup ──────────────────────────────────────────────
-    try:
+        _sync_repair_issues(hass, entry)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except Exception:
-        remove_repair_listener = getattr(
-            runtime_data, "repair_listener_remove", None
-        )
-        if callable(remove_repair_listener):
-            remove_repair_listener()
+        if runtime.repair_listener_remove:
+            runtime.repair_listener_remove()
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         entry.runtime_data = None
-        shutdown = getattr(coordinator, "async_shutdown", None)
-        if callable(shutdown):
-            await shutdown()
-        if not _loaded_runtimes(hass):
-            _unregister_services(hass)
         raise
-
-    # ── Subscribe to relevant state changes only ────────────────────
-    safety_sensor = (
-        grid_loss_sensor
-        if grid_loss_mode == GRID_LOSS_MODE_SENSOR
-        else battery_soc_sensor
-    )
-    watched_entities = {
-        entity_id
-        for entity_id in [load_sensor, safety_sensor]
-        if entity_id
-    }
-    for device in model.all_devices():
-        watched_entities.add(device.entity_id)
-        if device.power_sensor_id:
-            watched_entities.add(device.power_sensor_id)
-
-    if watched_entities:
-        state_worker_task: asyncio.Future[Any] | None = None
-        state_dirty = False
-
-        async def _run_state_worker() -> None:
-            """Coalesce a burst of relevant state changes into evaluations."""
-            nonlocal state_worker_task, state_dirty
-            try:
-                while True:
-                    state_dirty = False
-                    await coordinator.async_force_evaluate()
-                    if not state_dirty:
-                        break
-            finally:
-                state_worker_task = None
-
-        def _schedule_state_worker() -> None:
-            """Start one worker; later events only mark it dirty."""
-            nonlocal state_worker_task
-            if state_worker_task is not None and not state_worker_task.done():
-                return
-            create_task = getattr(hass, "async_create_task", None)
-            if callable(create_task):
-                coroutine = _run_state_worker()
-                try:
-                    task = create_task(coroutine, f"{DOMAIN}_state_worker")
-                except Exception:
-                    task = None
-                if isinstance(task, asyncio.Future):
-                    state_worker_task = task
-                    return
-                state_worker_task = asyncio.create_task(coroutine)
-                return
-            state_worker_task = asyncio.create_task(_run_state_worker())
-
-        async def _state_listener(event: Any) -> None:
-            """Mark relevant state changes and schedule one coalesced worker."""
-            nonlocal state_dirty
-            event_data = getattr(event, "data", {}) or {}
-            if event_data.get("entity_id") not in watched_entities:
-                return
-            state_dirty = True
-            _schedule_state_worker()
-
-        def _cancel_state_worker() -> None:
-            """Cancel the coalesced worker during entry unload."""
-            if state_worker_task is not None and not state_worker_task.done():
-                state_worker_task.cancel()
-
-        entry.async_on_unload(
-            hass.bus.async_listen("state_changed", _state_listener)
-        )
-        entry.async_on_unload(_cancel_state_worker)
-
-    add_update_listener = getattr(entry, "add_update_listener", None)
-    if callable(add_update_listener):
-        entry.async_on_unload(add_update_listener(_async_update_listener))
-
+    if callable(entry.add_update_listener):
+        entry.add_update_listener(_async_update_listener)
     return True
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload the entry after an options/config update."""
+    """Reload options through Home Assistant's lifecycle."""
     await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry and persist runtime state."""
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    """Persist and unload one entry."""
     runtime = getattr(entry, "runtime_data", None)
-    if runtime is not None and unload_ok:
-        store = getattr(runtime, "store", None)
-        coordinator = getattr(runtime, "coordinator", None)
-        remove_repair_listener = getattr(runtime, "repair_listener_remove", None)
-        if callable(remove_repair_listener):
-            remove_repair_listener()
-        try:
-            if store is not None and coordinator is not None:
-                save_runtime_snapshot = getattr(coordinator, "_save_runtime_snapshot", None)
-                if callable(save_runtime_snapshot):
-                    save_runtime_snapshot()
-                else:
-                    save_policy_runtime = getattr(store, "save_policy_runtime", None)
-                    engine = getattr(coordinator, "_policy_engine", None)
-                    if callable(save_policy_runtime) and engine is not None:
-                        save_policy_runtime(engine)
-            if store is not None:
-                await store.async_save()
-        except Exception:
-            # Persistence must not strand a live coordinator after the
-            # platforms have already unloaded.
-            _LOGGER.exception("Failed to persist runtime state during unload")
-        finally:
-            shutdown = getattr(coordinator, "async_shutdown", None)
-            if callable(shutdown):
-                try:
-                    await shutdown()
-                except Exception:
-                    _LOGGER.exception("Failed to shut down coordinator during unload")
-            entry.runtime_data = None
-
-    if unload_ok and not _loaded_runtimes(hass):
+    if runtime is None:
+        return False
+    try:
+        await runtime.coordinator.async_persist_runtime()
+    except Exception:
+        _LOGGER.exception("Power Orchestrator runtime persistence failed during unload")
+    removed = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if removed is False:
+        return False
+    remove_listener = getattr(runtime, "repair_listener_remove", None)
+    if callable(remove_listener):
+        remove_listener()
+    hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    entry.runtime_data = None
+    if not _loaded_runtimes(hass):
         _unregister_services(hass)
-
-    return bool(unload_ok)
-
-
-async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Migrate config entry if needed."""
-    # Placeholder for future migrations
     return True
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Drop obsolete configuration fields while preserving load-shedding settings."""
+    changed = False
+    data = dict(entry.data or {})
+    allowed_data_keys = {
+        CONF_AVERAGING_PERIOD,
+        CONF_BATTERY_SOC,
+        CONF_BATTERY_THRESHOLD,
+        CONF_DEVICES,
+        CONF_EXECUTION_MODE,
+        CONF_GRID_LOSS_MODE,
+        CONF_GRID_LOSS_SENSOR,
+        CONF_HYSTERESIS,
+        CONF_LOAD_SENSOR,
+        CONF_MAX_LOAD,
+        CONF_PAUSE_PERIOD,
+        CONF_SAFETY_RESERVE,
+        CONF_THRESHOLDS,
+    }
+    clean_data = {key: value for key, value in data.items() if key in allowed_data_keys}
+    if clean_data != data:
+        data = clean_data
+        changed = True
+    allowed_device_keys = {
+        CONF_DEVICE_ID,
+        CONF_DEVICE_NAME,
+        CONF_DEVICE_ENTITY,
+        CONF_DEVICE_EXPECTED_POWER,
+        CONF_DEVICE_POWER_SENSOR,
+        CONF_DEVICE_ACTUATORS,
+        CONF_PRIORITY,
+        CONF_SHED_PRIORITY,
+    }
+    raw_devices = data.get(CONF_DEVICES)
+    if isinstance(raw_devices, list):
+        clean_devices = [
+            {key: value for key, value in device.items() if key in allowed_device_keys}
+            for device in raw_devices
+            if isinstance(device, dict)
+        ]
+        if clean_devices != raw_devices:
+            data[CONF_DEVICES] = clean_devices
+            changed = True
+    if changed:
+        updater = getattr(hass.config_entries, "async_update_entry", None)
+        if callable(updater):
+            updater(entry, data=data)
+    return True
+
+
+def _service_runtime(hass: HomeAssistant) -> PowerOrchestratorRuntimeData:
+    runtimes = _loaded_runtimes(hass)
+    if len(runtimes) != 1:
+        raise _translated_error(HomeAssistantError, "entry_not_unique")
+    return runtimes[0]
+
+
+def _service_source(call: Any) -> tuple[str, str | None, str | None]:
+    context = getattr(call, "context", None)
+    source = getattr(call, "data", {}).get("source", "service")
+    if not isinstance(source, str) or not source.strip():
+        raise _translated_error(ServiceValidationError, "invalid_service_source")
+    return source.strip(), getattr(context, "user_id", None), getattr(context, "id", None)
+
+
 async def _register_services(hass: HomeAssistant) -> None:
-    """Register domain services once during integration setup."""
+    """Register singleton services once."""
+    services = hass.services
+    if getattr(services, "has_service", lambda *_: False)(DOMAIN, "force_evaluate"):
+        return
 
-    def require_single_runtime() -> PowerOrchestratorRuntimeData:
-        runtimes = _loaded_runtimes(hass)
-        if len(runtimes) != 1:
-            raise _translated_error(
-                HomeAssistantError,
-                "entry_not_unique",
-            )
-        return runtimes[0]
-
-    def service_result(runtime: PowerOrchestratorRuntimeData, **extra: Any) -> dict[str, Any]:
-        """Return a stable, dashboard-safe result envelope for service calls."""
-        coordinator = runtime.coordinator
-        result: dict[str, Any] = {
-            "mode": getattr(coordinator, "mode", None),
-            "execution_mode": getattr(coordinator, "execution_mode", None),
-            "reason_code": getattr(coordinator, "reason_code", None),
-            "last_action": getattr(coordinator, "_last_action", None),
-        }
-        result.update(extra)
-        return result
-
-    def service_actor_context(call: Any) -> tuple[str, str, str | None]:
-        """Normalize source and HA context for guarded intent audit records."""
-        data = getattr(call, "data", {}) or {}
-        source = data.get("source", "service")
-        if not isinstance(source, str) or not source.strip():
-            raise _translated_error(
-                ServiceValidationError,
-                "invalid_service_source",
-            )
-        context = getattr(call, "context", None)
-        user_id = getattr(context, "user_id", None)
-        context_id = getattr(context, "id", None)
-        actor_id = user_id if isinstance(user_id, str) and user_id else "system"
-        normalized_context_id = context_id if isinstance(context_id, str) and context_id else None
-        return source.strip(), actor_id, normalized_context_id
-
-    async def handle_force_evaluate(call: Any) -> dict[str, Any]:
-        """Force immediate re-evaluation for the singleton entry."""
-        runtime = require_single_runtime()
+    async def force_evaluate(call: Any) -> None:
+        del call
         try:
+            runtime = _service_runtime(hass)
             await runtime.coordinator.async_force_evaluate()
+            _sync_repair_issues_for_runtime(hass, runtime)
         except Exception as exc:
-            raise _translated_error(
-                HomeAssistantError,
-                "evaluation_failed",
-            ) from exc
-        return service_result(runtime, accepted=True, action="force_evaluate")
+            raise _translated_error(HomeAssistantError, "evaluation_failed", reason=str(exc)) from exc
 
-    async def handle_set_mode(call: Any) -> dict[str, Any]:
-        """Set the orchestrator mode for the singleton entry."""
-        data = getattr(call, "data", {}) or {}
-        mode = data.get("mode")
+    async def set_mode(call: Any) -> None:
+        mode = getattr(call, "data", {}).get("mode")
         if mode not in (MODE_AUTO, MODE_OFF):
-            raise _translated_error(
-                ServiceValidationError,
-                "invalid_service_mode",
-            )
-        runtime = require_single_runtime()
+            raise _translated_error(ServiceValidationError, "invalid_service_mode")
         try:
+            runtime = _service_runtime(hass)
             await runtime.coordinator.async_set_mode(mode)
-        except ValueError as exc:
-            raise _translated_error(
-                ServiceValidationError,
-                "request_rejected",
-                reason=str(exc),
-            ) from exc
+            _sync_repair_issues_for_runtime(hass, runtime)
         except Exception as exc:
-            raise _translated_error(
-                HomeAssistantError,
-                "mode_change_failed",
-            ) from exc
-        return service_result(runtime, accepted=True, action="set_mode", requested_mode=mode)
+            raise _translated_error(HomeAssistantError, "mode_change_failed", reason=str(exc)) from exc
 
-    async def handle_request_start(call: Any) -> dict[str, Any]:
-        """Request a guarded logical-device start; never call relay services directly."""
-        data = getattr(call, "data", {}) or {}
+    async def request_stop(call: Any) -> None:
+        data = getattr(call, "data", {})
         device_id = data.get("device_id")
-        if not isinstance(device_id, str) or not device_id:
-            raise _translated_error(
-                ServiceValidationError,
-                "missing_device_id",
-            )
-        source, actor_id, context_id = service_actor_context(call)
-        runtime = require_single_runtime()
+        if not isinstance(device_id, str) or not device_id.strip():
+            raise _translated_error(ServiceValidationError, "missing_device_id")
+        source, actor_id, context_id = _service_source(call)
         try:
-            accepted = await runtime.coordinator.async_request_start(
-                device_id,
-                source=source,
-                actor_id=actor_id,
-                context_id=context_id,
+            runtime = _service_runtime(hass)
+            await runtime.coordinator.async_request_stop(
+                device_id.strip(), source=source, actor_id=actor_id, context_id=context_id
             )
-        except ValueError as exc:
-            raise _translated_error(
-                ServiceValidationError,
-                "request_rejected",
-                reason=str(exc),
-            ) from exc
+            _sync_repair_issues_for_runtime(hass, runtime)
         except Exception as exc:
-            raise _translated_error(
-                HomeAssistantError,
-                "start_request_failed",
-            ) from exc
-        return service_result(
-            runtime,
-            accepted=accepted,
-            action="request_start",
-            device_id=device_id,
-            source=source,
-            actor_id=actor_id,
-            context_id=context_id,
-        )
+            raise _translated_error(HomeAssistantError, "stop_request_failed", reason=str(exc)) from exc
 
-    async def handle_request_stop(call: Any) -> dict[str, Any]:
-        """Request a guarded logical-device stop."""
-        data = getattr(call, "data", {}) or {}
+    async def clear_quarantine(call: Any) -> None:
+        data = getattr(call, "data", {})
         device_id = data.get("device_id")
-        if not isinstance(device_id, str) or not device_id:
-            raise _translated_error(
-                ServiceValidationError,
-                "missing_device_id",
-            )
-        source, actor_id, context_id = service_actor_context(call)
-        runtime = require_single_runtime()
+        if not isinstance(device_id, str) or not device_id.strip():
+            raise _translated_error(ServiceValidationError, "missing_device_id")
+        source, actor_id, context_id = _service_source(call)
         try:
-            accepted = await runtime.coordinator.async_request_stop(
-                device_id,
-                source=source,
-                actor_id=actor_id,
-                context_id=context_id,
+            runtime = _service_runtime(hass)
+            await runtime.coordinator.async_clear_quarantine(
+                device_id.strip(), source=source, actor_id=actor_id, context_id=context_id
             )
-        except ValueError as exc:
-            raise _translated_error(
-                ServiceValidationError,
-                "request_rejected",
-                reason=str(exc),
-            ) from exc
+            _sync_repair_issues_for_runtime(hass, runtime)
         except Exception as exc:
-            raise _translated_error(
-                HomeAssistantError,
-                "stop_request_failed",
-            ) from exc
-        return service_result(
-            runtime,
-            accepted=accepted,
-            action="request_stop",
-            device_id=device_id,
-            source=source,
-            actor_id=actor_id,
-            context_id=context_id,
-        )
+            raise _translated_error(HomeAssistantError, "quarantine_clear_failed", reason=str(exc)) from exc
 
-    async def handle_clear_quarantine(call: Any) -> dict[str, Any]:
-        """Clear a device quarantine only after coordinator safety proof."""
-        data = getattr(call, "data", {}) or {}
-        device_id = data.get("device_id")
-        if not isinstance(device_id, str) or not device_id:
-            raise _translated_error(
-                ServiceValidationError,
-                "missing_device_id",
-            )
-        source, actor_id, context_id = service_actor_context(call)
-        runtime = require_single_runtime()
+    async def set_execution_mode(call: Any) -> None:
+        data = getattr(call, "data", {})
+        value = data.get(CONF_EXECUTION_MODE)
+        confirm = data.get("confirm_live", False)
+        if value not in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE):
+            raise _translated_error(ServiceValidationError, "invalid_execution_mode")
         try:
-            accepted = await runtime.coordinator.async_clear_quarantine(
-                device_id,
-                source=source,
-                actor_id=actor_id,
-                context_id=context_id,
-            )
-        except ValueError as exc:
-            raise _translated_error(
-                ServiceValidationError,
-                "request_rejected",
-                reason=str(exc),
-            ) from exc
+            await _service_runtime(hass).coordinator.async_set_execution_mode(value, confirm_live=bool(confirm))
         except Exception as exc:
-            raise _translated_error(
-                HomeAssistantError,
-                "quarantine_clear_failed",
-            ) from exc
-        return service_result(
-            runtime,
-            accepted=accepted,
-            action="clear_quarantine",
-            device_id=device_id,
-            source=source,
-            actor_id=actor_id,
-            context_id=context_id,
-        )
+            raise _translated_error(HomeAssistantError, "execution_mode_change_failed", reason=str(exc)) from exc
 
-    async def handle_set_execution_mode(call: Any) -> dict[str, Any]:
-        """Change observe/live ownership; live requires explicit confirmation."""
-        data = getattr(call, "data", {}) or {}
-        execution_mode = data.get("execution_mode")
-        confirm_live = data.get("confirm_live", False) is True
-        if execution_mode not in ("observe", "live"):
-            raise _translated_error(
-                ServiceValidationError,
-                "invalid_execution_mode",
-            )
-        runtime = require_single_runtime()
-        try:
-            await runtime.coordinator.async_set_execution_mode(
-                execution_mode,
-                confirm_live=confirm_live,
-            )
-        except ValueError as exc:
-            raise _translated_error(
-                ServiceValidationError,
-                "request_rejected",
-                reason=str(exc),
-            ) from exc
-        except Exception as exc:
-            raise _translated_error(
-                HomeAssistantError,
-                "execution_mode_change_failed",
-            ) from exc
-        return service_result(
-            runtime,
-            accepted=True,
-            action="set_execution_mode",
-            requested_execution_mode=execution_mode,
-        )
-
-    has_service = getattr(hass.services, "has_service", None)
-    if not callable(has_service) or has_service(DOMAIN, "force_evaluate") is not True:
-        hass.services.async_register(
-            DOMAIN,
-            "force_evaluate",
-            handle_force_evaluate,
-            schema=vol.Schema({}),
-            supports_response=SupportsResponse.OPTIONAL,
-        )
-    if not callable(has_service) or has_service(DOMAIN, "set_mode") is not True:
-        hass.services.async_register(
-            DOMAIN,
-            "set_mode",
-            handle_set_mode,
-            schema=vol.Schema({vol.Required("mode"): vol.In((MODE_AUTO, MODE_OFF))}),
-            supports_response=SupportsResponse.OPTIONAL,
-        )
-    if not callable(has_service) or has_service(DOMAIN, "request_start") is not True:
-        hass.services.async_register(
-            DOMAIN,
-            "request_start",
-            handle_request_start,
-            schema=vol.Schema(
-                {
-                    vol.Required("device_id"): str,
-                    vol.Optional("source", default="service"): str,
-                }
-            ),
-            supports_response=SupportsResponse.OPTIONAL,
-        )
-    if not callable(has_service) or has_service(DOMAIN, "request_stop") is not True:
-        hass.services.async_register(
-            DOMAIN,
-            "request_stop",
-            handle_request_stop,
-            schema=vol.Schema(
-                {
-                    vol.Required("device_id"): str,
-                    vol.Optional("source", default="service"): str,
-                }
-            ),
-            supports_response=SupportsResponse.OPTIONAL,
-        )
-    if not callable(has_service) or has_service(DOMAIN, "clear_quarantine") is not True:
-        hass.services.async_register(
-            DOMAIN,
-            "clear_quarantine",
-            handle_clear_quarantine,
-            schema=vol.Schema(
-                {
-                    vol.Required("device_id"): str,
-                    vol.Optional("source", default="service"): str,
-                }
-            ),
-            supports_response=SupportsResponse.OPTIONAL,
-        )
-    if not callable(has_service) or has_service(DOMAIN, "set_execution_mode") is not True:
-        hass.services.async_register(
-            DOMAIN,
-            "set_execution_mode",
-            handle_set_execution_mode,
-            schema=vol.Schema(
-                {
-                    vol.Required("execution_mode"): vol.In(("observe", "live")),
-                    vol.Optional("confirm_live", default=False): bool,
-                }
-            ),
-            supports_response=SupportsResponse.OPTIONAL,
-        )
+    service_schema = {
+        "force_evaluate": vol.Schema({}),
+        "set_mode": vol.Schema({vol.Required("mode"): vol.In([MODE_AUTO, MODE_OFF])}),
+        "request_stop": vol.Schema({vol.Required("device_id"): str, vol.Optional("source", default="service"): str}),
+        "clear_quarantine": vol.Schema({vol.Required("device_id"): str, vol.Optional("source", default="service"): str}),
+        "set_execution_mode": vol.Schema({
+            vol.Required(CONF_EXECUTION_MODE): vol.In([EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE]),
+            vol.Optional("confirm_live", default=False): bool,
+        }),
+    }
+    handlers = {
+        "force_evaluate": force_evaluate,
+        "set_mode": set_mode,
+        "request_stop": request_stop,
+        "clear_quarantine": clear_quarantine,
+        "set_execution_mode": set_execution_mode,
+    }
+    for name in _REGISTERED_SERVICES:
+        services.async_register(DOMAIN, name, handlers[name], schema=service_schema[name])
 
 
 def _unregister_services(hass: HomeAssistant) -> None:
-    """Remove guarded global services when no runtime can serve them."""
-    has_service = getattr(hass.services, "has_service", None)
-    remove_service = getattr(hass.services, "async_remove", None)
-    if not callable(remove_service):
-        return
-    for service in _REGISTERED_SERVICES:
-        if not callable(has_service) or has_service(DOMAIN, service) is True:
-            remove_service(DOMAIN, service)
-
-
-def _resolve_forecast_entity(hass: HomeAssistant, config_entry_id: str) -> str | None:
-    """Resolve a config entry ID to an exact estimated-power forecast entity."""
-    return _resolve_forecast_entity_shared(hass, config_entry_id)
+    services = getattr(hass, "services", None)
+    remove = getattr(services, "async_remove", None)
+    if callable(remove):
+        for name in _REGISTERED_SERVICES:
+            remove(DOMAIN, name)

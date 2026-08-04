@@ -46,7 +46,7 @@ rules:
   diagnostics: done
   discovery:
     status: exempt
-    comment: The integration discovers optional Energy Dashboard metadata only; managed entities remain explicitly selected by the user.
+    comment: The integration discovers optional load and safety metadata only; managed entities remain explicitly selected by the user.
   discovery-update-info:
     status: exempt
     comment: The integration has no network discovery and does not own remote device addresses.

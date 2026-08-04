@@ -16,6 +16,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
+from .coordinator import PowerOrchestratorCoordinator
 
 _MAX_AUDIT_HISTORY_ATTRIBUTES = 12
 
@@ -61,14 +62,14 @@ class PowerOrchestratorSensorBase(CoordinatorEntity, SensorEntity):  # type: ign
         }
 
     @property
-    def _coordinator(self) -> Any:
-        return self.coordinator
+    def _coordinator(self) -> PowerOrchestratorCoordinator:
+        return cast(PowerOrchestratorCoordinator, self.coordinator)
 
     @property
     def available(self) -> bool:
         """Expose numeric telemetry only when its source is safe."""
         if self._requires_valid_load:
-            return bool(self.coordinator.load_sensor_valid)
+            return bool(self._coordinator.load_sensor_valid)
         return True
 
 
@@ -84,24 +85,21 @@ class PowerOrchestratorStatusSensor(PowerOrchestratorSensorBase):
 
     @property
     def native_value(self) -> str:
-        return cast(str, self.coordinator.status)
+        return cast(str, self._coordinator.status)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
-            "mode": self.coordinator.mode,
-            "grid_ok": self.coordinator.grid_ok,
-            "grid_safety_source_configured": self.coordinator.grid_safety_source_configured,
-            "load_sensor_valid": self.coordinator.load_sensor_valid,
-            "load_sensor_reason": self.coordinator.load_sensor_reason,
-            "startup_safe": self.coordinator.startup_safe,
-            "pending_start_power": self.coordinator.pending_start_power,
-            "faulted_devices": list((self.coordinator.data or {}).get("faulted_devices", ())),
-            "recovery_blocked_devices": list(
-                (self.coordinator.data or {}).get("recovery_blocked_devices", ())
-            ),
-            "fault_reasons": dict((self.coordinator.data or {}).get("fault_reasons", {})),
-            "safety_fault_reason": (self.coordinator.data or {}).get("safety_fault_reason"),
+            "mode": self._coordinator.mode,
+            "grid_ok": self._coordinator.grid_ok,
+            "grid_safety_source_configured": self._coordinator.grid_safety_source_configured,
+            "load_sensor_valid": self._coordinator.load_sensor_valid,
+            "load_sensor_reason": self._coordinator.load_sensor_reason,
+            "startup_safe": self._coordinator.startup_safe,
+            "faulted_devices": list((self._coordinator.data or {}).get("faulted_devices", ())),
+            "quarantined_devices": list((self._coordinator.data or {}).get("quarantined_devices", ())),
+            "fault_reasons": dict((self._coordinator.data or {}).get("fault_reasons", {})),
+            "safety_fault_reason": (self._coordinator.data or {}).get("safety_fault_reason"),
         }
 
 
@@ -121,7 +119,7 @@ class PowerOrchestratorCurrentLoadSensor(PowerOrchestratorSensorBase):
 
     @property
     def native_value(self) -> float | None:
-        return cast(Optional[float], self.coordinator.current_load)
+        return cast(Optional[float], self._coordinator.current_load)
 
 
 class PowerOrchestratorAverageLoadSensor(PowerOrchestratorSensorBase):
@@ -140,7 +138,7 @@ class PowerOrchestratorAverageLoadSensor(PowerOrchestratorSensorBase):
 
     @property
     def native_value(self) -> float | None:
-        return cast(Optional[float], self.coordinator.average_load)
+        return cast(Optional[float], self._coordinator.average_load)
 
 
 class PowerOrchestratorAvailableCapacitySensor(PowerOrchestratorSensorBase):
@@ -159,7 +157,7 @@ class PowerOrchestratorAvailableCapacitySensor(PowerOrchestratorSensorBase):
 
     @property
     def native_value(self) -> float | None:
-        return cast(Optional[float], self.coordinator.available_capacity)
+        return cast(Optional[float], self._coordinator.available_capacity)
 
 
 class PowerOrchestratorLastActionSensor(PowerOrchestratorSensorBase):
@@ -174,7 +172,7 @@ class PowerOrchestratorLastActionSensor(PowerOrchestratorSensorBase):
 
     @property
     def native_value(self) -> str:
-        return cast(str, self.coordinator.last_action)
+        return cast(str, self._coordinator.last_action)
 
 
 class PowerOrchestratorExecutionModeSensor(PowerOrchestratorSensorBase):
@@ -189,13 +187,13 @@ class PowerOrchestratorExecutionModeSensor(PowerOrchestratorSensorBase):
 
     @property
     def native_value(self) -> str:
-        return cast(str, self.coordinator.execution_mode)
+        return cast(str, self._coordinator.execution_mode)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        data = self.coordinator.data or {}
+        data = self._coordinator.data or {}
         return {
-            "planner_mode": self.coordinator.mode,
+            "planner_mode": self._coordinator.mode,
             "physical_commands_allowed": data.get("physical_commands_allowed", False),
             "journal_persistence_blocked": data.get("journal_persistence_blocked", False),
         }
@@ -213,11 +211,11 @@ class PowerOrchestratorReasonCodeSensor(PowerOrchestratorSensorBase):
 
     @property
     def native_value(self) -> str:
-        return cast(str, self.coordinator.reason_code)
+        return cast(str, self._coordinator.reason_code)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        data = self.coordinator.data or {}
+        data = self._coordinator.data or {}
         return {
             "status": data.get("status"),
             "policy_phase": data.get("policy_phase"),
@@ -238,18 +236,17 @@ class PowerOrchestratorLastOperationSensor(PowerOrchestratorSensorBase):
 
     @property
     def native_value(self) -> str:
-        return str((self.coordinator.data or {}).get("last_operation_result", "none"))
+        return str((self._coordinator.data or {}).get("last_operation_result", "none"))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        data = self.coordinator.data or {}
+        data = self._coordinator.data or {}
         raw_history = data.get("audit_history", [])
         history = [dict(item) for item in raw_history if isinstance(item, dict)]
         history_tail = history[-_MAX_AUDIT_HISTORY_ATTRIBUTES:]
         return {
             "action_id": data.get("last_action_id"),
             "operation_id": data.get("last_operation_id"),
-            "pending_action_id": data.get("pending_action_id"),
             "journal_unresolved_count": data.get("journal_unresolved_count", 0),
             "action_journal_invalid": data.get("action_journal_invalid", False),
             "journal_persistence_blocked": data.get("journal_persistence_blocked", False),

@@ -1,291 +1,172 @@
-# Power Orchestrator — контрольована HA UI verification procedure
+# Power Orchestrator — контрольована HA verification procedure
 
-Цей документ описує **майбутню контрольовану перевірку** інтеграції у Home Assistant. Він не є дозволом на deployment і не виконує жодних live-дій.
+Цей документ описує **майбутню контрольовану перевірку** інтеграції. Він не є дозволом на deployment і не виконує live-дій.
 
-> **Safety boundary:** до окремого явного дозволу не виконувати deploy, `reload`, `restart`, запис у live config entry або будь-які фізичні `turn_on`/`turn_off` service calls. Локальні тести інтеграції використовують mocks.
+> **Safety boundary:** без окремого явного дозволу не виконувати deploy, reload, restart, запис у live config/storage або будь-які фізичні `turn_off` service calls. Локальні тести використовують mocks.
 
 ## 1. Мета та критерій успіху
 
-Перевірити в UI Home Assistant:
+Перевірити, що інтеграція працює **лише як load-shedding controller**:
 
-- HACS/package installation та manifest metadata;
-- config flow і optional Energy Dashboard discovery;
-- підтвердження/видалення discovered candidates;
-- додавання custom devices і on/off control mapping;
-- friendly names та named priority selectors;
-- runtime entities і stable unique IDs;
-- режими `auto`/`off`;
-- fail-closed behavior для grid/battery/load/forecast inputs;
-- one-device-per-cycle normal control;
-- emergency stop, pause persistence і manual-override notification.
+- конфігурація приймає aggregate load, safety source та optional loads;
+- `auto`/`off` і `observe`/`live` мають чіткі межі;
+- перевищення ліміту виконує bounded stop з readback;
+- аварійний grid/battery стан виконує all-stop path;
+- unknown/stale/invalid input не authorizes фізичну дію;
+- після restart валідний persisted mode відновлюється без безумовного скидання;
+- немає PV/forecast admission, normal enable або automatic re-enable surface.
 
-Успіх означає, що всі обов'язкові перевірки нижче пройдені, кожна фізична дія має очікуваний readback, а жоден небезпечний або невизначений input не спричиняє normal start.
+В integration немає **no normal automatic enabling**: її фізична action surface stop-only.
+
+Успіх означає, що всі обов'язкові перевірки нижче пройдені, кожна дозволена фізична дія має очікуваний readback, а жоден небезпечний або невизначений input не призводить до normal action.
 
 ## 2. Передумови та approval gates
 
 ### Обов'язково до live-сесії
 
 - [ ] Є explicit approval на окрему live UI verification session.
-- [ ] Обрано лише не критичні/test devices або підготовлено безпечне вікно.
-- [ ] Зафіксовано поточні entity IDs, automations і попередню конфігурацію.
+- [ ] Обрано лише non-critical/test loads або підготовлено безпечне вікно.
+- [ ] Зафіксовано entity IDs, automations і попередню конфігурацію.
 - [ ] Визначено оператора, який може фізично вимкнути навантаження вручну.
-- [ ] Відомо, як повернути попередню версію інтеграції або видалити її config entry.
-- [ ] Для safety тестів доступні test sensors/fixtures або контрольовані helper entities.
+- [ ] Є rollback procedure.
+- [ ] Для safety тестів доступні test sensors/helpers.
 
-### Заборонено в межах цієї процедури без окремого дозволу
+### Заборонено без окремого дозволу
 
 - [ ] `ha core restart`, reload integration або reload config entry.
-- [ ] Увімкнення реальних бойлерів/акумулятора як тестовий крок.
-- [ ] Зміна live Energy Dashboard, Forecast.Solar або батарейних sensors.
+- [ ] Зміна live dashboard, battery sensors або фізичних навантажень.
 - [ ] Ручне редагування `.storage` під час запущеного HA.
-- [ ] Видалення старих automations/packages до завершення паралельного спостереження.
+- [ ] Видалення старих automations/packages до завершення спостереження.
 
 ## 3. Installation/package check
 
-Виконувати лише після approval на installation, не підміняти цим локальні тести.
+Виконувати лише після approval на installation; це не замінює локальні тести.
 
-1. Відкрити **Settings → Devices & services → HACS**.
-2. Знайти `Power Orchestrator` або додати repository як custom integration.
-3. Перевірити, що package має version `0.5.0` і документацію на repository URL.
-4. Встановити integration, але не запускати фізичне керування.
-5. Переконатися, що integration manifest не містить credentials або connection strings.
+1. Перевірити manifest, version, domain і package layout.
+2. Встановити integration, не активуючи фізичне керування.
+3. Переконатися, що package не містить credentials, tokens або connection strings.
+4. Залишити planner mode `off`, execution mode `observe`.
 
-**Очікування:** HACS приймає package layout; integration доступна у **Add Integration**; version і domain `power_orchestrator` відповідають package metadata.
+**Очікування:** package приймається Home Assistant/HACS, config flow доступний, фізичні service calls не виконуються під час installation.
 
 ## 4. Config flow walkthrough
 
-### 4.1 Auto-Discovery
-
-Відкрити **Settings → Devices & services → Add Integration → Power Orchestrator**.
-
 Перевірити:
 
-- Energy Dashboard є optional prerequisite;
-- відсутній Energy Dashboard не блокує custom-device path;
-- `device_consumption.stat_consumption` показується як candidate identity;
-- `stat_rate` використовується лише як optional power telemetry;
-- dashboard `name` зберігається як friendly name;
-- якщо dashboard name відсутній, UI показує HA `friendly_name`, а потім entity ID;
-- Forecast.Solar selector показує лише config entries integration `forecast_solar`.
+- Energy Dashboard discovery є optional і не є safety permit;
+- aggregate load sensor є обов'язковим;
+- safety source можна налаштувати як grid sensor або battery threshold;
+- custom load має controllable entity, expected power, optional power sensor і actuator group;
+- priority/pause поля мають inline descriptions;
+- відсутні PV, forecast, generation, normal-enable або automatic-re-enable поля;
+- duplicate/invalid devices і missing safety source відхиляються.
 
-**Очікування:** discovery не активує жодного пристрою автоматично. Якщо entry вже існує, повторне додавання завершується abort `single_instance`; second entry не створюється.
-
-### 4.2 Load Monitoring
-
-Вказати load sensor і перевірити поля:
-
-- Load sensor;
-- Maximum total load (W);
-- Averaging period (s);
-- Safety reserve (W);
-- Hysteresis (W).
-
-**Очікування:** load sensor є обов'язковим. Значення невалідного або stale sensor у runtime не перетворюється на `0 W` і не дозволяє start.
-
-### 4.3 Optional Devices
-
-Для discovered candidates:
-
-1. Переконатися, що всі candidates за замовчуванням selected.
-2. Видалити один candidate з multi-select.
-3. Перевірити, що видалений candidate не переходить у наступний control step.
-4. Для залишеного candidate вибрати окрему controllable entity у домені `switch`, `light` або `input_boolean`.
-5. Перевірити prefilled power sensor з Energy Dashboard `stat_rate`.
-6. Замінити його на інший `sensor` entity і переконатися, що custom value зберігається; окремо перевірити, що очищення поля вимикає measured telemetry.
-7. Вказати friendly name, expected power і прапорець `only_from_solar`.
-
-Для custom device:
-
-1. Обрати **Add a custom device**.
-2. Вказати on/off entity окремо від Energy Dashboard statistics entity.
-3. Вибрати власний power sensor або залишити його порожнім, якщо measured telemetry не потрібна.
-4. Додати другий custom device через **Add another**.
-5. Перевірити, що обидва пристрої збереглися.
-
-**Очікування:** statistics sensor не використовується як physical control entity; жоден пристрій не вмикається під час config flow.
-
-### 4.4 Priority & Pause
-
-Перевірити named selectors:
-
-- `Priority position 1`, `Priority position 2`, …;
-- option labels — friendly names, не raw entity IDs;
-- кожен device обраний рівно один раз;
-- duplicate або unknown selection повертає localized validation error;
-- pause period збережений у секундах.
-
-**Очікування:** position 1 — найвищий priority; останній у списку вимикається першим під час normal load shedding.
-
-### 4.5 Grid Loss Behavior
-
-Перевірити два взаємовиключні safety modes:
-
-#### Sensor mode
-
-- `Detection mode = Grid loss sensor`;
-- grid-loss binary sensor обов'язковий;
-- `on` означає grid available;
-- `off`, `unknown`, `unavailable`, missing або stale означають unsafe/grid-loss.
-
-#### Battery threshold mode
-
-- `Detection mode = Battery threshold`;
-- battery SoC sensor обов'язковий;
-- threshold finite і в діапазоні `0..100`;
-- SoC має бути **строго вище** threshold для normal start.
-
-**Очікування:** відсутній required source повертає form error, а не створює fail-open entry.
+**Очікування:** config flow не змінює state жодного навантаження.
 
 ## 5. Entity and device verification
 
-Після створення entry перевірити один device `Power Orchestrator` і такі entities:
+Після створення entry перевірити один device **Power Orchestrator** і config-entry-scoped unique IDs для:
 
-| Entity role | Expected stable unique-ID suffix |
-|---|---|
-| Status sensor | `_sensor_status` |
-| Current load | `_sensor_current_load` |
-| Average load | `_sensor_average_load` |
-| Available capacity | `_sensor_available_capacity` |
-| Last action | `_sensor_last_action` |
-| Grid OK | `_binary_sensor_grid_ok` |
-| Mode selector | `_select_mode` |
+- status;
+- current/average load;
+- available capacity;
+- last action/operation;
+- execution mode/reason code;
+- Grid OK;
+- Faulted;
+- Action journal healthy;
+- mode select з опціями `auto`, `off`.
 
-Повний unique ID має бути scoped до config-entry ID, наприклад `<entry_id>_sensor_status`.
-
-Перевірити:
-
-- sensor names: Status, Current load, Average load, Available capacity, Last action;
-- binary sensor: Grid OK;
-- select options: `auto`, `off`;
-- device info model `v0.5.0` відповідає manifest version `0.5.0`;
-- всі entities належать правильному одному integration device;
-- entity registry не створила `_2`/ghost duplicates.
-- newly created config entry starts in `off` before the first coordinator refresh;
-- only an explicitly persisted `auto` mode may restore automatic starts after a later reload/restart.
+Перевірити, що новий entry є `off` до першої evaluation, а лише валідний persisted mode може відновити `auto` після reload/restart.
 
 ## 6. Safe runtime checks
 
-Усі runtime checks виконувати спочатку на mocks/helpers або не критичному test load. Після кожного кроку перевіряти status sensor, Last action і фізичний relay state.
+Спочатку використовувати mocks/helpers або non-critical test load. Після кожного кроку перевіряти status, reason code, last action і фактичний actuator state.
 
-| Test input/event | Expected result | Forbidden result |
+| Input/event | Очікуваний результат | Заборонений результат |
 |---|---|---|
-| fresh valid grid `on`, fresh valid load, device `off` | normal evaluation may consider highest-priority device | batch start of multiple devices |
-| device state `unknown`/`unavailable` | no normal start; state remains unknown/safety blocked as appropriate | treating unknown as `off` |
-| load `unknown`, `unavailable`, NaN, negative, wrong unit or stale | `safety_blocked`; invalid sample not added as `0 W` | normal start |
-| grid sensor `off`/missing/stale | emergency stop path; no start | leaving known-on managed load running without stop attempt |
-| battery SoC at/below threshold, invalid or stale | emergency stop/grid-loss behavior | normal start |
-| fresh Forecast.Solar `power_production_now` below expected power | solar-only device remains off | fallback to actual PV or unrelated forecast sensor |
-| Forecast unavailable, stale, future, wrong unit, prior clock hour | solar-only device remains off | forecast-only admission |
-| valid load above max | one lowest-priority known-on device is shed | batch shedding of all devices |
-| mode `off` | no normal physical starts | start due to capacity |
-| mode `off` plus grid loss | emergency stop still active | `off` disabling emergency safety |
-| service call raises or relay readback fails | state becomes unknown; `safety_blocked`; no success claim | assuming service call succeeded |
+| Fresh valid grid `on`, valid load | Безпечна evaluation без фізичної дії | Нормальне automatic enabling |
+| Load `unknown`, unavailable, NaN, negative, wrong unit або stale | `safety_blocked`; sample не стає `0 W` | Дозволена дія |
+| Grid `off`, missing або stale | Emergency stop path; bounded stop attempt | Залишити відомий активний load без stop attempt |
+| Battery SoC at/below threshold або stale | Grid-loss/safety behavior | Дозволена normal дія |
+| Valid load above limit | Один lowest-priority known-on load shed | Batch shedding або re-enable |
+| Mode `off` | Немає ordinary physical action | Mode bypass |
+| Mode `off` + emergency state | Emergency handling залишається активним | `off` вимикає safety stop |
+| Service error/readback failure | Unknown/faulted/safety-blocked state | Claim success без readback |
 
-Normal start/stop actions are one per evaluation cycle. Emergency all-stop is the intentional exception.
+Нормальний stop — не більше одного за evaluation cycle. Emergency all-stop є окремим дозволеним винятком.
 
 ## 7. Pause, restart and options lifecycle
 
-With a controlled/test device:
+У controlled/test environment:
 
-1. Cause a normal load-shedding stop.
-2. Verify pause timestamp is set and device is not immediately restarted.
-3. Change options through the Options UI.
-4. Verify config update triggers the expected reload only after the separate reload approval.
-5. Verify mode and bounded pause state are restored after an approved restart test.
-6. Verify corrupt, expired, future, non-finite or overlong persisted pause values are ignored/fail-safe.
+1. Створити overload і перевірити bounded stop.
+2. Перевірити pause timestamp та відсутність будь-якого automatic re-enable.
+3. Встановити mode `auto`, переконатися, що storage записав його.
+4. Виконати окремо approved restart test.
+5. Перевірити, що mode `auto` відновився до першої evaluation і не був скинутий у `off` без причини.
+6. Перевірити, що missing/corrupt/invalid persisted data дає safe `off`.
+7. Перевірити Options/Reconfigure і guarded reload.
 
-Do not edit HA storage files while HA is running. If registry cleanup is required, stop HA using the operator-approved procedure first, then make the cleanup and start it again only with separate approval.
+Не редагувати HA storage вручну під час запущеного HA.
 
 ## 8. Services and manual override
 
-After an explicit service-test approval:
+Після окремого service-test approval:
 
-- call `power_orchestrator.set_mode` with `auto` and `off` only;
-- call `power_orchestrator.set_mode` without `mode` and with an invalid value; both must be rejected before the handler can arm automatic mode;
-- verify a second config entry is refused and a forced evaluation cannot start one device per entry;
-- call `power_orchestrator.force_evaluate` and verify immediate entity update;
-- after a delayed or missing relay readback, verify a compensating `turn_off`; if OFF is not confirmed, the device remains unknown and status is `safety_blocked`;
-- manually re-enable a device during an active emergency-stop episode;
-- verify one persistent notification with entry/device-specific ID:
-  `power_orchestrator_<entry_id>_<device_id>_manual_override`;
-- verify repeated evaluations do not create duplicate notifications for the same episode.
-
-After the last entry is unloaded, verify integration services are removed from the service registry.
+- перевірити `set_mode` лише для `auto`/`off`;
+- перевірити reject missing/invalid mode до виконання handler;
+- викликати `force_evaluate` і перевірити entity update;
+- викликати `request_stop` для відомого device;
+- перевірити, що readback failure залишає device unknown/faulted;
+- перевірити `clear_quarantine` лише після незалежних fresh OFF/load/readback доказів;
+- перевірити відсутність будь-якого service, що додає або запускає навантаження;
+- після unload перевірити, що integration services видалені з registry.
 
 ## 9. Rollback
 
-Stop immediately and roll back if any of the following occurs:
+Зупинити перевірку і виконати rollback, якщо:
 
-- unknown/stale safety input causes a normal start;
-- relay readback does not match the requested state but integration reports success;
-- more than one normal action occurs in one evaluation cycle;
-- `off` mode starts a device;
-- emergency stop fails without `safety_blocked` reporting;
-- options flow accepts a required-source omission;
-- entity IDs collide or duplicate entities appear;
-- service callbacks remain after entry unload.
+- unknown/stale input призводить до звичайної physical action;
+- readback не відповідає command, але integration повідомляє success;
+- більше одного ordinary action відбувається за цикл;
+- `off` обходиться;
+- emergency stop не створює safety-blocked state;
+- після unload залишаються listeners/services.
 
-Rollback sequence, only with explicit approval:
+Rollback sequence лише з approval:
 
-1. Set integration mode to `off`.
-2. Stop the integration/config entry and manually verify managed loads are safe.
-3. Restore the previously recorded config/automation path.
-4. Remove the integration entry or install the previous known-good package version.
-5. Reload/restart Home Assistant only under the approved operational procedure.
-6. Record the observed failure, status sensor value, Last action, entity ID, and timestamps without including credentials.
+1. Встановити mode `off`.
+2. Зупинити config entry та незалежно перевірити фізичні loads.
+3. Відновити попередній відомий пакет/config path.
+4. Reload/restart виконати лише за approved operational procedure.
+5. Зафіксувати status, reason, action, entity ID і timestamp без credentials.
 
 ## 10. Evidence record
 
-For each approved live verification session record:
+Для кожної approved session записати:
 
-- Home Assistant version;
-- integration/package version;
-- config-entry ID (non-secret);
-- selected load and safety source entity IDs;
-- configured devices, friendly names, priorities and expected powers;
+- Home Assistant та integration version;
+- config-entry ID;
+- load/safety source entity IDs;
+- configured loads, names, priorities, expected powers;
 - entity unique IDs;
-- test case, timestamp, expected result and observed result;
-- whether any physical action occurred;
-- rollback decision and operator approval.
+- test case, timestamp, expected/observed result;
+- чи відбулася physical дія;
+- rollback decision та approval.
 
-Never include passwords, API keys, tokens, cookies, connection strings or private credentials in the record.
+Ніколи не включати passwords, API keys, tokens, cookies, connection strings або private credentials.
 
 ## 11. Current local verification status
 
-The local, non-live quality gate currently covers:
+Локальний non-live gate має покривати:
 
-- mocked full regression suite;
+- повний mocked regression suite;
 - Python compilation;
 - JSON resource validation;
-- YAML parsing for `services.yaml` and CI workflow;
-- config/options flow validation;
-- safety, freshness, readback, persistence, one-device-per-cycle and service lifecycle tests.
+- YAML parsing для `services.yaml` і CI workflow;
+- config/options flow;
+- safety, freshness, readback, mode persistence та service lifecycle;
+- static scan, який забороняє PV/forecast/admission/normal-enable surface.
 
-Latest captured local evidence on the current working tree:
-
-```text
-coverage run --branch -m pytest tests/ -q
-425 passed in 11.51s
-TOTAL branch coverage: 95%
-coordinator.py branch coverage: 95%
-strict mypy: Success: no issues found in 13 source files
-ruff: All checks passed!
-compileall: passed
-resource JSON: valid
-```
-
-The quality virtualenv used for the mocked suite does not include
-`pytest_homeassistant_custom_component`, so it cannot run the real-HA tests while its
-local `mocks` path is active. A separate disposable Python 3.14 environment with the
-Home Assistant test stack ran the clean real-HA path successfully:
-
-```text
-PYTHONPATH=custom_components pytest -c /dev/null -o asyncio_mode=auto \
-  -o cache_dir=/tmp/power-orchestrator-ha-pytest-cache tests_real_ha/test_loader.py -q
-3 passed in 0.24s
-```
-
-This is compatibility smoke evidence only, not official Home Assistant Core review or
-official quality-scale certification.
-
-A local pass is not a substitute for the controlled live HA verification above.
+Цей документ описує майбутню перевірку і **not a substitute for the controlled live HA verification**.
