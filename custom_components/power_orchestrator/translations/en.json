@@ -7,11 +7,11 @@
     },
     "set_mode": {
       "name": "Set planner mode",
-      "description": "Arm or disarm normal planning. The emergency stop remains active.",
+      "description": "Auto executes guarded stop-only shedding at overload; off disables normal shedding while emergency safety remains active.",
       "fields": {
         "mode": {
           "name": "Planner mode",
-          "description": "Auto arms normal planning; off keeps normal planner actions disarmed. This is separate from observe/live physical execution policy."
+          "description": "Auto evaluates overload and may issue guarded physical OFF commands; off disarms normal policy decisions. Auto cannot remain in observe execution."
         }
       }
     },
@@ -31,15 +31,29 @@
     },
     "set_execution_mode": {
       "name": "Set physical execution policy",
-      "description": "Choose observe or live. Live requires explicit confirmation.",
+      "description": "Select the compatibility execution boundary. Live permits guarded stop-only commands; observe is diagnostic-only when planner mode is off. Auto always requires live execution.",
       "fields": {
         "execution_mode": {
           "name": "Execution policy",
-          "description": "Observe records decisions only; live permits guarded physical commands."
+          "description": "Observe performs decisions and audit only while planner mode is off; live permits guarded stop commands."
         },
         "confirm_live": {
           "name": "Confirm live ownership",
           "description": "Must be true to enter live execution."
+        }
+      }
+    },
+    "authorize_shedding": {
+      "name": "Authorize exact shedding loads",
+      "description": "In observe mode, explicitly claim only listed already-on loads for a later live stop-only test. This never calls a physical service.",
+      "fields": {
+        "device_ids": {
+          "name": "Logical device IDs",
+          "description": "Exact configured stable device_id values. No wildcard or omitted device is implied."
+        },
+        "confirm_takeover": {
+          "name": "Confirm ownership takeover",
+          "description": "Must be true to change the listed currently-on loads from external to planner ownership."
         }
       }
     },
@@ -485,6 +499,12 @@
     },
     "missing_device_id": {
       "message": "A logical device ID is required."
+    },
+    "missing_device_ids": {
+      "message": "At least one exact logical device ID is required."
+    },
+    "shedding_authorization_failed": {
+      "message": "The exact shedding-ownership authorization failed: {reason}."
     },
     "request_rejected": {
       "message": "The request was rejected: {reason}."

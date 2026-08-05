@@ -150,7 +150,7 @@ async def test_unload_persists_runtime_and_unregisters_services() -> None:
     config_entries.async_unload_platforms.assert_awaited_once()
     runtime.repair_listener_remove.assert_called_once()
     assert entry.runtime_data is None
-    assert hass.services.async_remove.call_count == 5
+    assert hass.services.async_remove.call_count == 6
 
 
 @pytest.mark.asyncio
@@ -161,6 +161,7 @@ async def test_service_registration_exposes_only_safe_handlers() -> None:
         async_request_stop=AsyncMock(),
         async_clear_quarantine=AsyncMock(),
         async_set_execution_mode=AsyncMock(),
+        async_authorize_shedding=AsyncMock(),
     )
     runtime = SimpleNamespace(coordinator=coordinator)
     hass = _hass_with_services(runtime=runtime)
@@ -174,6 +175,7 @@ async def test_service_registration_exposes_only_safe_handlers() -> None:
         "request_stop",
         "clear_quarantine",
         "set_execution_mode",
+        "authorize_shedding",
     }
 
     await registered["force_evaluate"](SimpleNamespace(data={}))
@@ -186,6 +188,12 @@ async def test_service_registration_exposes_only_safe_handlers() -> None:
     await registered["set_execution_mode"](
         SimpleNamespace(data={"execution_mode": "observe", "confirm_live": False})
     )
+    await registered["authorize_shedding"](
+        SimpleNamespace(
+            data={"device_ids": ["d1", "d2"], "confirm_takeover": True},
+            context=SimpleNamespace(user_id="u", id="c"),
+        )
+    )
     coordinator.async_force_evaluate.assert_awaited_once()
     coordinator.async_set_mode.assert_awaited_once_with(MODE_AUTO)
     coordinator.async_request_stop.assert_awaited_once_with(
@@ -195,6 +203,9 @@ async def test_service_registration_exposes_only_safe_handlers() -> None:
         "d1", source="test", actor_id="u", context_id="c"
     )
     coordinator.async_set_execution_mode.assert_awaited_once_with("observe", confirm_live=False)
+    coordinator.async_authorize_shedding.assert_awaited_once_with(
+        ["d1", "d2"], confirm_takeover=True
+    )
 
 
 @pytest.mark.asyncio
@@ -219,7 +230,7 @@ def test_repair_helpers_and_unregister_are_bounded() -> None:
     assert integration._repair_device_ids(SimpleNamespace(), entry) == {"d1"}
     hass = _hass_with_services()
     integration._unregister_services(hass)
-    assert hass.services.async_remove.call_count == 5
+    assert hass.services.async_remove.call_count == 6
     assert MODE_OFF != MODE_AUTO
 
 

@@ -77,6 +77,7 @@ _REGISTERED_SERVICES = (
     "request_stop",
     "clear_quarantine",
     "set_execution_mode",
+    "authorize_shedding",
 )
 _REPAIR_ISSUE_IDS_KEY = f"{DOMAIN}_repair_issue_ids"
 _ALLOWED_CONTROL_DOMAINS = frozenset({"switch", "light", "input_boolean"})
@@ -453,6 +454,18 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     store.restore_policy_runtime(coordinator._policy_engine, model)
     restored_mode = MODE_OFF if store.safety_storage_invalid else store.restore_mode()
     coordinator.mode = restored_mode if restored_mode in (MODE_AUTO, MODE_OFF) else MODE_OFF
+    if coordinator.mode == MODE_AUTO and coordinator.execution_mode == EXECUTION_MODE_OBSERVE:
+        coordinator._execution_mode = EXECUTION_MODE_LIVE
+        store.set_execution_mode(EXECUTION_MODE_LIVE)
+        try:
+            coordinator._save_runtime_snapshot()
+            await store.async_save()
+        except Exception:
+            coordinator._mode = MODE_OFF
+            coordinator._execution_mode = EXECUTION_MODE_OBSERVE
+            store.set_mode(MODE_OFF)
+            store.set_execution_mode(EXECUTION_MODE_OBSERVE)
+            _LOGGER.exception("Auto mode could not be persisted as live; forcing off")
 
     runtime = PowerOrchestratorRuntimeData(coordinator=coordinator, model=model, store=store)
     entry.runtime_data = runtime
@@ -689,6 +702,21 @@ async def _register_services(hass: HomeAssistant) -> None:
                 HomeAssistantError, "execution_mode_change_failed", reason=str(exc)
             ) from exc
 
+    async def authorize_shedding(call: Any) -> None:
+        data = getattr(call, "data", {})
+        device_ids = data.get("device_ids")
+        if not isinstance(device_ids, list) or not device_ids:
+            raise _translated_error(ServiceValidationError, "missing_device_ids")
+        try:
+            await _service_runtime(hass).coordinator.async_authorize_shedding(
+                device_ids,
+                confirm_takeover=bool(data.get("confirm_takeover", False)),
+            )
+        except Exception as exc:
+            raise _translated_error(
+                HomeAssistantError, "shedding_authorization_failed", reason=str(exc)
+            ) from exc
+
     service_schema = {
         "force_evaluate": vol.Schema({}),
         "set_mode": vol.Schema({vol.Required("mode"): vol.In([MODE_AUTO, MODE_OFF])}),
@@ -706,6 +734,12 @@ async def _register_services(hass: HomeAssistant) -> None:
                 vol.Optional("confirm_live", default=False): bool,
             }
         ),
+        "authorize_shedding": vol.Schema(
+            {
+                vol.Required("device_ids"): vol.All([str], vol.Length(min=1, max=64)),
+                vol.Required("confirm_takeover"): bool,
+            }
+        ),
     }
     handlers = {
         "force_evaluate": force_evaluate,
@@ -713,6 +747,7 @@ async def _register_services(hass: HomeAssistant) -> None:
         "request_stop": request_stop,
         "clear_quarantine": clear_quarantine,
         "set_execution_mode": set_execution_mode,
+        "authorize_shedding": authorize_shedding,
     }
     for name in _REGISTERED_SERVICES:
         services.async_register(DOMAIN, name, handlers[name], schema=service_schema[name])

@@ -5,11 +5,11 @@ force_evaluate:
 
 set_mode:
   name: Set automation mode
-  description: "Persistently arm or disarm normal load-shedding policy evaluation. Emergency safety stops remain active."
+  description: "Persistently arm or disarm normal load-shedding. Auto executes guarded stop-only shedding at overload; off disables normal shedding while emergency safety stops remain active."
   fields:
     mode:
       name: Automation mode
-      description: "Auto runs load-shedding evaluation; off disarms normal policy decisions. This setting survives Home Assistant restart."
+      description: "Auto evaluates overload and may issue guarded physical OFF commands; off disarms normal policy decisions. This setting survives Home Assistant restart."
       required: true
       selector:
         select:
@@ -68,5 +68,22 @@ set_execution_mode:
       name: Confirm live ownership
       description: "Must be true to enter live execution."
       required: false
+      selector:
+        boolean: {}
+
+authorize_shedding:
+  name: Authorize exact shedding loads
+  description: "In observe mode, explicitly claim only listed already-on loads for a later live stop-only test. This never calls a physical service."
+  fields:
+    device_ids:
+      name: Logical device IDs
+      description: "Exact configured stable device_id values. No wildcard or omitted device is implied."
+      required: true
+      selector:
+        object: {}
+    confirm_takeover:
+      name: Confirm ownership takeover
+      description: "Must be true to change the listed currently-on loads from external to planner ownership."
+      required: true
       selector:
         boolean: {}

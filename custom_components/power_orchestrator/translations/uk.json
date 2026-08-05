@@ -7,11 +7,11 @@
     },
     "set_mode": {
       "name": "Встановити режим planner",
-      "description": "Увімкнути або вимкнути нормальне планування. Emergency stop залишається активним.",
+      "description": "Auto виконує обмежене shedding лише через stop-only при overload; off вимикає звичайне shedding, аварійний захист залишається активним.",
       "fields": {
         "mode": {
           "name": "Режим planner",
-          "description": "Auto вмикає нормальне планування; off залишає звичайні дії planner вимкненими. Це окремо від physical execution policy observe/live."
+          "description": "Auto оцінює overload і може виконати контрольований фізичний OFF; off вимикає звичайні рішення політики. Auto не може залишатися в execution observe."
         }
       }
     },
@@ -31,15 +31,29 @@
     },
     "set_execution_mode": {
       "name": "Встановити physical execution policy",
-      "description": "Обрати observe або live. Live потребує явного підтвердження.",
+      "description": "Обрати сумісну execution policy. Live дозволяє контрольовані stop-only команди; observe є лише діагностичним у режимі planner off. Auto завжди потребує live.",
       "fields": {
         "execution_mode": {
           "name": "Execution policy",
-          "description": "Observe лише приймає рішення й пише audit; live дозволяє guarded physical commands."
+          "description": "Observe лише оцінює та журналює, коли planner off; live дозволяє контрольовані stop-команди."
         },
         "confirm_live": {
           "name": "Підтвердити live ownership",
           "description": "Має бути true для переходу в live."
+        }
+      }
+    },
+    "authorize_shedding": {
+      "name": "Дозволити shedding для вибраних навантажень",
+      "description": "У режимі observe явно передати ownership лише перелічених уже увімкнених навантажень для подальшого stop-only тесту в live. Physical service не викликається.",
+      "fields": {
+        "device_ids": {
+          "name": "ID logical devices",
+          "description": "Точні стабільні device_id з конфігурації. Wildcard і пропущені пристрої не маються на увазі."
+        },
+        "confirm_takeover": {
+          "name": "Підтвердити передачу ownership",
+          "description": "Має бути true, щоб перелічені увімкнені навантаження перейшли з external до planner ownership."
         }
       }
     },
@@ -485,6 +499,12 @@
     },
     "missing_device_id": {
       "message": "Потрібен ID logical device."
+    },
+    "missing_device_ids": {
+      "message": "Потрібен щонайменше один точний ID logical device."
+    },
+    "shedding_authorization_failed": {
+      "message": "Не вдалося дозволити ownership для вибраних shedding-навантажень: {reason}."
     },
     "request_rejected": {
       "message": "Запит відхилено: {reason}."

@@ -66,6 +66,51 @@ async def test_persisted_mode_is_restored_only_when_safety_storage_is_valid(
     assert coordinator.mode == expected_mode
 
 
+@pytest.mark.asyncio
+async def test_restored_auto_mode_cannot_remain_in_observe_execution() -> None:
+    hass = MagicMock()
+    hass.data = {}
+    hass.config_entries.async_forward_entry_setups = AsyncMock()
+    hass.bus.async_listen = MagicMock(return_value="unsubscribe")
+    entry = SimpleNamespace(
+        entry_id="entry-auto-live-boundary",
+        data={
+            CONF_LOAD_SENSOR: "sensor.load",
+            CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
+        },
+        options={},
+        async_on_unload=MagicMock(),
+        add_update_listener=MagicMock(return_value="update-unsubscribe"),
+    )
+    runtime_store = MagicMock()
+    runtime_store.async_load = AsyncMock()
+    runtime_store.async_save = AsyncMock()
+    runtime_store.safety_storage_invalid = False
+    runtime_store.restore_mode.return_value = MODE_AUTO
+    runtime_store.restore_execution_mode.return_value = "observe"
+    runtime_store.restore_device_runtime.return_value = (set(), set())
+    runtime_store.restore_fault_reasons.return_value = {}
+    runtime_store.restore_fault_notification_state.return_value = ({}, {})
+    runtime_store.unresolved_actions.return_value = []
+    runtime_store.action_journal_invalid = False
+    coordinator = MagicMock()
+    coordinator.async_config_entry_first_refresh = AsyncMock()
+    coordinator._save_runtime_snapshot = MagicMock()
+    coordinator.execution_mode = "observe"
+    coordinator.mode = MODE_AUTO
+
+    with (
+        patch("power_orchestrator.Store"),
+        patch("power_orchestrator.RuntimeStore", return_value=runtime_store),
+        patch("power_orchestrator.PowerOrchestratorCoordinator", return_value=coordinator),
+        patch("power_orchestrator._register_services", new=AsyncMock()),
+    ):
+        assert await async_setup_entry(hass, entry) is True
+
+    runtime_store.set_execution_mode.assert_called_with("live")
+    runtime_store.async_save.assert_awaited()
+
+
 def test_integration_has_no_pv_admission_or_normal_start_surface() -> None:
     """PV priority and normal load starts must not remain in production code."""
     production_files = (

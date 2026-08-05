@@ -399,6 +399,95 @@ async def test_set_execution_mode_evaluates_after_releasing_evaluation_lock() ->
 
 
 @pytest.mark.asyncio
+async def test_authorize_shedding_claims_only_exact_live_loads() -> None:
+    coordinator_instance = coordinator(execution_mode="observe")
+    first = coordinator_instance._model.get_device("d1")
+    second = coordinator_instance._model.get_device("d2")
+    assert first is not None and second is not None
+    first.power_sensor_id = "sensor.load_1_power"
+    second.power_sensor_id = "sensor.load_2_power"
+
+    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
+        state("on")
+        if entity_id in {"binary_sensor.grid", "switch.load_1"}
+        else state("off")
+        if entity_id == "switch.load_2"
+        else state("3000")
+        if entity_id == "sensor.load_1_power"
+        else state("0")
+        if entity_id == "sensor.load_2_power"
+        else state("6000")
+    )
+
+    await coordinator_instance.async_authorize_shedding(
+        ["d1"], confirm_takeover=True
+    )
+
+    assert first.ownership is Ownership.PLANNER
+    assert first.ownership_until is None
+    assert second.ownership is Ownership.UNKNOWN
+    coordinator_instance.hass.services.async_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_authorize_shedding_rolls_back_on_persistence_failure() -> None:
+    backend = CopyingStoreBackend()
+    backend.fail_on = {1}
+    runtime_store = RuntimeStore(backend)
+    coordinator_instance = coordinator(store=runtime_store, execution_mode="observe")
+    device = coordinator_instance._model.get_device("d1")
+    assert device is not None
+    device.power_sensor_id = "sensor.load_1_power"
+    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
+        state("on")
+        if entity_id in {"binary_sensor.grid", "switch.load_1"}
+        else state("3000")
+        if entity_id == "sensor.load_1_power"
+        else state("6000")
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic persistence failure"):
+        await coordinator_instance.async_authorize_shedding(
+            ["d1"], confirm_takeover=True
+        )
+
+    assert device.ownership is Ownership.UNKNOWN
+    assert device.ownership_until is None
+    coordinator_instance.hass.services.async_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_planner_off_does_not_quarantine_normal_overload_candidate() -> None:
+    policy = PolicyConfig.from_mapping(
+        {
+            "thresholds": [{"power_limit": 1000, "duration_s": 0}],
+            "hard_interlock": 9000,
+        }
+    )
+    coordinator_instance = coordinator(policy=policy, execution_mode="live")
+    coordinator_instance.mode = MODE_OFF
+    device = coordinator_instance._model.get_device("d1")
+    assert device is not None
+    device.ownership = Ownership.PLANNER
+    coordinator_instance._last_observed_state["d1"] = True
+    coordinator_instance._initial_device_reconciliation_complete = True
+    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
+        state("on")
+        if entity_id in {"binary_sensor.grid", "switch.load_1"}
+        else state("off")
+        if entity_id == "switch.load_2"
+        else state("6000")
+    )
+
+    await coordinator_instance._evaluate()
+
+    assert coordinator_instance.hass.services.async_call.await_count == 0
+    assert coordinator_instance._faulted == set()
+    assert coordinator_instance._quarantined == set()
+    assert "planner mode off" in coordinator_instance.last_action.lower()
+
+
+@pytest.mark.asyncio
 async def test_grid_loss_sheds_active_loads() -> None:
     coordinator_instance = coordinator()
     device = coordinator_instance._model.get_device("d1")
