@@ -2,27 +2,35 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Local environments and tooling
+.venv/
+.venv-*/
+venv/
+env/
+.env
+.env.*
+!.env.example
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.pyright/
 .coverage
+.coverage.*
 coverage.xml
 htmlcov/
 
-# Local virtual environments
-.venv/
-venv/
-env/
-
-# Build/package artifacts
+# Build and packaging output
 build/
 dist/
 *.egg-info/
 
-# Local tooling and editor files
+# Editors and operating-system files
 .DS_Store
 .idea/
 .vscode/
+*.swp
+*.swo
 
-# Local logs and reports
-*.log
+# Project-local operating instructions stay outside the source checkpoint
+/AGENTS.md
