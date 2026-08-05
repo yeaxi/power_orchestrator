@@ -147,6 +147,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         self._fault_reasons: dict[str, str] = {}
         self._fault_state_dirty = False
         self._action_journal_invalid = False
+        self._journal_dirty = False
         self._journal_persistence_blocked = False
         self._safety_storage_invalid = False
         self._safety_fault_reason: str | None = None
@@ -933,6 +934,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             "emergency": emergency,
         }
         self._record_action({**base, "phase": "prepared", "result": "prepared"})
+        await self._persist_runtime_if_dirty()
         self._record_action({**base, "phase": "dispatched", "result": "dispatched"})
         try:
             pre_reported_at = self._logical_device_reported_at(device)
@@ -1022,6 +1024,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         writer = getattr(self._store, "record_action", None)
         if callable(writer):
             writer(record)
+            self._journal_dirty = True
 
     async def _record_observe_only_action(
         self,
@@ -1047,6 +1050,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 "context_id": context_id,
             }
         )
+        await self._persist_runtime_if_dirty()
 
     def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
         bus = getattr(self.hass, "bus", None)
@@ -1276,6 +1280,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
     async def _persist_runtime_if_dirty(self) -> bool:
         if not (
             self._fault_state_dirty
+            or self._journal_dirty
             or self._action_journal_invalid
             or self._journal_persistence_blocked
             or self._fault_notification_dirty
@@ -1289,6 +1294,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._status = STATUS_SAFETY_BLOCKED
             return False
         self._fault_state_dirty = False
+        self._journal_dirty = False
         self._fault_notification_dirty = False
         self._journal_persistence_blocked = False
         return True

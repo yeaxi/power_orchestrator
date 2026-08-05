@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -20,6 +21,7 @@ from power_orchestrator.const import (
 from power_orchestrator.coordinator import PowerOrchestratorCoordinator
 from power_orchestrator.policy import Ownership, PolicyConfig
 from power_orchestrator.power_model import ManagedDevice, PowerModel
+from power_orchestrator.storage import RuntimeStore
 
 
 def state(
@@ -52,6 +54,26 @@ def model() -> PowerModel:
     return result
 
 
+class CopyingStoreBackend:
+    """Small Store backend that makes persistence tests observe durable bytes."""
+
+    def __init__(self) -> None:
+        self.data: dict[str, object] | None = None
+        self.events: list[str] = []
+        self.save_calls = 0
+        self.fail_on: set[int] = set()
+
+    async def async_load(self) -> dict[str, object] | None:
+        return copy.deepcopy(self.data)
+
+    async def async_save(self, data: dict[str, object]) -> None:
+        self.save_calls += 1
+        self.events.append("save")
+        if self.save_calls in self.fail_on:
+            raise RuntimeError("synthetic persistence failure")
+        self.data = copy.deepcopy(data)
+
+
 def coordinator(
     *,
     hass=None,
@@ -61,14 +83,16 @@ def coordinator(
     grid_sensor="binary_sensor.grid",
     battery_soc=None,
     battery_threshold=None,
+    store=None,
 ):
     hass = hass or MagicMock()
     hass.services.async_call = AsyncMock()
     hass.bus.async_fire = MagicMock()
-    store = MagicMock()
-    store.async_save = AsyncMock()
-    store.audit_history.return_value = []
-    store.unresolved_actions.return_value = []
+    if store is None:
+        store = MagicMock()
+        store.async_save = AsyncMock()
+        store.audit_history.return_value = []
+        store.unresolved_actions.return_value = []
     result = PowerOrchestratorCoordinator(
         hass=hass,
         model=model(),
@@ -178,15 +202,78 @@ async def test_manual_stop_is_guarded_and_confirmed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_observe_mode_records_a_stop_without_calling_home_assistant() -> None:
-    coordinator_instance = coordinator(execution_mode="observe")
+async def test_confirmed_stop_is_durable_and_saved_before_command() -> None:
+    backend = CopyingStoreBackend()
+    runtime_store = RuntimeStore(backend)
+    coordinator_instance = coordinator(store=runtime_store)
     device = coordinator_instance._model.get_device("d1")
     assert device is not None
     device.is_on = True
-    result = await coordinator_instance.async_request_stop("d1", source="test")
-    assert result is False
+    coordinator_instance._confirm_device_state = AsyncMock(return_value=True)
+
+    async def service_call(*_args, **_kwargs):
+        backend.events.append("service")
+
+    coordinator_instance.hass.services.async_call = AsyncMock(side_effect=service_call)
+
+    assert await coordinator_instance.async_request_stop("d1", source="test") is True
+    assert backend.events == ["save", "service", "save"]
+
+    fresh_store = RuntimeStore(backend)
+    await fresh_store.async_load()
+    history = fresh_store.audit_history()
+    assert len(history) == 1
+    assert history[0]["phase"] == "confirmed"
+    assert history[0]["source"] == "test"
+    assert fresh_store.unresolved_actions() == []
+
+
+@pytest.mark.asyncio
+async def test_journal_persistence_failure_is_retained_and_retried() -> None:
+    backend = CopyingStoreBackend()
+    backend.fail_on = {2}
+    runtime_store = RuntimeStore(backend)
+    coordinator_instance = coordinator(store=runtime_store)
+    device = coordinator_instance._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    coordinator_instance._confirm_device_state = AsyncMock(return_value=True)
+
+    assert await coordinator_instance.async_request_stop("d1", source="test") is True
+    assert device.is_on is False
+    assert coordinator_instance._journal_dirty is True
+    assert coordinator_instance._journal_persistence_blocked is True
+
+    backend.fail_on.clear()
+    assert await coordinator_instance._persist_runtime_if_dirty() is True
+    assert coordinator_instance._journal_dirty is False
+    assert coordinator_instance._journal_persistence_blocked is False
+
+    fresh_store = RuntimeStore(backend)
+    await fresh_store.async_load()
+    assert fresh_store.audit_history()[0]["phase"] == "confirmed"
+    assert fresh_store.unresolved_actions() == []
+
+
+@pytest.mark.asyncio
+async def test_observe_only_action_is_durable_without_physical_call() -> None:
+    backend = CopyingStoreBackend()
+    runtime_store = RuntimeStore(backend)
+    coordinator_instance = coordinator(store=runtime_store, execution_mode="observe")
+    device = coordinator_instance._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+
+    assert await coordinator_instance.async_request_stop("d1", source="observe_test") is False
+    assert backend.events == ["save"]
     coordinator_instance.hass.services.async_call.assert_not_awaited()
-    coordinator_instance._store.record_action.assert_called()
+
+    fresh_store = RuntimeStore(backend)
+    await fresh_store.async_load()
+    history = fresh_store.audit_history()
+    assert len(history) == 1
+    assert history[0]["phase"] == "observe_only"
+    assert fresh_store.unresolved_actions() == []
 
 
 @pytest.mark.asyncio
