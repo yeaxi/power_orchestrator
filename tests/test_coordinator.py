@@ -1,6 +1,7 @@
 """Coordinator behavior tests for stop-only load shedding."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -115,6 +116,21 @@ async def test_invalid_load_blocks_without_physical_command() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unavailable_grid_source_is_not_reported_as_confirmed_grid_loss() -> None:
+    coordinator_instance = coordinator()
+    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
+        state("unavailable") if entity_id == "binary_sensor.grid" else state("off") if entity_id.startswith("switch.") else state("0")
+    )
+
+    await coordinator_instance._evaluate()
+
+    assert coordinator_instance.status == STATUS_SAFETY_BLOCKED
+    assert coordinator_instance.reason_code == "telemetry_invalid"
+    assert "unavailable" in coordinator_instance.last_action.lower()
+    coordinator_instance.hass.services.async_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_manual_stop_is_guarded_and_confirmed() -> None:
     coordinator_instance = coordinator()
     device = coordinator_instance._model.get_device("d1")
@@ -168,6 +184,51 @@ async def test_overload_sheds_one_planner_owned_load_and_never_reenables_it() ->
     assert first.is_on is False
     assert coordinator_instance.hass.services.async_call.await_args.args[1] == "turn_off"
     assert all(call.args[1] != "turn_on" for call in coordinator_instance.hass.services.async_call.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_zero_power_on_device_is_not_ordinary_shed_candidate() -> None:
+    policy = PolicyConfig.from_mapping(
+        {
+            "thresholds": [{"power_limit": 1000, "duration_s": 0}],
+            "hard_interlock": 9000,
+        }
+    )
+    coordinator_instance = coordinator(policy=policy)
+    device = coordinator_instance._model.get_device("d1")
+    assert device is not None
+    device.power_sensor_id = "sensor.load_1_power"
+    device.ownership = Ownership.PLANNER
+    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
+        state("on") if entity_id in {"binary_sensor.grid", "switch.load_1"}
+        else state("off") if entity_id == "switch.load_2"
+        else state("0") if entity_id == "sensor.load_1_power"
+        else state("2000")
+    )
+
+    await coordinator_instance._evaluate()
+
+    assert device.measured_power_valid is True
+    assert device.measured_power == 0
+    assert coordinator_instance.hass.services.async_call.await_count == 0
+    assert coordinator_instance._faulted == set()
+    assert coordinator_instance._quarantined == set()
+
+
+@pytest.mark.asyncio
+async def test_set_execution_mode_evaluates_after_releasing_evaluation_lock() -> None:
+    coordinator_instance = coordinator(execution_mode="observe")
+    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
+        state("on") if entity_id == "binary_sensor.grid" else state("off") if entity_id.startswith("switch.") else state("0")
+    )
+
+    await asyncio.wait_for(
+        coordinator_instance.async_set_execution_mode("live", confirm_live=True),
+        timeout=1,
+    )
+
+    assert coordinator_instance.execution_mode == "live"
+    coordinator_instance.hass.services.async_call.assert_not_awaited()
 
 
 @pytest.mark.asyncio

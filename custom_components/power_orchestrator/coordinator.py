@@ -379,6 +379,15 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._load_samples.clear()
             self._load_sample_times.clear()
 
+        if not self.grid_safety_source_available:
+            self._status = STATUS_SAFETY_BLOCKED
+            self._policy_engine.runtime.phase = PolicyPhase.FAULT
+            self._policy_engine.runtime.last_reason_code = ReasonCode.TELEMETRY_INVALID
+            await self._handle_grid_loss(
+                reason_code=ReasonCode.TELEMETRY_INVALID,
+                action_label="Safety telemetry unavailable",
+            )
+            return
         if not self.grid_ok:
             self._status = STATUS_GRID_LOSS
             self._policy_engine.runtime.phase = PolicyPhase.GRID_LOSS
@@ -519,6 +528,22 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         device.measured_power_valid = True
         device.measured_power_reason = "ok"
 
+    @staticmethod
+    def _ordinary_shedding_power_eligible(device: ManagedDevice) -> bool:
+        """Require positive measured draw before ordinary shedding.
+
+        A configured power sensor reporting a valid zero (or only the bounded
+        near-zero clear threshold) describes an already-heated/idle load. It
+        must not be switched off merely because another load caused overload.
+        Emergency interlocks use their separate all-stop path.
+        """
+        if device.power_sensor_id is None:
+            return True
+        return (
+            device.measured_power_valid
+            and device.measured_power > QUARANTINE_CLEAR_MAX_POWER_W
+        )
+
     def _read_load_sensor(self) -> float:
         """Read an available, non-negative power value and retain its failure reason."""
         state = self.hass.states.get(self._load_sensor)
@@ -619,14 +644,19 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
     def _logical_device_confirmed_off(self, device: ManagedDevice) -> bool:
         return self._logical_device_state(device) is False
 
-    async def _handle_grid_loss(self) -> None:
+    async def _handle_grid_loss(
+        self,
+        *,
+        reason_code: ReasonCode = ReasonCode.GRID_LOSS,
+        action_label: str = "grid loss",
+    ) -> None:
         """Attempt an emergency OFF for every non-confirmed-off logical load."""
         if self.execution_mode_is_observe:
             self._status = STATUS_OBSERVE
-            self._last_action = "Observe: grid loss would stop optional loads"
+            self._last_action = f"Observe: {action_label} would stop optional loads"
             await self._record_observe_only_action(
                 action="grid_loss_all_stop",
-                reason=ReasonCode.GRID_LOSS.value,
+                reason=reason_code.value,
                 source="grid_loss",
             )
             return
@@ -645,9 +675,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 self._fault_state_dirty = True
         if failed:
             self._status = STATUS_SAFETY_BLOCKED
-            self._last_action = "Grid loss — OFF failed for: " + ", ".join(failed)
+            self._last_action = f"{action_label} — OFF failed for: " + ", ".join(failed)
         else:
-            self._last_action = "Grid loss — optional loads are off"
+            self._last_action = f"{action_label} — optional loads are off"
         await self._persist_runtime_if_dirty()
 
     async def _perform_emergency_all_stop(self) -> None:
@@ -676,6 +706,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             for device in self._model.get_shed_devices()
             if device.is_on is True
             and device.device_id not in self._quarantined
+            and self._ordinary_shedding_power_eligible(device)
             and not (
                 device.ownership is Ownership.EXTERNAL
                 and device.ownership_until is not None
@@ -1049,8 +1080,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 if callable(setter):
                     setter(previous)
                 raise
-            await self._evaluate_safely()
-            self.async_set_updated_data(self._build_data())
+        await self._evaluate_safely()
+        self.async_set_updated_data(self._build_data())
 
     async def async_set_mode(self, value: str) -> None:
         """Persist auto/off across restart; off never disables emergency safety."""
