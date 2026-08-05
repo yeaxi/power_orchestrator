@@ -32,5 +32,4 @@ dist/
 *.swp
 *.swo
 
-# Project-local operating instructions stay outside the source checkpoint
-/AGENTS.md
+# Project-specific AGENTS.md is part of the tracked project context
