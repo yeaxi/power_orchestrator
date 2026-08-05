@@ -18,13 +18,16 @@ from power_orchestrator.policy import PolicyConfig
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 
 
-def _state(value: str, *, age: float = 0, unit: str = "W") -> SimpleNamespace:
+def _state(value: str, *, age: float = 0, updated_age: float | None = None, unit: str = "W") -> SimpleNamespace:
     timestamp = datetime.now(timezone.utc) - timedelta(seconds=age)
+    updated_timestamp = datetime.now(timezone.utc) - timedelta(
+        seconds=age if updated_age is None else updated_age
+    )
     return SimpleNamespace(
         state=value,
         attributes={"unit_of_measurement": unit},
         last_reported=timestamp,
-        last_updated=timestamp,
+        last_updated=updated_timestamp,
     )
 
 
@@ -68,14 +71,34 @@ def test_structured_event_has_bounded_schema() -> None:
     assert event["execution_mode"] == "observe"
 
 
-def test_stale_load_is_not_accepted() -> None:
+def test_numeric_load_ignores_timestamp_age_but_unavailable_state_blocks() -> None:
     coordinator = _coordinator()
     coordinator.hass.states.get.side_effect = lambda entity_id: (
-        _state("on") if entity_id == "binary_sensor.grid" else _state("1000", age=301)
+        _state("on") if entity_id == "binary_sensor.grid" else _state("1000", updated_age=301)
+    )
+    assert coordinator._read_load_sensor() == 1000.0
+    assert coordinator.load_sensor_valid is True
+    assert coordinator.load_sensor_reason == "ok"
+    coordinator.hass.states.get.side_effect = lambda entity_id: (
+        _state("on") if entity_id == "binary_sensor.grid" else _state("unavailable")
     )
     assert coordinator._read_load_sensor() == 0.0
     assert coordinator.load_sensor_valid is False
-    assert coordinator.load_sensor_reason == "unavailable_or_stale"
+    assert coordinator.load_sensor_reason == "unavailable"
+
+
+def test_zero_measured_power_is_valid_when_numeric_even_if_old_report() -> None:
+    coordinator = _coordinator()
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    device.power_sensor_id = "sensor.d1_power"
+    coordinator.hass.states.get.return_value = _state("0", age=301)
+
+    coordinator._refresh_measured_power(device)
+
+    assert device.measured_power == 0.0
+    assert device.measured_power_valid is True
+    assert device.measured_power_reason == "ok"
 
 
 def test_wrong_load_unit_is_not_accepted() -> None:

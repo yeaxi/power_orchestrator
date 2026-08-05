@@ -59,7 +59,7 @@ class PowerOrchestratorGridOkSensor(CoordinatorEntity, BinarySensorEntity):  # t
 
     @property
     def available(self) -> bool:
-        return bool(self._power_coordinator.grid_safety_source_configured)
+        return bool(self._power_coordinator.grid_safety_source_available)
 
     @property
     def is_on(self) -> bool:

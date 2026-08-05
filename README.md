@@ -7,7 +7,7 @@ It does not perform PV prioritization, generation-based admission, normal load e
 ## Features
 
 - Optional discovery from the Home Assistant Energy Dashboard.
-- Aggregate load monitoring with `W`/`kW` normalization and strict freshness checks.
+- Aggregate load monitoring with `W`/`kW` normalization and semantic availability checks.
 - Configurable overload thresholds with dwell times and a hard interlock.
 - Deterministic shedding order with at most one normal physical stop per evaluation cycle.
 - Grid-loss sensor mode or battery-SoC safety mode.
@@ -54,7 +54,7 @@ The config flow contains these steps:
 4. **Priority & Pause** — define the deterministic shedding order and pause period.
 5. **Grid Loss Behavior** — choose a grid sensor or battery-SoC threshold.
 
-The Options and Reconfigure flows expose the same safety-relevant settings. Every field has an inline description explaining its meaning and runtime effect. Invalid, unknown, stale, non-finite, negative, or unsupported-unit input is rejected or fails closed.
+The Options and Reconfigure flows expose the same safety-relevant settings. Every field has an inline description explaining its meaning and runtime effect. Invalid, unknown, unavailable, non-finite, negative, or unsupported-unit input is rejected or fails closed.
 
 ## Runtime contract
 
@@ -66,7 +66,7 @@ If readback is missing or contradictory, the load is marked unknown/faulted and 
 
 ### Safety behavior
 
-- Missing, stale, unknown, invalid, or wrong-unit aggregate load blocks ordinary evaluation.
+- Missing, unavailable, unknown, invalid, or wrong-unit aggregate load blocks ordinary evaluation.
 - A grid-loss or invalid battery safety source triggers the emergency stop path.
 - `off` blocks ordinary planner actions; emergency safety handling remains active.
 - `observe` records intended actions but never calls a physical Home Assistant service.
@@ -139,11 +139,11 @@ Use `execution_mode=observe` while existing automations remain under separate ow
 
 ### Failed readback
 
-A missing or contradictory stop readback leaves the load unknown and faulted. The issue is surfaced through diagnostics and must be reconciled with fresh evidence before clearing.
+A missing or contradictory stop readback leaves the load unknown and faulted. The issue is surfaced through diagnostics and must be reconciled with verified valid evidence before clearing.
 
 ## Data updates
 
-The coordinator evaluates periodically and coalesces relevant Home Assistant state changes. Freshness budgets are independent of the averaging window. Increasing the averaging window cannot make stale safety input valid.
+The coordinator evaluates periodically and coalesces relevant Home Assistant state changes. The source entities own their availability semantics; an averaging window cannot make an unavailable safety input valid.
 
 The coordinator does not reserve capacity for or initiate new loads. Its physical action surface is stop-only.
 
@@ -151,11 +151,11 @@ The coordinator does not reserve capacity for or initiate new loads. Its physica
 
 ### `safety_blocked`
 
-Inspect the status, reason code, load-sensor reason, Grid OK sensor, faulted sensor, and action-journal sensor. Typical causes include missing/stale input, unsupported units, invalid persistence, or failed readback.
+Inspect the status, reason code, load-sensor reason, Grid OK sensor, faulted sensor, and action-journal sensor. Typical causes include missing/unavailable input, unsupported units, invalid persistence, or failed readback.
 
 ### A load is faulted or quarantined
 
-Do not bypass the integration with an unrelated physical service call. Verify the actual actuator state and fresh measured load, then use the guarded reconciliation path. Missing proof intentionally keeps the load blocked.
+Do not bypass the integration with an unrelated physical service call. Verify the actual actuator state and valid measured load, then use the guarded reconciliation path. Missing proof intentionally keeps the load blocked.
 
 ### Mode did not persist
 
@@ -183,8 +183,12 @@ Before any live activation:
 1. Run the local tests, compile, JSON/YAML/resource checks, and static no-admission scan.
 2. Install with mode `off` and execution mode `observe`.
 3. Verify entity IDs, load/safety sources, and configured shedding order.
-4. Exercise unknown/stale/wrong-unit inputs using helpers or non-critical test entities.
+4. Exercise unknown/unavailable/wrong-unit inputs using helpers or non-critical test entities.
 5. Verify that overload and safety events can issue only bounded stop actions and that readback failures are surfaced.
 6. Verify restart restoration of persisted `auto`/`off` mode in a separately approved test window.
 
 No local test is evidence of a live Home Assistant deployment. The detailed procedure is in [`HA_VERIFICATION.md`](HA_VERIFICATION.md).
+
+## Local Git checkpoints
+
+This repository uses Git locally for reviewable checkpoints and reversible source changes; no GitHub repository or remote is required. Keep project-local `AGENTS.md`, Home Assistant runtime state, credentials, caches, and generated artifacts outside commits. The commit/deploy/rollback workflow is documented in [`docs/development/git-workflow.md`](docs/development/git-workflow.md).

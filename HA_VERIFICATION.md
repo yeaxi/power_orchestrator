@@ -12,7 +12,7 @@
 - `auto`/`off` і `observe`/`live` мають чіткі межі;
 - перевищення ліміту виконує bounded stop з readback;
 - аварійний grid/battery стан виконує all-stop path;
-- unknown/stale/invalid input не authorizes фізичну дію;
+- unknown/unavailable/invalid input не authorizes фізичну дію;
 - після restart валідний persisted mode відновлюється без безумовного скидання;
 - немає PV/forecast admission, normal enable або automatic re-enable surface.
 
@@ -85,10 +85,10 @@
 
 | Input/event | Очікуваний результат | Заборонений результат |
 |---|---|---|
-| Fresh valid grid `on`, valid load | Безпечна evaluation без фізичної дії | Нормальне automatic enabling |
-| Load `unknown`, unavailable, NaN, negative, wrong unit або stale | `safety_blocked`; sample не стає `0 W` | Дозволена дія |
-| Grid `off`, missing або stale | Emergency stop path; bounded stop attempt | Залишити відомий активний load без stop attempt |
-| Battery SoC at/below threshold або stale | Grid-loss/safety behavior | Дозволена normal дія |
+| Available valid grid `on`, valid load | Безпечна evaluation без фізичної дії | Нормальне automatic enabling |
+| Load `unknown`, unavailable, NaN, negative, wrong unit | `safety_blocked`; sample не стає `0 W` | Дозволена дія |
+| Grid `off`, missing або unavailable | Emergency stop path; bounded stop attempt | Залишити відомий активний load без stop attempt |
+| Battery SoC at/below threshold або unavailable | Grid-loss/safety behavior | Дозволена normal дія |
 | Valid load above limit | Один lowest-priority known-on load shed | Batch shedding або re-enable |
 | Mode `off` | Немає ordinary physical action | Mode bypass |
 | Mode `off` + emergency state | Emergency handling залишається активним | `off` вимикає safety stop |
@@ -119,7 +119,7 @@
 - викликати `force_evaluate` і перевірити entity update;
 - викликати `request_stop` для відомого device;
 - перевірити, що readback failure залишає device unknown/faulted;
-- перевірити `clear_quarantine` лише після незалежних fresh OFF/load/readback доказів;
+- перевірити `clear_quarantine` лише після незалежних verified OFF/load/readback доказів;
 - перевірити відсутність будь-якого service, що додає або запускає навантаження;
 - після unload перевірити, що integration services видалені з registry.
 
@@ -127,7 +127,7 @@
 
 Зупинити перевірку і виконати rollback, якщо:
 
-- unknown/stale input призводить до звичайної physical action;
+- unknown/unavailable input призводить до звичайної physical action;
 - readback не відповідає command, але integration повідомляє success;
 - більше одного ordinary action відбувається за цикл;
 - `off` обходиться;
@@ -166,7 +166,7 @@ Rollback sequence лише з approval:
 - JSON resource validation;
 - YAML parsing для `services.yaml` і CI workflow;
 - config/options flow;
-- safety, freshness, readback, mode persistence та service lifecycle;
+- safety, availability, readback, mode persistence та service lifecycle;
 - static scan, який забороняє PV/forecast/admission/normal-enable surface.
 
 Цей документ описує майбутню перевірку і **not a substitute for the controlled live HA verification**.

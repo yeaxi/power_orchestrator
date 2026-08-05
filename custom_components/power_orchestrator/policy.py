@@ -269,7 +269,7 @@ class PolicyEngine:
         self.last_decision = PolicyDecision(False, None, ReasonCode.SAFETY_BLOCKED)
 
     def observe_load(self, load_w: float, *, now: float) -> PolicyDecision:
-        """Advance overload dwell timers from one fresh aggregate report."""
+        """Advance overload dwell timers from one newly reported aggregate value."""
         if isinstance(load_w, bool) or not math.isfinite(load_w) or load_w < 0:
             return self.observe_invalid_load(ReasonCode.TELEMETRY_INVALID, now=now)
 
@@ -372,7 +372,7 @@ class PolicyEngine:
         return pending is None or load_generation > pending
 
     def reconcile_shed(self, load_generation: int, *, reported_at: float | None) -> bool:
-        """Release the barrier only after both causal reports are fresh."""
+        """Release the barrier only after both causal state reports are confirmed."""
         pending = self.runtime.pending_post_shed_generation
         fence = self.runtime.pending_post_shed_after_reported_at
         if pending is None:

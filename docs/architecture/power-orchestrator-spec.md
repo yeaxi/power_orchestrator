@@ -29,12 +29,12 @@ The controller has two independent controls:
 
 Before a normal decision, the coordinator validates:
 
-- aggregate load sensor existence, freshness, numeric value, non-negative value, and power unit;
-- grid-safety source existence, freshness, and semantics;
+- aggregate load sensor existence, source-reported availability, numeric value, non-negative value, and power unit;
+- grid-safety source existence, source-reported availability, and semantics;
 - managed-device relay and optional actuator states;
-- optional measured-power sensors, including units and freshness.
+- optional measured-power sensors, including units and source-reported availability.
 
-Unknown, stale, contradictory, non-finite, negative, or incorrectly-unitized telemetry fails closed. It never becomes a synthetic `0 W` value and never grants permission for a physical action.
+Unknown, unavailable, contradictory, non-finite, negative, or incorrectly-unitized telemetry fails closed. It never becomes a synthetic `0 W` value and never grants permission for a physical action.
 
 ## Evaluation order
 
@@ -75,7 +75,7 @@ The following conditions latch a device fault/quarantine state:
 - invalid durable action-journal recovery;
 - unsafe contradictory device telemetry.
 
-Fault/quarantine state is persisted and blocks further unsafe actions for that device. Clearing quarantine requires fresh valid OFF readback and safe telemetry; it never turns a device on. Home Assistant repair issues expose the fault without putting logical or entity IDs into public issue identifiers.
+Fault/quarantine state is persisted and blocks further unsafe actions for that device. Clearing quarantine requires verified valid OFF readback and safe telemetry; it never turns a device on. Home Assistant repair issues expose the fault without putting logical or entity IDs into public issue identifiers.
 
 ## Persistence and migration
 

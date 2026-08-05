@@ -36,7 +36,7 @@ request_stop:
 
 clear_quarantine:
   name: Clear device quarantine
-  description: "Clear a persisted fault only after fresh OFF readback, valid aggregate load, and safe measured power are verified. This never enables a device."
+  description: "Clear a persisted fault only after verified OFF readback, valid aggregate load, and safe measured power are verified. This never enables a device."
   fields:
     device_id:
       name: Logical device ID

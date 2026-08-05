@@ -20,13 +20,16 @@ from power_orchestrator.policy import Ownership, PolicyConfig
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 
 
-def state(value: str, *, unit: str = "W", age: float = 0) -> SimpleNamespace:
+def state(value: str, *, unit: str = "W", age: float = 0, updated_age: float | None = None) -> SimpleNamespace:
     timestamp = datetime.now(timezone.utc) - timedelta(seconds=age)
+    updated_timestamp = datetime.now(timezone.utc) - timedelta(
+        seconds=age if updated_age is None else updated_age
+    )
     return SimpleNamespace(
         state=value,
         attributes={"unit_of_measurement": unit},
         last_reported=timestamp,
-        last_updated=timestamp,
+        last_updated=updated_timestamp,
     )
 
 
@@ -66,12 +69,16 @@ def coordinator(*, hass=None, policy=None, execution_mode="live", grid_mode=GRID
     return result
 
 
-def test_grid_safety_is_fail_closed_for_missing_stale_or_wrong_unit() -> None:
+def test_grid_safety_uses_semantic_unavailable_state_not_timestamp_age() -> None:
     coordinator_instance = coordinator()
     coordinator_instance.hass.states.get.return_value = None
     assert coordinator_instance.grid_ok is False
-    coordinator_instance.hass.states.get.return_value = state("on", age=301)
+    coordinator_instance.hass.states.get.return_value = state("unavailable", age=301)
     assert coordinator_instance.grid_ok is False
+    coordinator_instance.hass.states.get.return_value = state("on", age=301)
+    assert coordinator_instance.grid_ok is True
+    coordinator_instance.hass.states.get.return_value = state("on", updated_age=301)
+    assert coordinator_instance.grid_ok is True
 
 
 def test_grid_sensor_on_is_valid() -> None:
@@ -81,7 +88,7 @@ def test_grid_sensor_on_is_valid() -> None:
     assert coordinator_instance.grid_safety_source_configured is True
 
 
-def test_battery_threshold_uses_strictly_fresh_percent_input() -> None:
+def test_battery_threshold_uses_semantically_available_percent_input() -> None:
     coordinator_instance = coordinator(
         grid_mode="battery_threshold",
         grid_sensor=None,
@@ -92,6 +99,8 @@ def test_battery_threshold_uses_strictly_fresh_percent_input() -> None:
     assert coordinator_instance.grid_ok is False
     coordinator_instance.hass.states.get.return_value = state("20.1", unit="%")
     assert coordinator_instance.grid_ok is True
+    coordinator_instance.hass.states.get.return_value = state("unavailable", unit="%")
+    assert coordinator_instance.grid_ok is False
 
 
 @pytest.mark.asyncio

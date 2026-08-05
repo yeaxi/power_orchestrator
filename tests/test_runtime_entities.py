@@ -142,13 +142,17 @@ def test_invalid_load_numeric_entities_are_unavailable() -> None:
     assert "automatic_reenable" not in status_attributes
 
 
-def test_grid_ok_sensor_availability_tracks_source_configuration() -> None:
+def test_grid_ok_sensor_availability_tracks_source_semantic_availability() -> None:
     coordinator = MagicMock()
     coordinator.grid_safety_source_configured = False
+    coordinator.grid_safety_source_available = False
     coordinator.grid_ok = False
     entity = PowerOrchestratorGridOkSensor(coordinator, SimpleNamespace(entry_id="entry"))
     assert entity.available is False
     coordinator.grid_safety_source_configured = True
+    coordinator.grid_safety_source_available = False
+    assert entity.available is False
+    coordinator.grid_safety_source_available = True
     assert entity.available is True
 
 

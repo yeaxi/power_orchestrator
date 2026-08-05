@@ -93,6 +93,7 @@ class PowerOrchestratorStatusSensor(PowerOrchestratorSensorBase):
             "mode": self._coordinator.mode,
             "grid_ok": self._coordinator.grid_ok,
             "grid_safety_source_configured": self._coordinator.grid_safety_source_configured,
+            "grid_safety_source_available": self._coordinator.grid_safety_source_available,
             "load_sensor_valid": self._coordinator.load_sensor_valid,
             "load_sensor_reason": self._coordinator.load_sensor_reason,
             "startup_safe": self._coordinator.startup_safe,

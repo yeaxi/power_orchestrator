@@ -33,7 +33,6 @@ from .const import (
     QUARANTINE_CLEAR_MAX_POWER_W,
     RELAY_READBACK_POLL_INTERVAL_SECONDS,
     RELAY_READBACK_TIMEOUT_SECONDS,
-    SAFETY_INPUT_MAX_AGE_SECONDS,
     STATUS_GRID_LOSS,
     STATUS_LOAD_SHEDDING,
     STATUS_MONITORING,
@@ -135,7 +134,6 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         self._last_observed_state: dict[str, bool | None] = {}
         self._initial_device_reconciliation_complete = False
         self._external_ownership_grace = EXTERNAL_OWNERSHIP_GRACE_SECONDS
-        self._state_freshness_limit = SAFETY_INPUT_MAX_AGE_SECONDS
         self._last_confirmed_reported_at: dict[str, float | None] = {}
         self._last_operation_id: str | None = None
         self._last_action_id: str | None = None
@@ -272,8 +270,41 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         return False
 
     @property
+    def grid_safety_source_available(self) -> bool:
+        """Return whether the configured safety source reports a usable state.
+
+        Home Assistant's source entity owns semantic availability. Do
+        not infer unavailability from ``last_updated``: a valid numeric zero or
+        an unchanged binary state can be legitimately reported. The source
+        must publish ``unavailable``/``unknown`` when it cannot vouch for its
+        value.
+        """
+        if not self.grid_safety_source_configured:
+            return False
+        sensor_id = (
+            self._grid_loss_sensor
+            if self._grid_loss_mode == GRID_LOSS_MODE_SENSOR
+            else self._battery_soc_sensor
+        )
+        if not isinstance(sensor_id, str):
+            return False
+        state = self.hass.states.get(sensor_id)
+        if not self._state_is_available(state):
+            return False
+        if self._grid_loss_mode == GRID_LOSS_MODE_SENSOR:
+            return getattr(state, "state", None) in {STATE_ON, STATE_OFF}
+        unit = getattr(state, "attributes", {}).get("unit_of_measurement")
+        if str(unit).strip() not in {"%", "percent"}:
+            return False
+        try:
+            soc = float(getattr(state, "state", ""))
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(soc) and 0 <= soc <= 100
+
+    @property
     def grid_ok(self) -> bool:
-        """Return true only for a configured, fresh, valid safety source."""
+        """Return true only for a configured, available, valid safety source."""
         if not self.grid_safety_source_configured:
             return False
         if self._grid_loss_mode == GRID_LOSS_MODE_SENSOR:
@@ -281,14 +312,14 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             if not isinstance(sensor_id, str):
                 return False
             state = self.hass.states.get(sensor_id)
-            if state is None or not self._state_is_fresh(state):
+            if not self.grid_safety_source_available:
                 return False
             return getattr(state, "state", None) == STATE_ON
         sensor_id = self._battery_soc_sensor
         if not isinstance(sensor_id, str):
             return False
         state = self.hass.states.get(sensor_id)
-        if state is None or not self._state_is_fresh(state):
+        if not self.grid_safety_source_available:
             return False
         unit = getattr(state, "attributes", {}).get("unit_of_measurement")
         if str(unit).strip() not in {"%", "percent"}:
@@ -402,7 +433,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         )
 
     def _accept_load_report(self) -> bool:
-        """Accept only a fresh report that advances the aggregate generation."""
+        """Accept only a newly reported state that advances the aggregate generation."""
         if self._load_reported_at is None:
             return False
         if self._last_accepted_load_reported_at is None:
@@ -461,8 +492,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         if not device.power_sensor_id:
             return
         state = self.hass.states.get(device.power_sensor_id)
-        if state is None or not self._state_is_fresh(state):
-            device.measured_power_reason = "unavailable_or_stale"
+        if state is None or not self._state_is_available(state):
+            device.measured_power_reason = "unavailable"
             return
         unit = getattr(state, "attributes", {}).get("unit_of_measurement")
         if str(unit).strip().lower() not in {"w", "watt", "watts"}:
@@ -485,16 +516,16 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         device.measured_power_reason = "ok"
 
     def _read_load_sensor(self) -> float:
-        """Read a fresh non-negative power value and retain its failure reason."""
+        """Read an available, non-negative power value and retain its failure reason."""
         state = self.hass.states.get(self._load_sensor)
         if state is None:
             self._load_sensor_valid = False
             self._load_sensor_reason = "unavailable"
             self._load_reported_at = None
             return 0.0
-        if not self._state_is_fresh(state):
+        if not self._state_is_available(state):
             self._load_sensor_valid = False
-            self._load_sensor_reason = "unavailable_or_stale"
+            self._load_sensor_reason = "unavailable"
             self._load_reported_at = None
             return 0.0
         unit = getattr(state, "attributes", {}).get("unit_of_measurement")
@@ -521,25 +552,29 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         return value
 
     def _state_reported_timestamp(self, state: Any) -> float | None:
-        for name in ("last_reported", "last_updated"):
-            raw = getattr(state, name, None)
-            if isinstance(raw, datetime):
-                if raw.tzinfo is None:
-                    raw = raw.replace(tzinfo=timezone.utc)
-                value = raw.timestamp()
-                if math.isfinite(value):
-                    return value
-            elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
-                value = float(raw)
-                if math.isfinite(value):
-                    return value
+        raw = getattr(state, "last_reported", None) if state is not None else None
+        if isinstance(raw, datetime):
+            if raw.tzinfo is None:
+                raw = raw.replace(tzinfo=timezone.utc)
+            value = raw.timestamp()
+            if math.isfinite(value):
+                return value
+        elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            value = float(raw)
+            if math.isfinite(value):
+                return value
         return None
 
-    def _state_is_fresh(self, state: Any) -> bool:
-        timestamp = self._state_reported_timestamp(state)
-        if timestamp is None:
+    @staticmethod
+    def _state_is_available(state: Any) -> bool:
+        """Return whether Home Assistant reports a semantically usable state."""
+        if state is None:
             return False
-        return 0 <= time.time() - timestamp <= self._state_freshness_limit
+        return getattr(state, "state", None) not in {
+            None,
+            STATE_UNKNOWN,
+            STATE_UNAVAILABLE,
+        }
 
     def _actuator_state_on(self, entity_id: str, state: Any) -> bool | None:
         raw = getattr(state, "state", None) if state is not None else None
@@ -949,7 +984,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         actor_id: str | None = None,
         context_id: str | None = None,
     ) -> bool:
-        """Clear one persisted fault only after fresh OFF and safe telemetry proof."""
+        """Clear one persisted fault only after verified OFF and safe telemetry proof."""
         async with self._evaluation_lock:
             device = self._model.get_device(device_id)
             if device is None:
