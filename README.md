@@ -191,4 +191,4 @@ No local test is evidence of a live Home Assistant deployment. The detailed proc
 
 ## Local Git checkpoints
 
-This repository uses Git locally for reviewable checkpoints and reversible source changes; no GitHub repository or remote is required. Keep project-local `AGENTS.md`, Home Assistant runtime state, credentials, caches, and generated artifacts outside commits. The commit/deploy/rollback workflow is documented in [`docs/development/git-workflow.md`](docs/development/git-workflow.md).
+This repository uses Git locally for reviewable checkpoints and reversible source changes; no GitHub repository or remote is required. Track the project-specific `AGENTS.md` after the same secret scan as source files. Keep Home Assistant runtime state, credentials, caches, generic Hermes skills/memory, and generated artifacts outside commits. The commit/deploy/rollback workflow is documented in [`docs/development/git-workflow.md`](docs/development/git-workflow.md).

@@ -37,9 +37,11 @@ git diff --cached --check
 Do not stage:
 
 - `.venv*`, caches, coverage databases, build artifacts, or editor files;
-- `AGENTS.md`, which is project-local operating policy and intentionally remains outside commits;
 - Home Assistant `/config` state, backups, registries, databases, or runtime credentials;
-- passwords, API keys, tokens, private keys, or connection strings.
+- passwords, API keys, tokens, private keys, or connection strings;
+- generic Hermes skills or profile-wide memory. If a project-local skill or memory file is added later, classify it first and track only project-specific, secret-free content.
+
+Track the project-specific `AGENTS.md` after reviewing it for secrets and unrelated user/profile policy; it is part of the repository's source-of-truth context.
 
 Create one descriptive commit for one coherent change:
 
