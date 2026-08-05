@@ -472,7 +472,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Drop obsolete configuration fields while preserving load-shedding settings."""
     changed = False
     data = dict(entry.data or {})
-    allowed_data_keys = {
+    options = dict(getattr(entry, "options", {}) or {})
+    allowed_keys = {
         CONF_AVERAGING_PERIOD,
         CONF_BATTERY_SOC,
         CONF_BATTERY_THRESHOLD,
@@ -487,9 +488,13 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_SAFETY_RESERVE,
         CONF_THRESHOLDS,
     }
-    clean_data = {key: value for key, value in data.items() if key in allowed_data_keys}
+    clean_data = {key: value for key, value in data.items() if key in allowed_keys}
     if clean_data != data:
         data = clean_data
+        changed = True
+    clean_options = {key: value for key, value in options.items() if key in allowed_keys}
+    if clean_options != options:
+        options = clean_options
         changed = True
     allowed_device_keys = {
         CONF_DEVICE_ID,
@@ -501,20 +506,32 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_PRIORITY,
         CONF_SHED_PRIORITY,
     }
-    raw_devices = data.get(CONF_DEVICES)
-    if isinstance(raw_devices, list):
+    for payload in (data, options):
+        raw_devices = payload.get(CONF_DEVICES)
+        if not isinstance(raw_devices, list):
+            continue
         clean_devices = [
             {key: value for key, value in device.items() if key in allowed_device_keys}
             for device in raw_devices
             if isinstance(device, dict)
         ]
         if clean_devices != raw_devices:
-            data[CONF_DEVICES] = clean_devices
+            payload[CONF_DEVICES] = clean_devices
             changed = True
+    current_version = getattr(entry, "version", None)
+    current_minor_version = getattr(entry, "minor_version", None)
+    if current_version != 2 or current_minor_version != 1:
+        changed = True
     if changed:
         updater = getattr(hass.config_entries, "async_update_entry", None)
         if callable(updater):
-            updater(entry, data=data)
+            updater(
+                entry,
+                data=data,
+                options=options,
+                version=2,
+                minor_version=1,
+            )
     return True
 
 

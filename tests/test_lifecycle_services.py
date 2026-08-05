@@ -66,6 +66,8 @@ async def test_setup_and_migration_initialize_registry_and_drop_unknown_fields()
     hass.config_entries = SimpleNamespace(async_update_entry=updater)
     entry = SimpleNamespace(
         entry_id="entry-1",
+        version=1,
+        minor_version=0,
         data={
             "load_sensor": "sensor.load",
             "obsolete_activation_field": True,
@@ -73,11 +75,28 @@ async def test_setup_and_migration_initialize_registry_and_drop_unknown_fields()
                 {"device_id": "d1", "entity": "switch.d1", "legacy": "remove"}
             ],
         },
+        options={
+            "load_sensor": "sensor.load",
+            "solar_forecast_entry": "legacy-entry",
+            "solar_power": "sensor.pv",
+            "devices": [
+                {
+                    "device_id": "d1",
+                    "entity": "switch.d1",
+                    "only_from_solar": True,
+                }
+            ],
+        },
     )
     assert await integration.async_migrate_entry(hass, entry) is True
-    updated = updater.call_args.kwargs["data"]
-    assert "obsolete_activation_field" not in updated
-    assert "legacy" not in updated["devices"][0]
+    updated = updater.call_args.kwargs
+    assert "obsolete_activation_field" not in updated["data"]
+    assert "legacy" not in updated["data"]["devices"][0]
+    assert "solar_forecast_entry" not in updated["options"]
+    assert "solar_power" not in updated["options"]
+    assert "only_from_solar" not in updated["options"]["devices"][0]
+    assert updated["version"] == 2
+    assert updated["minor_version"] == 1
 
 
 @pytest.mark.asyncio
