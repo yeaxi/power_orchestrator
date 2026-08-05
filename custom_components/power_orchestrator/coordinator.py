@@ -51,6 +51,8 @@ from .power_model import ManagedDevice, PowerModel
 from .storage import RuntimeStore
 
 _LOGGER = logging.getLogger(__name__)
+_MAX_SHED_REJECTION_DETAILS = 12
+_MAX_LAST_ACTION_LENGTH = 255
 
 
 class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # type: ignore[misc]
@@ -153,6 +155,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         self._fault_notification_dirty = False
         self._grid_loss_expected_off: set[str] = set()
         self._manual_override_notified: set[str] = set()
+        self._shed_rejection_counts: dict[str, int] = {}
+        self._shed_rejection_devices: list[dict[str, Any]] = []
+        self._shed_rejection_total = 0
+        self._shed_rejection_truncated = 0
+        self._shed_rejection_evaluated_at: float | None = None
 
     @property
     def safety_storage_invalid(self) -> bool:
@@ -298,7 +305,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return False
         try:
             soc = float(getattr(state, "state", ""))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return False
         return math.isfinite(soc) and 0 <= soc <= 100
 
@@ -326,7 +333,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return False
         try:
             soc = float(getattr(state, "state", ""))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return False
         threshold = self._battery_threshold
         if threshold is None:
@@ -432,7 +439,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
         if decision.triggered:
             self._status = STATUS_LOAD_SHEDDING
-            if self._policy_enabled and not self._policy_engine.can_shed_again(self._load_generation):
+            if self._policy_enabled and not self._policy_engine.can_shed_again(
+                self._load_generation
+            ):
                 self._last_action = "Waiting for a newer aggregate report after the previous shed"
                 return
             await self._perform_shedding(max(current, average), decision=decision)
@@ -479,10 +488,14 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                     await self._command_off(device, emergency=True, source="quarantine")
             else:
                 device.is_on = logical_state
-                if previous is not True and logical_state is True and not (
-                    not self._initial_device_reconciliation_complete
-                    and previous is None
-                    and device.ownership is not Ownership.UNKNOWN
+                if (
+                    previous is not True
+                    and logical_state is True
+                    and not (
+                        not self._initial_device_reconciliation_complete
+                        and previous is None
+                        and device.ownership is not Ownership.UNKNOWN
+                    )
                 ):
                     device.ownership = Ownership.EXTERNAL
                     device.ownership_until = time.time() + self._external_ownership_grace
@@ -518,7 +531,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return
         try:
             measured = float(raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             device.measured_power_reason = "non_numeric"
             return
         if not math.isfinite(measured) or measured < 0:
@@ -539,10 +552,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         """
         if device.power_sensor_id is None:
             return True
-        return (
-            device.measured_power_valid
-            and device.measured_power > QUARANTINE_CLEAR_MAX_POWER_W
-        )
+        return device.measured_power_valid and device.measured_power > QUARANTINE_CLEAR_MAX_POWER_W
 
     def _read_load_sensor(self) -> float:
         """Read an available, non-negative power value and retain its failure reason."""
@@ -561,7 +571,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         normalized_unit = str(unit).strip().lower()
         try:
             value = float(getattr(state, "state", ""))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             value = math.nan
         if normalized_unit in {"kw", "kilowatt", "kilowatts"}:
             value *= 1000
@@ -617,7 +627,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 return False
             return None
         if domain == "climate":
-            return False if raw == STATE_OFF else (None if raw in {STATE_UNKNOWN, STATE_UNAVAILABLE} else True)
+            return (
+                False
+                if raw == STATE_OFF
+                else (None if raw in {STATE_UNKNOWN, STATE_UNAVAILABLE} else True)
+            )
         return None
 
     def _logical_device_state(self, device: ManagedDevice) -> bool | None:
@@ -671,7 +685,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 failed.append(device.name)
                 self._quarantined.add(device.device_id)
                 self._faulted.add(device.device_id)
-                self._fault_reasons[device.device_id] = self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value
+                self._fault_reasons[device.device_id] = (
+                    self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value
+                )
                 self._fault_state_dirty = True
         if failed:
             self._status = STATUS_SAFETY_BLOCKED
@@ -690,9 +706,79 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             else:
                 self._quarantined.add(device.device_id)
                 self._faulted.add(device.device_id)
-                self._fault_reasons[device.device_id] = self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value
+                self._fault_reasons[device.device_id] = (
+                    self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value
+                )
                 self._fault_state_dirty = True
         await self._persist_runtime_if_dirty()
+
+    def _shed_candidate_snapshot(
+        self,
+    ) -> tuple[list[ManagedDevice], dict[str, int]]:
+        """Evaluate candidates and rejection reasons from one telemetry snapshot."""
+        now = time.time()
+        candidates: list[ManagedDevice] = []
+        counts: dict[str, int] = {}
+        details: list[dict[str, Any]] = []
+        for device in self._model.get_shed_devices():
+            reason: str | None = None
+            if device.is_on is False:
+                reason = "off"
+            elif device.is_on is not True:
+                reason = "state_unavailable"
+            elif device.device_id in self._quarantined:
+                reason = "quarantined"
+            elif device.power_sensor_id is not None and not device.measured_power_valid:
+                reason = f"power_{device.measured_power_reason}"
+            elif (
+                device.power_sensor_id is not None
+                and device.measured_power <= QUARANTINE_CLEAR_MAX_POWER_W
+            ):
+                reason = "inactive_power"
+            elif (
+                device.ownership is Ownership.EXTERNAL
+                and device.ownership_until is not None
+                and now < device.ownership_until
+            ):
+                reason = "external_ownership_grace"
+
+            if reason is None:
+                candidates.append(device)
+                continue
+            counts[reason] = counts.get(reason, 0) + 1
+            if len(details) < _MAX_SHED_REJECTION_DETAILS:
+                details.append(
+                    {
+                        "device_id": device.device_id,
+                        "name": device.name[:80],
+                        "reason": reason,
+                        "measured_power_w": (
+                            device.measured_power if device.measured_power_valid else None
+                        ),
+                    }
+                )
+
+        total = sum(counts.values())
+        self._shed_rejection_evaluated_at = now
+        if candidates:
+            self._shed_rejection_counts = {}
+            self._shed_rejection_devices = []
+            self._shed_rejection_total = 0
+            self._shed_rejection_truncated = 0
+        else:
+            self._shed_rejection_counts = dict(sorted(counts.items()))
+            self._shed_rejection_devices = details
+            self._shed_rejection_total = total
+            self._shed_rejection_truncated = max(0, total - len(details))
+        return candidates, counts
+
+    @staticmethod
+    def _shed_rejection_summary(counts: Mapping[str, int]) -> str:
+        """Return a bounded state-safe summary of candidate rejection reasons."""
+        if not counts:
+            return "no configured devices"
+        summary = ", ".join(f"{reason}={count}" for reason, count in counts.items())
+        return summary[:180]
 
     async def _perform_shedding(
         self,
@@ -701,20 +787,12 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         decision: PolicyDecision,
     ) -> None:
         """Switch off exactly one eligible active logical load."""
-        candidates = [
-            device
-            for device in self._model.get_shed_devices()
-            if device.is_on is True
-            and device.device_id not in self._quarantined
-            and self._ordinary_shedding_power_eligible(device)
-            and not (
-                device.ownership is Ownership.EXTERNAL
-                and device.ownership_until is not None
-                and time.time() < device.ownership_until
-            )
-        ]
+        candidates, rejection_counts = self._shed_candidate_snapshot()
         if not candidates:
-            self._last_action = f"Load shedding required at {load_w:.0f} W; no eligible load"
+            summary = self._shed_rejection_summary(rejection_counts)
+            self._last_action = (
+                f"Load shedding required at {load_w:.0f} W; no eligible load ({summary})"
+            )[:_MAX_LAST_ACTION_LENGTH]
             self._status = STATUS_SAFETY_BLOCKED
             return
         device = candidates[0]
@@ -733,7 +811,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._status = STATUS_SAFETY_BLOCKED
             self._quarantined.add(device.device_id)
             self._faulted.add(device.device_id)
-            self._fault_reasons[device.device_id] = self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value
+            self._fault_reasons[device.device_id] = (
+                self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value
+            )
             self._fault_state_dirty = True
             self._last_action = f"Load shedding OFF failed for {device.name}"
             await self._persist_runtime_if_dirty()
@@ -750,7 +830,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._policy_engine.set_post_shed_fence(
                 self._last_confirmed_reported_at.get(device.device_id)
             )
-        self._last_action = f"Load shedding: switched off {device.name} at {load_w:.0f} W ({reason})"
+        self._last_action = (
+            f"Load shedding: switched off {device.name} at {load_w:.0f} W ({reason})"
+        )
         self._record_action(
             {
                 "action_id": self._last_action_id,
@@ -1032,7 +1114,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             if not self._load_sensor_valid or load > self._max_load:
                 return False
             if device.power_sensor_id:
-                if not device.measured_power_valid or device.measured_power > QUARANTINE_CLEAR_MAX_POWER_W:
+                if (
+                    not device.measured_power_valid
+                    or device.measured_power > QUARANTINE_CLEAR_MAX_POWER_W
+                ):
                     return False
             self._quarantined.discard(device_id)
             self._faulted.discard(device_id)
@@ -1151,7 +1236,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         configured = {device.device_id for device in self._model.all_devices()}
         self._safety_storage_invalid = bool(storage_invalid)
         self._faulted.update(device_id for device_id in faulted_devices if device_id in configured)
-        self._quarantined.update(device_id for device_id in quarantined_devices if device_id in configured)
+        self._quarantined.update(
+            device_id for device_id in quarantined_devices if device_id in configured
+        )
         self._fault_reasons = {
             device_id: reason[:160]
             for device_id, reason in (fault_reasons or {}).items()
@@ -1252,7 +1339,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 }
                 for tier in self._policy.thresholds
             ],
-            "shed_barrier_pending": self._policy_engine.runtime.pending_post_shed_generation is not None,
+            "shed_barrier_pending": self._policy_engine.runtime.pending_post_shed_generation
+            is not None,
             "last_operation_id": self._last_operation_id,
             "last_operation_result": self._last_operation_result,
             "last_action_id": self._last_action_id,
@@ -1263,6 +1351,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             "quarantined_devices": sorted(self._quarantined),
             "fault_reasons": dict(sorted(self._fault_reasons.items())),
             "safety_fault_reason": self._safety_fault_reason,
+            "shed_rejection_counts": dict(self._shed_rejection_counts),
+            "shed_rejection_devices": list(self._shed_rejection_devices),
+            "shed_rejection_total": self._shed_rejection_total,
+            "shed_rejection_truncated": self._shed_rejection_truncated,
+            "shed_rejection_evaluated_at": self._shed_rejection_evaluated_at,
             "audit_history": history,
             "devices": [device.to_dict() for device in self._model.all_devices()],
         }

@@ -1,7 +1,13 @@
 """Policy configuration validation tests."""
+
 from __future__ import annotations
 
+from power_orchestrator.const import MAX_CUSTOM_THRESHOLDS
 from power_orchestrator.policy import DEFAULT_POLICY, PolicyConfig
+
+
+def test_runtime_threshold_cap_is_not_tied_to_the_setup_ui() -> None:
+    assert MAX_CUSTOM_THRESHOLDS == 64
 
 
 def test_canonical_policy_defaults() -> None:
@@ -11,7 +17,12 @@ def test_canonical_policy_defaults() -> None:
 
 def test_policy_mapping_accepts_bounded_custom_thresholds() -> None:
     policy = PolicyConfig.from_mapping(
-        {"thresholds": [{"power_limit": 1000, "duration_s": 60}, {"power_limit": 2000, "duration_s": 5}]}
+        {
+            "thresholds": [
+                {"power_limit": 1000, "duration_s": 60},
+                {"power_limit": 2000, "duration_s": 5},
+            ]
+        }
     )
     assert len(policy.thresholds) == 2
     assert policy.thresholds[1].limit_w == 2000

@@ -78,7 +78,7 @@
           "averaging_period": "Averaging period (s)",
           "safety_reserve": "Safety reserve (W)",
           "hysteresis": "Hysteresis (W)",
-          "threshold_count": "Number of overload thresholds (1–10)",
+          "threshold_count": "Legacy numbered threshold count (compatibility only)",
           "threshold_1_power": "Threshold 1 power limit (W)",
           "threshold_1_time": "Threshold 1 dwell time (s)",
           "threshold_2_power": "Threshold 2 power limit (W)",
@@ -106,7 +106,7 @@
           "averaging_period": "Time window used to calculate average load. A longer window smooths short spikes; it does not change the source entity's semantic availability.",
           "safety_reserve": "Watts kept unused below the maximum load to protect headroom for unexpected demand.",
           "hysteresis": "Additional watt margin kept after a shedding decision to reduce on/off cycling; it never enables a device.",
-          "threshold_count": "How many custom power-limit and time pairs to use. Maximum 10; power limits must be strictly increasing.",
+          "threshold_count": "Legacy numbered threshold payload accepted for migration and automation compatibility; the setup UI uses repeatable threshold steps.",
           "threshold_1_power": "Power limit 1 that begins this tier's dwell timer. When available aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
           "threshold_1_time": "How many seconds available aggregate load must remain continuously above threshold 1. A short spike, unavailable input, or invalid telemetry never confirms shedding.",
           "threshold_2_power": "Power limit 2 that begins this tier's dwell timer. When available aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
@@ -127,6 +127,20 @@
           "threshold_9_time": "How many seconds available aggregate load must remain continuously above threshold 9. A short spike, unavailable input, or invalid telemetry never confirms shedding.",
           "threshold_10_power": "Power limit 10 that begins this tier's dwell timer. When available aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
           "threshold_10_time": "How many seconds available aggregate load must remain continuously above threshold 10. A short spike, unavailable input, or invalid telemetry never confirms shedding."
+        }
+      },
+      "thresholds": {
+        "title": "Load Shedding Threshold",
+        "description": "Configure threshold step {index}. Already configured: {count}. Enable the next-step option to build a dynamic list.",
+        "data": {
+          "threshold_power": "Threshold power limit (W)",
+          "threshold_duration": "Threshold dwell time (s)",
+          "add_threshold": "Add another threshold"
+        },
+        "data_description": {
+          "threshold_power": "The power limit must be greater than the previous threshold and must not exceed the safety interlock.",
+          "threshold_duration": "How many seconds the available load must continuously remain above this threshold.",
+          "add_threshold": "After saving this step, open another step; the list is not limited to ten fixed positions."
         }
       },
       "devices": {
@@ -155,7 +169,7 @@
       },
       "priority": {
         "title": "Priority & Pause",
-        "description": "Choose the device name for each position. Position 1 is the highest priority; the last position is shed first when the load is too high.\n\nCurrent order:\n{device_list}",
+        "description": "Choose the device name for each position in shedding order. The first item is shed first when the load is too high.\n\nCurrent order:\n{device_list}",
         "data": {
           "priority_1": "Priority position 1",
           "priority_2": "Priority position 2",
@@ -167,19 +181,21 @@
           "priority_8": "Priority position 8",
           "priority_9": "Priority position 9",
           "priority_10": "Priority position 10",
+          "priority_order": "Priority order (drag to reorder)",
           "pause_period": "Pause after a shed stop (s)"
         },
         "data_description": {
-          "priority_1": "Choose the device for this position. Position 1 is protected longest; later positions are shed first when load is too high.",
-          "priority_2": "Choose the device for this position. Later positions are shed first when load is too high.",
-          "priority_3": "Choose the device for this position. Later positions are shed first when load is too high.",
-          "priority_4": "Choose the device for this position. Later positions are shed first when load is too high.",
-          "priority_5": "Choose the device for this position. Later positions are shed first when load is too high.",
-          "priority_6": "Choose the device for this position. Later positions are shed first when load is too high.",
-          "priority_7": "Choose the device for this position. Later positions are shed first when load is too high.",
-          "priority_8": "Choose the device for this position. Later positions are shed first when load is too high.",
-          "priority_9": "Choose the device for this position. Later positions are shed first when load is too high.",
-          "priority_10": "Choose the device for this position. Later positions are shed first when load is too high.",
+          "priority_1": "Choose the device for this position. The first position is evaluated first when load is too high.",
+          "priority_2": "Choose the device for this position. The first position is evaluated first when load is too high.",
+          "priority_3": "Choose the device for this position. The first position is evaluated first when load is too high.",
+          "priority_4": "Choose the device for this position. The first position is evaluated first when load is too high.",
+          "priority_5": "Choose the device for this position. The first position is evaluated first when load is too high.",
+          "priority_6": "Choose the device for this position. The first position is evaluated first when load is too high.",
+          "priority_7": "Choose the device for this position. The first position is evaluated first when load is too high.",
+          "priority_8": "Choose the device for this position. The first position is evaluated first when load is too high.",
+          "priority_9": "Choose the device for this position. The first position is evaluated first when load is too high.",
+          "priority_10": "Choose the device for this position. The first position is evaluated first when load is too high.",
+          "priority_order": "Drag the managed entities into the desired shedding order. The first item is shed first.",
           "pause_period": "Seconds a device remains paused after the coordinator turns it off, reducing rapid cycling before it becomes eligible again. Emergency safety stops still apply."
         }
       },
@@ -199,6 +215,20 @@
           "battery_threshold": "Battery SoC percentage at or below which the system treats the safety source as lost. A higher value protects the battery more and sheds optional loads sooner."
         }
       },
+      "grid_loss_source": {
+        "title": "Grid Loss Source",
+        "description": "Choose the source for the selected mode.",
+        "data": {
+          "grid_loss_sensor": "Binary sensor: ON = grid available, OFF = grid lost",
+          "battery_soc": "Battery state-of-charge sensor (%)",
+          "battery_threshold": "Battery discharge threshold (%)"
+        },
+        "data_description": {
+          "grid_loss_sensor": "Used only in binary-sensor mode. It must be available and report ON for normal operation; OFF, unknown, unavailable, or missing input triggers an emergency stop of optional devices.",
+          "battery_soc": "Used only in battery-threshold mode. It must be available and report a percent value; unavailable, unknown, or invalid input triggers the safety stop.",
+          "battery_threshold": "Battery SoC percentage at or below which the system treats the safety source as lost."
+        }
+      },
       "reconfigure": {
         "title": "Reconfigure Power Orchestrator",
         "description": "Update safety sources, thresholds, managed devices, and runtime limits without removing the integration.",
@@ -214,7 +244,7 @@
           "battery_soc": "Battery state-of-charge sensor",
           "battery_threshold": "Battery threshold (%)",
           "devices": "Managed logical devices",
-          "threshold_count": "Number of overload thresholds (1–10)"
+          "threshold_count": "Legacy numbered threshold count (compatibility only)"
         },
         "data_description": {
           "load_sensor": "Authoritative whole-house power sensor. Invalid, unavailable, unknown, or wrong-unit values block planner actions.",
@@ -228,15 +258,32 @@
           "battery_soc": "Required in battery-threshold mode; it must be available, valid, and above the threshold.",
           "battery_threshold": "SoC at or below which the safety source is considered lost and optional loads are shed.",
           "devices": "Complete logical-device mappings, including control entities, expected watts, actuator groups, and shedding priorities.",
+          "priority_order": "Priority order (drag to reorder). The first entity is evaluated first.",
           "threshold_count": "Number of finite, strictly increasing power/time threshold pairs."
         }
+      }
+    },
+    "thresholds": {
+      "title": "Overload threshold {index}",
+      "description": "Add thresholds in strictly increasing power order. Collected thresholds: {count}.",
+      "data": {
+        "threshold_power": "Power limit (W)",
+        "threshold_duration": "Dwell time (s)",
+        "add_threshold": "Add another threshold"
+      },
+      "data_description": {
+        "threshold_power": "The available load must remain above this limit for the dwell time before one eligible load is stopped.",
+        "threshold_duration": "Continuous seconds above the power limit. Invalid or unavailable telemetry never confirms shedding.",
+        "add_threshold": "Continue with another strictly higher power limit."
       }
     },
     "error": {
       "invalid_priority_order": "Each priority position must contain a different optional device.",
       "invalid_discovered_devices": "Select only configured logical load candidates.",
       "missing_grid_loss_sensor": "Select a grid-loss binary sensor before continuing.",
-      "missing_battery_soc_sensor": "Select a battery state-of-charge sensor before continuing."
+      "missing_battery_soc_sensor": "Select a battery state-of-charge sensor before continuing.",
+      "invalid_thresholds": "The threshold list is invalid.",
+      "invalid_grid_loss_mode": "The grid-loss mode is invalid."
     },
     "abort": {
       "single_instance": "Only one whole-house Power Orchestrator entry can be configured."
@@ -259,7 +306,8 @@
           "battery_soc": "Battery state-of-charge sensor (%)",
           "battery_threshold": "Battery discharge threshold (%)",
           "devices": "Managed device mappings (structured list)",
-          "threshold_count": "Number of overload thresholds (1–10)",
+          "priority_order": "Priority order (drag to reorder)",
+          "threshold_count": "Legacy numbered threshold count (compatibility only)",
           "threshold_1_power": "Threshold 1 power limit (W)",
           "threshold_1_time": "Threshold 1 dwell time (s)",
           "threshold_2_power": "Threshold 2 power limit (W)",
@@ -293,7 +341,8 @@
           "battery_soc": "Percent sensor used in battery-threshold mode. It must be available, valid, and strictly above the configured threshold.",
           "battery_threshold": "SoC percentage at or below which the integration treats the safety source as lost and applies safety shedding.",
           "devices": "Structured mappings for every physical control: stable device_id, switch/light/input_boolean entity, expected watts, optional measured-power sensor, and unique priorities. Invalid mappings are rejected instead of silently skipped.",
-          "threshold_count": "How many custom power-limit and time pairs to use. Maximum 10; power limits must be strictly increasing.",
+          "priority_order": "The native reorderable list is the shedding order: the first entity is evaluated first.",
+          "threshold_count": "Legacy numbered threshold payload accepted for migration and automation compatibility; the setup UI uses repeatable threshold steps.",
           "threshold_1_power": "Power limit 1 that begins this tier's dwell timer. When available aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
           "threshold_1_time": "How many seconds available aggregate load must remain continuously above threshold 1. A short spike, unavailable input, or invalid telemetry never confirms shedding.",
           "threshold_2_power": "Power limit 2 that begins this tier's dwell timer. When available aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
@@ -317,7 +366,23 @@
         }
       }
     },
+    "thresholds": {
+      "title": "Overload threshold {index}",
+      "description": "Add thresholds in strictly increasing power order. Collected thresholds: {count}.",
+      "data": {
+        "threshold_power": "Power limit (W)",
+        "threshold_duration": "Dwell time (s)",
+        "add_threshold": "Add another threshold"
+      },
+      "data_description": {
+        "threshold_power": "The available load must remain above this limit for the dwell time before one eligible load is stopped.",
+        "threshold_duration": "Continuous seconds above the power limit. Invalid or unavailable telemetry never confirms shedding.",
+        "add_threshold": "Continue with another strictly higher power limit."
+      }
+    },
     "error": {
+      "invalid_priority_order": "Each priority position must contain a different optional device.",
+      "invalid_thresholds": "The threshold list is invalid.",
       "missing_grid_loss_sensor": "Select a grid-loss binary sensor before continuing.",
       "missing_battery_soc_sensor": "Select a battery state-of-charge sensor before continuing.",
       "invalid_load_sensor": "Select a valid sensor entity for whole-house load.",

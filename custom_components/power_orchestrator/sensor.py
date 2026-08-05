@@ -98,9 +98,24 @@ class PowerOrchestratorStatusSensor(PowerOrchestratorSensorBase):
             "load_sensor_reason": self._coordinator.load_sensor_reason,
             "startup_safe": self._coordinator.startup_safe,
             "faulted_devices": list((self._coordinator.data or {}).get("faulted_devices", ())),
-            "quarantined_devices": list((self._coordinator.data or {}).get("quarantined_devices", ())),
+            "quarantined_devices": list(
+                (self._coordinator.data or {}).get("quarantined_devices", ())
+            ),
             "fault_reasons": dict((self._coordinator.data or {}).get("fault_reasons", {})),
             "safety_fault_reason": (self._coordinator.data or {}).get("safety_fault_reason"),
+            "shed_rejection_counts": dict(
+                (self._coordinator.data or {}).get("shed_rejection_counts", {})
+            ),
+            "shed_rejection_total": (self._coordinator.data or {}).get("shed_rejection_total", 0),
+            "shed_rejection_truncated": (self._coordinator.data or {}).get(
+                "shed_rejection_truncated", 0
+            ),
+            "shed_rejection_devices": list(
+                (self._coordinator.data or {}).get("shed_rejection_devices", ())
+            ),
+            "shed_rejection_evaluated_at": (self._coordinator.data or {}).get(
+                "shed_rejection_evaluated_at"
+            ),
         }
 
 

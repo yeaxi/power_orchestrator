@@ -37,8 +37,14 @@ CONF_SHED_FAST_DURATION: Final = "shed_fast_duration"
 CONF_SHED_CRITICAL_LIMIT: Final = "shed_critical_limit"
 CONF_SHED_CRITICAL_DURATION: Final = "shed_critical_duration"
 CONF_THRESHOLDS: Final = "thresholds"
+# Legacy numbered-threshold inputs remain accepted for migration/automation
+# compatibility; the config flow itself uses repeatable threshold steps.
 CONF_THRESHOLD_COUNT: Final = "threshold_count"
-MAX_CUSTOM_THRESHOLDS: Final = 10
+CONF_THRESHOLD_POWER: Final = "threshold_power"
+CONF_THRESHOLD_DURATION: Final = "threshold_duration"
+CONF_ADD_THRESHOLD: Final = "add_threshold"
+CONF_PRIORITY_ORDER: Final = "priority_order"
+MAX_CUSTOM_THRESHOLDS: Final = 64
 
 # Grid-loss safety modes
 GRID_LOSS_MODE_SENSOR: Final = "grid_loss_sensor"

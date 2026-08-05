@@ -14,10 +14,11 @@ class EntitySelector(_Selector):
 
 
 class EntitySelectorConfig:
-    def __init__(self, domain=None, include_entities=None, multiple=False):
+    def __init__(self, domain=None, include_entities=None, multiple=False, reorder=False):
         self.domain = domain
         self.include_entities = include_entities
         self.multiple = multiple
+        self.reorder = reorder
 
 
 class NumberSelector(_Selector):

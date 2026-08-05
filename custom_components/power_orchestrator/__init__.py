@@ -18,11 +18,13 @@ from homeassistant.helpers.storage import Store
 try:
     from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 except ImportError:  # pragma: no cover - local test doubles
+
     class HomeAssistantError(Exception):  # type: ignore[no-redef]
         """Fallback Home Assistant error."""
 
     class ServiceValidationError(HomeAssistantError):  # type: ignore[no-redef]
         """Fallback service validation error."""
+
 
 from .const import (
     CONF_AVERAGING_PERIOD,
@@ -256,7 +258,7 @@ def _safe_number(value: Any, *, default: float, minimum: float, maximum: float) 
         return default
     try:
         converted = float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
     if not math.isfinite(converted) or not minimum <= converted <= maximum:
         return default
@@ -290,18 +292,30 @@ def _normalize_devices(raw_devices: Any) -> list[dict[str, Any]]:
             valid = _valid_entity_id(actuator, _ALLOWED_ACTUATOR_DOMAINS)
             if valid and valid not in {entity_id, *actuators, *seen_entities}:
                 actuators.append(valid)
-        expected = int(math.ceil(_safe_number(
-            raw.get(CONF_DEVICE_EXPECTED_POWER),
-            default=1,
-            minimum=1,
-            maximum=50000,
-        )))
+        expected = int(
+            math.ceil(
+                _safe_number(
+                    raw.get(CONF_DEVICE_EXPECTED_POWER),
+                    default=1,
+                    minimum=1,
+                    maximum=50000,
+                )
+            )
+        )
         power_sensor = _valid_entity_id(raw.get(CONF_DEVICE_POWER_SENSOR), frozenset({"sensor"}))
         name = raw.get(CONF_DEVICE_NAME)
         if not isinstance(name, str) or not name.strip():
             name = entity_id
-        priority = int(_safe_number(raw.get(CONF_PRIORITY, index + 1), default=index + 1, minimum=1, maximum=100000))
-        shed_priority = int(_safe_number(raw.get(CONF_SHED_PRIORITY, priority), default=priority, minimum=1, maximum=100000))
+        priority = int(
+            _safe_number(
+                raw.get(CONF_PRIORITY, index + 1), default=index + 1, minimum=1, maximum=100000
+            )
+        )
+        shed_priority = int(
+            _safe_number(
+                raw.get(CONF_SHED_PRIORITY, priority), default=priority, minimum=1, maximum=100000
+            )
+        )
         normalized.append(
             {
                 CONF_DEVICE_ID: device_id,
@@ -351,6 +365,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             reservations.discard(entry.entry_id)
 
 
+def _idempotent_remover(remove: Any) -> Any:
+    """Wrap a Home Assistant unsubscribe callback so repeated cleanup is safe."""
+    active = True
+
+    def _remove() -> None:
+        nonlocal active
+        if not active:
+            return
+        active = False
+        remove()
+
+    return _remove
+
+
+def _register_entry_update_listener(entry: Any) -> None:
+    """Own the config-entry update listener through the entry unload lifecycle."""
+    add_listener = getattr(entry, "add_update_listener", None)
+    if not callable(add_listener):
+        return
+    remove_listener = add_listener(_async_update_listener)
+    on_unload = getattr(entry, "async_on_unload", None)
+    if callable(remove_listener) and callable(on_unload):
+        on_unload(remove_listener)
+
+
 async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data = dict(entry.data or {})
     data.update(dict(entry.options or {}))
@@ -362,7 +401,9 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     store = RuntimeStore(Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{entry.entry_id}"))
     await store.async_load()
     policy = PolicyConfig.from_mapping(data)
-    execution_mode = store.restore_execution_mode() or data.get(CONF_EXECUTION_MODE, DEFAULT_EXECUTION_MODE)
+    execution_mode = store.restore_execution_mode() or data.get(
+        CONF_EXECUTION_MODE, DEFAULT_EXECUTION_MODE
+    )
     if execution_mode not in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE):
         execution_mode = DEFAULT_EXECUTION_MODE
     coordinator = PowerOrchestratorCoordinator(
@@ -371,10 +412,24 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
         store=store,
         load_sensor=str(data.get(CONF_LOAD_SENSOR, "")),
         max_load=_safe_number(data.get(CONF_MAX_LOAD), default=5000, minimum=100, maximum=50000),
-        averaging_period=_safe_number(data.get(CONF_AVERAGING_PERIOD), default=DEFAULT_AVERAGING_PERIOD, minimum=1, maximum=300),
-        safety_reserve=_safe_number(data.get(CONF_SAFETY_RESERVE), default=DEFAULT_SAFETY_RESERVE, minimum=0, maximum=5000),
-        hysteresis=_safe_number(data.get(CONF_HYSTERESIS), default=DEFAULT_HYSTERESIS, minimum=0, maximum=5000),
-        pause_period=_safe_number(data.get(CONF_PAUSE_PERIOD), default=DEFAULT_PAUSE_PERIOD, minimum=0, maximum=MAX_RUNTIME_PAUSE_SECONDS),
+        averaging_period=_safe_number(
+            data.get(CONF_AVERAGING_PERIOD),
+            default=DEFAULT_AVERAGING_PERIOD,
+            minimum=1,
+            maximum=300,
+        ),
+        safety_reserve=_safe_number(
+            data.get(CONF_SAFETY_RESERVE), default=DEFAULT_SAFETY_RESERVE, minimum=0, maximum=5000
+        ),
+        hysteresis=_safe_number(
+            data.get(CONF_HYSTERESIS), default=DEFAULT_HYSTERESIS, minimum=0, maximum=5000
+        ),
+        pause_period=_safe_number(
+            data.get(CONF_PAUSE_PERIOD),
+            default=DEFAULT_PAUSE_PERIOD,
+            minimum=0,
+            maximum=MAX_RUNTIME_PAUSE_SECONDS,
+        ),
         grid_loss_mode=data.get(CONF_GRID_LOSS_MODE, GRID_LOSS_MODE_SENSOR),
         grid_loss_sensor=data.get(CONF_GRID_LOSS_SENSOR),
         battery_threshold=data.get(CONF_BATTERY_THRESHOLD),
@@ -404,7 +459,11 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
     await _register_services(hass)
 
-    tracked_entities = {data.get(CONF_LOAD_SENSOR), data.get(CONF_GRID_LOSS_SENSOR), data.get(CONF_BATTERY_SOC)}
+    tracked_entities = {
+        data.get(CONF_LOAD_SENSOR),
+        data.get(CONF_GRID_LOSS_SENSOR),
+        data.get(CONF_BATTERY_SOC),
+    }
     for device in model.all_devices():
         tracked_entities.update(device.control_entity_ids)
         if device.power_sensor_id:
@@ -420,11 +479,13 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     bus = getattr(hass, "bus", None)
     listen = getattr(bus, "async_listen", None)
     if callable(listen):
-        remove_listener = listen("state_changed", _state_changed)
-        runtime.repair_listener_remove = remove_listener if callable(remove_listener) else None
-        unload_listener = runtime.repair_listener_remove
-        if callable(entry.async_on_unload) and callable(unload_listener):
-            entry.async_on_unload(unload_listener)
+        raw_remove_listener = listen("state_changed", _state_changed)
+        if callable(raw_remove_listener):
+            remove_listener = _idempotent_remover(raw_remove_listener)
+            runtime.repair_listener_remove = remove_listener
+            on_unload = getattr(entry, "async_on_unload", None)
+            if callable(on_unload):
+                on_unload(remove_listener)
 
     try:
         await coordinator.async_config_entry_first_refresh()
@@ -436,8 +497,7 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         entry.runtime_data = None
         raise
-    if callable(entry.add_update_listener):
-        entry.add_update_listener(_async_update_listener)
+    _register_entry_update_listener(entry)
     return True
 
 
@@ -563,7 +623,9 @@ async def _register_services(hass: HomeAssistant) -> None:
             await runtime.coordinator.async_force_evaluate()
             _sync_repair_issues_for_runtime(hass, runtime)
         except Exception as exc:
-            raise _translated_error(HomeAssistantError, "evaluation_failed", reason=str(exc)) from exc
+            raise _translated_error(
+                HomeAssistantError, "evaluation_failed", reason=str(exc)
+            ) from exc
 
     async def set_mode(call: Any) -> None:
         mode = getattr(call, "data", {}).get("mode")
@@ -574,7 +636,9 @@ async def _register_services(hass: HomeAssistant) -> None:
             await runtime.coordinator.async_set_mode(mode)
             _sync_repair_issues_for_runtime(hass, runtime)
         except Exception as exc:
-            raise _translated_error(HomeAssistantError, "mode_change_failed", reason=str(exc)) from exc
+            raise _translated_error(
+                HomeAssistantError, "mode_change_failed", reason=str(exc)
+            ) from exc
 
     async def request_stop(call: Any) -> None:
         data = getattr(call, "data", {})
@@ -589,7 +653,9 @@ async def _register_services(hass: HomeAssistant) -> None:
             )
             _sync_repair_issues_for_runtime(hass, runtime)
         except Exception as exc:
-            raise _translated_error(HomeAssistantError, "stop_request_failed", reason=str(exc)) from exc
+            raise _translated_error(
+                HomeAssistantError, "stop_request_failed", reason=str(exc)
+            ) from exc
 
     async def clear_quarantine(call: Any) -> None:
         data = getattr(call, "data", {})
@@ -604,7 +670,9 @@ async def _register_services(hass: HomeAssistant) -> None:
             )
             _sync_repair_issues_for_runtime(hass, runtime)
         except Exception as exc:
-            raise _translated_error(HomeAssistantError, "quarantine_clear_failed", reason=str(exc)) from exc
+            raise _translated_error(
+                HomeAssistantError, "quarantine_clear_failed", reason=str(exc)
+            ) from exc
 
     async def set_execution_mode(call: Any) -> None:
         data = getattr(call, "data", {})
@@ -613,19 +681,31 @@ async def _register_services(hass: HomeAssistant) -> None:
         if value not in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE):
             raise _translated_error(ServiceValidationError, "invalid_execution_mode")
         try:
-            await _service_runtime(hass).coordinator.async_set_execution_mode(value, confirm_live=bool(confirm))
+            await _service_runtime(hass).coordinator.async_set_execution_mode(
+                value, confirm_live=bool(confirm)
+            )
         except Exception as exc:
-            raise _translated_error(HomeAssistantError, "execution_mode_change_failed", reason=str(exc)) from exc
+            raise _translated_error(
+                HomeAssistantError, "execution_mode_change_failed", reason=str(exc)
+            ) from exc
 
     service_schema = {
         "force_evaluate": vol.Schema({}),
         "set_mode": vol.Schema({vol.Required("mode"): vol.In([MODE_AUTO, MODE_OFF])}),
-        "request_stop": vol.Schema({vol.Required("device_id"): str, vol.Optional("source", default="service"): str}),
-        "clear_quarantine": vol.Schema({vol.Required("device_id"): str, vol.Optional("source", default="service"): str}),
-        "set_execution_mode": vol.Schema({
-            vol.Required(CONF_EXECUTION_MODE): vol.In([EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE]),
-            vol.Optional("confirm_live", default=False): bool,
-        }),
+        "request_stop": vol.Schema(
+            {vol.Required("device_id"): str, vol.Optional("source", default="service"): str}
+        ),
+        "clear_quarantine": vol.Schema(
+            {vol.Required("device_id"): str, vol.Optional("source", default="service"): str}
+        ),
+        "set_execution_mode": vol.Schema(
+            {
+                vol.Required(CONF_EXECUTION_MODE): vol.In(
+                    [EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE]
+                ),
+                vol.Optional("confirm_live", default=False): bool,
+            }
+        ),
     }
     handlers = {
         "force_evaluate": force_evaluate,

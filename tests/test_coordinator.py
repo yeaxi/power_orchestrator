@@ -1,4 +1,5 @@
 """Coordinator behavior tests for stop-only load shedding."""
+
 from __future__ import annotations
 
 import asyncio
@@ -21,7 +22,9 @@ from power_orchestrator.policy import Ownership, PolicyConfig
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 
 
-def state(value: str, *, unit: str = "W", age: float = 0, updated_age: float | None = None) -> SimpleNamespace:
+def state(
+    value: str, *, unit: str = "W", age: float = 0, updated_age: float | None = None
+) -> SimpleNamespace:
     timestamp = datetime.now(timezone.utc) - timedelta(seconds=age)
     updated_timestamp = datetime.now(timezone.utc) - timedelta(
         seconds=age if updated_age is None else updated_age
@@ -36,12 +39,29 @@ def state(value: str, *, unit: str = "W", age: float = 0, updated_age: float | N
 
 def model() -> PowerModel:
     result = PowerModel()
-    result.add_device(ManagedDevice("d1", "Load 1", "switch.load_1", expected_power=1000, priority=1, shed_priority=1))
-    result.add_device(ManagedDevice("d2", "Load 2", "switch.load_2", expected_power=2000, priority=2, shed_priority=2))
+    result.add_device(
+        ManagedDevice(
+            "d1", "Load 1", "switch.load_1", expected_power=1000, priority=1, shed_priority=1
+        )
+    )
+    result.add_device(
+        ManagedDevice(
+            "d2", "Load 2", "switch.load_2", expected_power=2000, priority=2, shed_priority=2
+        )
+    )
     return result
 
 
-def coordinator(*, hass=None, policy=None, execution_mode="live", grid_mode=GRID_LOSS_MODE_SENSOR, grid_sensor="binary_sensor.grid", battery_soc=None, battery_threshold=None):
+def coordinator(
+    *,
+    hass=None,
+    policy=None,
+    execution_mode="live",
+    grid_mode=GRID_LOSS_MODE_SENSOR,
+    grid_sensor="binary_sensor.grid",
+    battery_soc=None,
+    battery_threshold=None,
+):
     hass = hass or MagicMock()
     hass.services.async_call = AsyncMock()
     hass.bus.async_fire = MagicMock()
@@ -119,7 +139,11 @@ async def test_invalid_load_blocks_without_physical_command() -> None:
 async def test_unavailable_grid_source_is_not_reported_as_confirmed_grid_loss() -> None:
     coordinator_instance = coordinator()
     coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
-        state("unavailable") if entity_id == "binary_sensor.grid" else state("off") if entity_id.startswith("switch.") else state("0")
+        state("unavailable")
+        if entity_id == "binary_sensor.grid"
+        else state("off")
+        if entity_id.startswith("switch.")
+        else state("0")
     )
 
     await coordinator_instance._evaluate()
@@ -137,7 +161,9 @@ async def test_manual_stop_is_guarded_and_confirmed() -> None:
     assert device is not None
     device.is_on = True
     device.ownership = Ownership.PLANNER
-    coordinator_instance.hass.states.get.side_effect = lambda entity_id: state("on") if entity_id == "switch.load_1" else state("on")
+    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
+        state("on") if entity_id == "switch.load_1" else state("on")
+    )
     coordinator_instance._confirm_device_state = AsyncMock(return_value=True)
 
     assert await coordinator_instance.async_request_stop("d1", source="test") is True
@@ -145,7 +171,10 @@ async def test_manual_stop_is_guarded_and_confirmed() -> None:
         "switch", "turn_off", {"entity_id": "switch.load_1"}, blocking=True
     )
     assert device.is_on is False
-    assert all(call.args[1] != "turn_on" for call in coordinator_instance.hass.services.async_call.await_args_list)
+    assert all(
+        call.args[1] != "turn_on"
+        for call in coordinator_instance.hass.services.async_call.await_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -162,10 +191,12 @@ async def test_observe_mode_records_a_stop_without_calling_home_assistant() -> N
 
 @pytest.mark.asyncio
 async def test_overload_sheds_one_planner_owned_load_and_never_reenables_it() -> None:
-    policy = PolicyConfig.from_mapping({
-        "thresholds": [{"power_limit": 1000, "duration_s": 0}],
-        "hard_interlock": 9000,
-    })
+    policy = PolicyConfig.from_mapping(
+        {
+            "thresholds": [{"power_limit": 1000, "duration_s": 0}],
+            "hard_interlock": 9000,
+        }
+    )
     coordinator_instance = coordinator(policy=policy)
     first = coordinator_instance._model.get_device("d1")
     second = coordinator_instance._model.get_device("d2")
@@ -174,7 +205,11 @@ async def test_overload_sheds_one_planner_owned_load_and_never_reenables_it() ->
     first.ownership = Ownership.PLANNER
     second.is_on = False
     coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
-        state("on") if entity_id in {"binary_sensor.grid", "switch.load_1"} else state("off") if entity_id == "switch.load_2" else state("2000")
+        state("on")
+        if entity_id in {"binary_sensor.grid", "switch.load_1"}
+        else state("off")
+        if entity_id == "switch.load_2"
+        else state("2000")
     )
     coordinator_instance._confirm_device_state = AsyncMock(return_value=True)
 
@@ -183,7 +218,10 @@ async def test_overload_sheds_one_planner_owned_load_and_never_reenables_it() ->
     assert coordinator_instance.status == STATUS_LOAD_SHEDDING
     assert first.is_on is False
     assert coordinator_instance.hass.services.async_call.await_args.args[1] == "turn_off"
-    assert all(call.args[1] != "turn_on" for call in coordinator_instance.hass.services.async_call.await_args_list)
+    assert all(
+        call.args[1] != "turn_on"
+        for call in coordinator_instance.hass.services.async_call.await_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -200,9 +238,12 @@ async def test_zero_power_on_device_is_not_ordinary_shed_candidate() -> None:
     device.power_sensor_id = "sensor.load_1_power"
     device.ownership = Ownership.PLANNER
     coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
-        state("on") if entity_id in {"binary_sensor.grid", "switch.load_1"}
-        else state("off") if entity_id == "switch.load_2"
-        else state("0") if entity_id == "sensor.load_1_power"
+        state("on")
+        if entity_id in {"binary_sensor.grid", "switch.load_1"}
+        else state("off")
+        if entity_id == "switch.load_2"
+        else state("0")
+        if entity_id == "sensor.load_1_power"
         else state("2000")
     )
 
@@ -216,10 +257,49 @@ async def test_zero_power_on_device_is_not_ordinary_shed_candidate() -> None:
 
 
 @pytest.mark.asyncio
+async def test_no_eligible_load_reports_per_device_reasons() -> None:
+    policy = PolicyConfig.from_mapping(
+        {
+            "thresholds": [{"power_limit": 1000, "duration_s": 0}],
+            "hard_interlock": 9000,
+        }
+    )
+    coordinator_instance = coordinator(policy=policy, execution_mode="observe")
+    first = coordinator_instance._model.get_device("d1")
+    second = coordinator_instance._model.get_device("d2")
+    assert first is not None and second is not None
+    first.power_sensor_id = "sensor.load_1_power"
+    first.ownership = Ownership.PLANNER
+    second.ownership = Ownership.PLANNER
+    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
+        state("on")
+        if entity_id in {"binary_sensor.grid", "switch.load_1"}
+        else state("off")
+        if entity_id == "switch.load_2"
+        else state("0")
+        if entity_id == "sensor.load_1_power"
+        else state("2000")
+    )
+
+    await coordinator_instance._evaluate()
+
+    assert "no eligible load" in coordinator_instance.last_action
+    assert "inactive_power=1" in coordinator_instance.last_action
+    assert "off=1" in coordinator_instance.last_action
+    assert len(coordinator_instance.last_action) <= 255
+    assert coordinator_instance._shed_rejection_total == 2
+    assert coordinator_instance._shed_rejection_truncated == 0
+
+
+@pytest.mark.asyncio
 async def test_set_execution_mode_evaluates_after_releasing_evaluation_lock() -> None:
     coordinator_instance = coordinator(execution_mode="observe")
     coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
-        state("on") if entity_id == "binary_sensor.grid" else state("off") if entity_id.startswith("switch.") else state("0")
+        state("on")
+        if entity_id == "binary_sensor.grid"
+        else state("off")
+        if entity_id.startswith("switch.")
+        else state("0")
     )
 
     await asyncio.wait_for(
@@ -238,7 +318,11 @@ async def test_grid_loss_sheds_active_loads() -> None:
     assert device is not None
     device.is_on = True
     coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
-        state("off") if entity_id == "binary_sensor.grid" else state("on") if entity_id == "switch.load_1" else state("0")
+        state("off")
+        if entity_id == "binary_sensor.grid"
+        else state("on")
+        if entity_id == "switch.load_1"
+        else state("0")
     )
     coordinator_instance._confirm_device_state = AsyncMock(return_value=True)
     await coordinator_instance._evaluate()

@@ -16,6 +16,7 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_ADD_ANOTHER,
     CONF_ADD_CUSTOM_DEVICE,
+    CONF_ADD_THRESHOLD,
     CONF_AVERAGING_PERIOD,
     CONF_BATTERY_SOC,
     CONF_BATTERY_THRESHOLD,
@@ -34,9 +35,12 @@ from .const import (
     CONF_MAX_LOAD,
     CONF_PAUSE_PERIOD,
     CONF_PRIORITY,
+    CONF_PRIORITY_ORDER,
     CONF_SAFETY_RESERVE,
     CONF_SHED_PRIORITY,
     CONF_THRESHOLD_COUNT,
+    CONF_THRESHOLD_DURATION,
+    CONF_THRESHOLD_POWER,
     CONF_THRESHOLDS,
     DEFAULT_AVERAGING_PERIOD,
     DEFAULT_HARD_INTERLOCK,
@@ -105,7 +109,7 @@ def _threshold_defaults(value: Any) -> list[dict[str, float]]:
             try:
                 limit = float(raw.get("power_limit", raw.get("limit_w")))
                 duration = float(raw.get("duration_s", raw.get("time_s")))
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 continue
             if math.isfinite(limit) and math.isfinite(duration) and limit > 0 and duration >= 0:
                 result.append({"power_limit": limit, "duration_s": duration})
@@ -118,7 +122,7 @@ def _parse_threshold_input(
     user_input: Mapping[str, Any],
     defaults: list[dict[str, float]] | None = None,
 ) -> tuple[list[dict[str, float]] | None, str | None]:
-    """Parse one to ten strictly increasing threshold pairs."""
+    """Parse legacy numbered threshold pairs with the bounded runtime limit."""
     raw_count = user_input.get(CONF_THRESHOLD_COUNT)
     if raw_count is None:
         pairs = defaults or _threshold_defaults(None)
@@ -127,7 +131,7 @@ def _parse_threshold_input(
         return None, "invalid_thresholds"
     try:
         count = int(raw_count)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None, "invalid_thresholds"
     if count != raw_count or not 1 <= count <= MAX_CUSTOM_THRESHOLDS:
         return None, "invalid_thresholds"
@@ -136,11 +140,16 @@ def _parse_threshold_input(
     for index in range(1, count + 1):
         power = user_input.get(_threshold_field(index, "power"))
         duration = user_input.get(_threshold_field(index, "time"))
-        if power is None or duration is None or isinstance(power, bool) or isinstance(duration, bool):
+        if (
+            power is None
+            or duration is None
+            or isinstance(power, bool)
+            or isinstance(duration, bool)
+        ):
             return None, "invalid_thresholds"
         try:
             limit, dwell = validate_threshold_pair(float(power), float(duration), previous)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None, "invalid_thresholds"
         if limit > DEFAULT_HARD_INTERLOCK:
             return None, "invalid_thresholds"
@@ -149,23 +158,92 @@ def _parse_threshold_input(
     return parsed, None
 
 
-def _threshold_form_fields(defaults: list[dict[str, float]] | None = None) -> dict[Any, Any]:
-    """Expose all ten threshold positions so the UI has explicit descriptions."""
-    values = defaults or _threshold_defaults(None)
-    fields: dict[Any, Any] = {
-        vol.Required(CONF_THRESHOLD_COUNT, default=len(values)): selector.NumberSelector(
-            cast(Any, selector.NumberSelectorConfig)(min=1, max=MAX_CUSTOM_THRESHOLDS, mode="box")
-        )
+def _threshold_step_fields(
+    default: Mapping[str, Any] | None = None,
+    *,
+    add_another_default: bool = False,
+) -> dict[Any, Any]:
+    """Build one repeatable threshold form instead of fixed numbered fields."""
+    pair = default or {
+        "power_limit": DEFAULT_SHED_SUSTAINED_LIMIT,
+        "duration_s": DEFAULT_SHED_SUSTAINED_DURATION,
     }
-    for index in range(1, MAX_CUSTOM_THRESHOLDS + 1):
-        pair = values[index - 1] if index <= len(values) else values[-1]
-        fields[vol.Optional(_threshold_field(index, "power"), default=pair["power_limit"])] = selector.NumberSelector(
-            cast(Any, selector.NumberSelectorConfig)(min=1, max=100000, mode="box", unit_of_measurement="W")
+    return {
+        vol.Required(CONF_THRESHOLD_POWER, default=pair["power_limit"]): selector.NumberSelector(
+            cast(Any, selector.NumberSelectorConfig)(
+                min=1,
+                max=DEFAULT_HARD_INTERLOCK,
+                mode="box",
+                unit_of_measurement="W",
+            )
+        ),
+        vol.Required(CONF_THRESHOLD_DURATION, default=pair["duration_s"]): selector.NumberSelector(
+            cast(Any, selector.NumberSelectorConfig)(
+                min=0,
+                max=86400,
+                mode="box",
+                unit_of_measurement="s",
+            )
+        ),
+        vol.Optional(CONF_ADD_THRESHOLD, default=add_another_default): bool,
+    }
+
+
+def _next_threshold_default(
+    collected: list[dict[str, float]], seed: list[dict[str, float]]
+) -> dict[str, float]:
+    """Return the next useful default for a repeatable threshold step."""
+    if len(collected) < len(seed):
+        return dict(seed[len(collected)])
+    previous = collected[-1] if collected else {"power_limit": 0.0, "duration_s": 0.0}
+    return {
+        "power_limit": min(DEFAULT_HARD_INTERLOCK, previous["power_limit"] + 500.0),
+        "duration_s": previous["duration_s"],
+    }
+
+
+def _parse_threshold_step(
+    user_input: Mapping[str, Any], previous: float
+) -> tuple[dict[str, float] | None, str | None]:
+    """Validate one repeatable threshold pair against the collected prefix."""
+    raw_power = user_input.get(CONF_THRESHOLD_POWER)
+    raw_duration = user_input.get(CONF_THRESHOLD_DURATION)
+    if (
+        raw_power is None
+        or raw_duration is None
+        or isinstance(raw_power, bool)
+        or isinstance(raw_duration, bool)
+    ):
+        return None, "invalid_thresholds"
+    try:
+        limit, duration = validate_threshold_pair(
+            float(raw_power),
+            float(raw_duration),
+            previous,
         )
-        fields[vol.Optional(_threshold_field(index, "time"), default=pair["duration_s"])] = selector.NumberSelector(
-            cast(Any, selector.NumberSelectorConfig)(min=0, max=86400, mode="box", unit_of_measurement="s")
-        )
-    return fields
+    except TypeError, ValueError:
+        return None, "invalid_thresholds"
+    if limit > DEFAULT_HARD_INTERLOCK:
+        return None, "invalid_thresholds"
+    return {"power_limit": limit, "duration_s": duration}, None
+
+
+def _threshold_add_allowed(
+    collected: list[dict[str, float]], pair: Mapping[str, float], user_input: Mapping[str, Any]
+) -> bool:
+    """Prevent an add-another request that cannot produce a valid next step."""
+    if not user_input.get(CONF_ADD_THRESHOLD, False):
+        return True
+    return (
+        pair["power_limit"] < DEFAULT_HARD_INTERLOCK and len(collected) + 1 < MAX_CUSTOM_THRESHOLDS
+    )
+
+
+def _optional_entity_key(name: str, default: Any = None) -> Any:
+    """Avoid injecting an empty string into HA's native EntitySelector."""
+    if isinstance(default, str) and default.strip():
+        return vol.Optional(name, default=default)
+    return vol.Optional(name)
 
 
 def _entity_selector(domains: str | list[str], *, multiple: bool = False) -> Any:
@@ -191,7 +269,9 @@ async def _discover_inputs(hass: Any) -> dict[str, Any]:
                 continue
             source_type = source.get("type")
             if source_type == "grid":
-                candidate = source.get("power_config", {}).get("stat_rate") or source.get("stat_rate")
+                candidate = source.get("power_config", {}).get("stat_rate") or source.get(
+                    "stat_rate"
+                )
                 result["grid_power"] = _sensor_entity_id(candidate)
             elif source_type == "battery":
                 result["battery_soc"] = _sensor_entity_id(source.get("stat_soc"))
@@ -228,7 +308,9 @@ def _normalize_options_devices(value: Any) -> list[dict[str, Any]]:
         if not isinstance(device_id, str) or not device_id.strip() or device_id in seen_ids:
             raise ValueError("device IDs must be unique")
         device_id = device_id.strip()
-        entity = _entity_id(raw.get(CONF_DEVICE_ENTITY), frozenset({"switch", "light", "input_boolean"}))
+        entity = _entity_id(
+            raw.get(CONF_DEVICE_ENTITY), frozenset({"switch", "light", "input_boolean"})
+        )
         if entity is None or entity in seen_entities:
             raise ValueError("control entities must be valid and unique")
         raw_actuators = raw.get(CONF_DEVICE_ACTUATORS, ())
@@ -240,8 +322,15 @@ def _normalize_options_devices(value: Any) -> list[dict[str, Any]]:
             raise ValueError("actuators must be a list")
         actuators: list[str] = []
         for raw_actuator in raw_actuators:
-            actuator = _entity_id(raw_actuator, frozenset({"switch", "light", "input_boolean", "climate"}))
-            if actuator is None or actuator == entity or actuator in actuators or actuator in seen_entities:
+            actuator = _entity_id(
+                raw_actuator, frozenset({"switch", "light", "input_boolean", "climate"})
+            )
+            if (
+                actuator is None
+                or actuator == entity
+                or actuator in actuators
+                or actuator in seen_entities
+            ):
                 raise ValueError("logical actuator entities must be valid and unique")
             actuators.append(actuator)
         expected_raw = raw.get(CONF_DEVICE_EXPECTED_POWER)
@@ -249,7 +338,7 @@ def _normalize_options_devices(value: Any) -> list[dict[str, Any]]:
             raise ValueError("expected power must be finite")
         try:
             expected = float(expected_raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             raise ValueError("expected power must be finite") from None
         if not math.isfinite(expected) or not 1 <= expected <= 50000:
             raise ValueError("expected power is outside the allowed range")
@@ -268,7 +357,7 @@ def _normalize_options_devices(value: Any) -> list[dict[str, Any]]:
                 raise ValueError(f"{label} must be an integer")
             try:
                 converted = float(raw_value)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 raise ValueError(f"{label} must be an integer") from None
             if not math.isfinite(converted) or converted < 1 or converted != int(converted):
                 raise ValueError(f"{label} must be a positive integer")
@@ -305,21 +394,240 @@ def _entry_current(entry: Any, key: str, default: Any = None) -> Any:
 
 
 def _options_schema_for_entry(entry: Any) -> vol.Schema:
+    raw_devices = _entry_current(entry, CONF_DEVICES, [])
+    try:
+        current_devices = _normalize_options_devices(raw_devices)
+    except ValueError:
+        current_devices = []
+    control_entities = [
+        device[CONF_DEVICE_ENTITY] for device in current_devices if device.get(CONF_DEVICE_ENTITY)
+    ]
     fields: dict[Any, Any] = {
-        vol.Required(CONF_LOAD_SENSOR, default=_entry_current(entry, CONF_LOAD_SENSOR, "")): _entity_selector("sensor"),
-        vol.Optional(CONF_DEVICES, default=_entry_current(entry, CONF_DEVICES, [])): selector.ObjectSelector(),
-        vol.Required(CONF_MAX_LOAD, default=_entry_current(entry, CONF_MAX_LOAD, 5000)): selector.NumberSelector(cast(Any, selector.NumberSelectorConfig)(min=100, max=50000, mode="box", unit_of_measurement="W")),
-        vol.Required(CONF_AVERAGING_PERIOD, default=_entry_current(entry, CONF_AVERAGING_PERIOD, DEFAULT_AVERAGING_PERIOD)): selector.NumberSelector(cast(Any, selector.NumberSelectorConfig)(min=1, max=300, mode="box", unit_of_measurement="s")),
-        vol.Required(CONF_SAFETY_RESERVE, default=_entry_current(entry, CONF_SAFETY_RESERVE, DEFAULT_SAFETY_RESERVE)): selector.NumberSelector(cast(Any, selector.NumberSelectorConfig)(min=0, max=5000, mode="box", unit_of_measurement="W")),
-        vol.Required(CONF_HYSTERESIS, default=_entry_current(entry, CONF_HYSTERESIS, DEFAULT_HYSTERESIS)): selector.NumberSelector(cast(Any, selector.NumberSelectorConfig)(min=0, max=5000, mode="box", unit_of_measurement="W")),
-        vol.Required(CONF_PAUSE_PERIOD, default=_entry_current(entry, CONF_PAUSE_PERIOD, DEFAULT_PAUSE_PERIOD)): selector.NumberSelector(cast(Any, selector.NumberSelectorConfig)(min=0, max=86400, mode="box", unit_of_measurement="s")),
-        vol.Required(CONF_GRID_LOSS_MODE, default=_entry_current(entry, CONF_GRID_LOSS_MODE, GRID_LOSS_MODE_SENSOR)): selector.SelectSelector(selector.SelectSelectorConfig(options=[selector.SelectOptionDict(value=GRID_LOSS_MODE_SENSOR, label="Grid loss sensor"), selector.SelectOptionDict(value=GRID_LOSS_MODE_THRESHOLD, label="Battery threshold")])),
-        vol.Optional(CONF_GRID_LOSS_SENSOR, default=_entry_current(entry, CONF_GRID_LOSS_SENSOR, "")): _entity_selector("binary_sensor"),
-        vol.Optional(CONF_BATTERY_SOC, default=_entry_current(entry, CONF_BATTERY_SOC, "")): _entity_selector("sensor"),
-        vol.Optional(CONF_BATTERY_THRESHOLD, default=_entry_current(entry, CONF_BATTERY_THRESHOLD, 20)): selector.NumberSelector(cast(Any, selector.NumberSelectorConfig)(min=0, max=100, mode="box", unit_of_measurement="%")),
+        vol.Required(
+            CONF_LOAD_SENSOR, default=_entry_current(entry, CONF_LOAD_SENSOR, "")
+        ): _entity_selector("sensor"),
+        vol.Optional(CONF_DEVICES, default=raw_devices): selector.ObjectSelector(),
+        vol.Required(
+            CONF_MAX_LOAD, default=_entry_current(entry, CONF_MAX_LOAD, 5000)
+        ): selector.NumberSelector(
+            cast(Any, selector.NumberSelectorConfig)(
+                min=100, max=50000, mode="box", unit_of_measurement="W"
+            )
+        ),
+        vol.Required(
+            CONF_AVERAGING_PERIOD,
+            default=_entry_current(entry, CONF_AVERAGING_PERIOD, DEFAULT_AVERAGING_PERIOD),
+        ): selector.NumberSelector(
+            cast(Any, selector.NumberSelectorConfig)(
+                min=1, max=300, mode="box", unit_of_measurement="s"
+            )
+        ),
+        vol.Required(
+            CONF_SAFETY_RESERVE,
+            default=_entry_current(entry, CONF_SAFETY_RESERVE, DEFAULT_SAFETY_RESERVE),
+        ): selector.NumberSelector(
+            cast(Any, selector.NumberSelectorConfig)(
+                min=0, max=5000, mode="box", unit_of_measurement="W"
+            )
+        ),
+        vol.Required(
+            CONF_HYSTERESIS, default=_entry_current(entry, CONF_HYSTERESIS, DEFAULT_HYSTERESIS)
+        ): selector.NumberSelector(
+            cast(Any, selector.NumberSelectorConfig)(
+                min=0, max=5000, mode="box", unit_of_measurement="W"
+            )
+        ),
+        vol.Required(
+            CONF_PAUSE_PERIOD,
+            default=_entry_current(entry, CONF_PAUSE_PERIOD, DEFAULT_PAUSE_PERIOD),
+        ): selector.NumberSelector(
+            cast(Any, selector.NumberSelectorConfig)(
+                min=0, max=86400, mode="box", unit_of_measurement="s"
+            )
+        ),
+        vol.Required(
+            CONF_GRID_LOSS_MODE,
+            default=_entry_current(entry, CONF_GRID_LOSS_MODE, GRID_LOSS_MODE_SENSOR),
+        ): selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=[
+                    selector.SelectOptionDict(
+                        value=GRID_LOSS_MODE_SENSOR, label="Grid loss sensor"
+                    ),
+                    selector.SelectOptionDict(
+                        value=GRID_LOSS_MODE_THRESHOLD, label="Battery threshold"
+                    ),
+                ]
+            )
+        ),
+        _optional_entity_key(
+            CONF_GRID_LOSS_SENSOR, _entry_current(entry, CONF_GRID_LOSS_SENSOR)
+        ): _entity_selector("binary_sensor"),
+        _optional_entity_key(
+            CONF_BATTERY_SOC, _entry_current(entry, CONF_BATTERY_SOC)
+        ): _entity_selector("sensor"),
+        vol.Optional(
+            CONF_BATTERY_THRESHOLD, default=_entry_current(entry, CONF_BATTERY_THRESHOLD, 20)
+        ): selector.NumberSelector(
+            cast(Any, selector.NumberSelectorConfig)(
+                min=0, max=100, mode="box", unit_of_measurement="%"
+            )
+        ),
     }
-    fields.update(_threshold_form_fields(_threshold_defaults(_entry_current(entry, CONF_THRESHOLDS, None))))
+    if control_entities:
+        fields[vol.Optional(CONF_PRIORITY_ORDER, default=control_entities)] = (
+            selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    include_entities=control_entities,
+                    multiple=True,
+                    reorder=True,
+                )
+            )
+        )
     return vol.Schema(fields)
+
+
+def _validate_threshold_collection(value: Any) -> list[dict[str, float]]:
+    """Validate a structured threshold list at the options boundary."""
+    if not isinstance(value, (list, tuple)) or not 1 <= len(value) <= MAX_CUSTOM_THRESHOLDS:
+        raise ValueError("invalid thresholds")
+    parsed: list[dict[str, float]] = []
+    previous = 0.0
+    for raw in value:
+        if not isinstance(raw, Mapping):
+            raise ValueError("invalid thresholds")
+        try:
+            limit, duration = validate_threshold_pair(
+                float(raw.get("power_limit", raw.get("limit_w"))),
+                float(raw.get("duration_s", raw.get("time_s"))),
+                previous,
+            )
+        except TypeError, ValueError:
+            raise ValueError("invalid thresholds") from None
+        if limit > DEFAULT_HARD_INTERLOCK:
+            raise ValueError("invalid thresholds")
+        parsed.append({"power_limit": limit, "duration_s": duration})
+        previous = limit
+    return parsed
+
+
+def _apply_priority_order(
+    devices: list[dict[str, Any]], selected_entities: Any
+) -> list[dict[str, Any]]:
+    """Apply an exact native-selector permutation to logical devices."""
+    if selected_entities is None:
+        return devices
+    if isinstance(selected_entities, str):
+        selected_entities = [selected_entities]
+    by_entity = {
+        device[CONF_DEVICE_ENTITY]: device for device in devices if device.get(CONF_DEVICE_ENTITY)
+    }
+    if (
+        not isinstance(selected_entities, list)
+        or len(selected_entities) != len(by_entity)
+        or len(set(selected_entities)) != len(selected_entities)
+        or set(selected_entities) != set(by_entity)
+    ):
+        raise ValueError("invalid priority order")
+    ordered = [by_entity[entity_id] for entity_id in selected_entities]
+    for index, device in enumerate(ordered, start=1):
+        device[CONF_PRIORITY] = index
+        device[CONF_SHED_PRIORITY] = index
+    return ordered
+
+
+def _prepare_options_submission(
+    entry: Any, user_input: Mapping[str, Any]
+) -> tuple[dict[str, Any] | None, list[dict[str, float]] | None, dict[str, str]]:
+    """Validate non-repeatable options and return a clean persisted payload."""
+    errors: dict[str, str] = {}
+    load_sensor = _sensor_entity_id(
+        user_input.get(CONF_LOAD_SENSOR, _entry_current(entry, CONF_LOAD_SENSOR, ""))
+    )
+    if load_sensor is None:
+        errors["base"] = "invalid_load_sensor"
+
+    mode = user_input.get(
+        CONF_GRID_LOSS_MODE, _entry_current(entry, CONF_GRID_LOSS_MODE, GRID_LOSS_MODE_SENSOR)
+    )
+    if mode not in (GRID_LOSS_MODE_SENSOR, GRID_LOSS_MODE_THRESHOLD):
+        errors["base"] = "invalid_grid_loss_mode"
+
+    try:
+        devices = _normalize_options_devices(
+            user_input.get(CONF_DEVICES, _entry_current(entry, CONF_DEVICES, []))
+        )
+        devices = _apply_priority_order(devices, user_input.get(CONF_PRIORITY_ORDER))
+    except ValueError:
+        devices = []
+        errors.setdefault(
+            "base",
+            "invalid_priority_order" if CONF_PRIORITY_ORDER in user_input else "invalid_devices",
+        )
+
+    grid_sensor = _entity_id(
+        user_input.get(CONF_GRID_LOSS_SENSOR, _entry_current(entry, CONF_GRID_LOSS_SENSOR, "")),
+        frozenset({"binary_sensor"}),
+    )
+    battery_soc = _sensor_entity_id(
+        user_input.get(CONF_BATTERY_SOC, _entry_current(entry, CONF_BATTERY_SOC, ""))
+    )
+    if mode == GRID_LOSS_MODE_SENSOR and grid_sensor is None:
+        errors["base"] = "missing_grid_loss_sensor"
+    if mode == GRID_LOSS_MODE_THRESHOLD and battery_soc is None:
+        errors["base"] = "missing_battery_soc_sensor"
+
+    numeric_specs: dict[str, tuple[Any, float, float]] = {
+        CONF_MAX_LOAD: (5000, 100, 50000),
+        CONF_AVERAGING_PERIOD: (DEFAULT_AVERAGING_PERIOD, 1, 300),
+        CONF_SAFETY_RESERVE: (DEFAULT_SAFETY_RESERVE, 0, 5000),
+        CONF_HYSTERESIS: (DEFAULT_HYSTERESIS, 0, 5000),
+        CONF_PAUSE_PERIOD: (DEFAULT_PAUSE_PERIOD, 0, 86400),
+    }
+    if mode == GRID_LOSS_MODE_THRESHOLD:
+        numeric_specs[CONF_BATTERY_THRESHOLD] = (20, 0, 100)
+    values: dict[str, int | float] = {}
+    for key, (default, minimum, maximum) in numeric_specs.items():
+        raw = user_input.get(key, _entry_current(entry, key, default))
+        if isinstance(raw, bool):
+            errors.setdefault("base", "invalid_numeric_setting")
+            continue
+        try:
+            converted = float(raw)
+        except TypeError, ValueError:
+            errors.setdefault("base", "invalid_numeric_setting")
+            continue
+        if not math.isfinite(converted) or not minimum <= converted <= maximum:
+            errors.setdefault("base", "invalid_numeric_setting")
+            continue
+        values[key] = int(converted) if converted.is_integer() else converted
+
+    submitted_thresholds: list[dict[str, float]] | None = None
+    if CONF_THRESHOLD_COUNT in user_input:
+        submitted_thresholds, threshold_error = _parse_threshold_input(user_input)
+        if threshold_error:
+            errors.setdefault("base", threshold_error)
+    elif CONF_THRESHOLDS in user_input:
+        try:
+            submitted_thresholds = _validate_threshold_collection(user_input[CONF_THRESHOLDS])
+        except ValueError:
+            errors.setdefault("base", "invalid_thresholds")
+
+    if errors:
+        return None, submitted_thresholds, errors
+
+    normalized: dict[str, Any] = {
+        CONF_LOAD_SENSOR: load_sensor,
+        CONF_DEVICES: devices,
+        CONF_GRID_LOSS_MODE: mode,
+    }
+    normalized.update(values)
+    if mode == GRID_LOSS_MODE_SENSOR:
+        normalized[CONF_GRID_LOSS_SENSOR] = grid_sensor
+    else:
+        normalized[CONF_BATTERY_SOC] = battery_soc
+        normalized[CONF_BATTERY_THRESHOLD] = values[CONF_BATTERY_THRESHOLD]
+    return normalized, submitted_thresholds, {}
 
 
 class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
@@ -336,6 +644,17 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
         self._pending_discovered_index = 0
         self._add_custom_device = False
         self._pause_period = DEFAULT_PAUSE_PERIOD
+        self._thresholds: list[dict[str, float]] = []
+        self._threshold_seed: list[dict[str, float]] = []
+        self._selected_grid_loss_mode: str | None = None
+        self._reconfigure_entry: Any | None = None
+        self._reconfigure_pending: dict[str, Any] | None = None
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: Any) -> "PowerOrchestratorOptionsFlow":
+        """Return the native options flow for Home Assistant's flow manager."""
+        return PowerOrchestratorOptionsFlow(config_entry)
 
     def _discovery_summary(self) -> str:
         lines = [
@@ -350,7 +669,9 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> Any:
         """Step 1: discover and select telemetry sources."""
         if user_input is None:
-            entries: Any = getattr(getattr(self.hass, "config_entries", None), "async_entries", lambda *_: [])(DOMAIN)
+            entries: Any = getattr(
+                getattr(self.hass, "config_entries", None), "async_entries", lambda *_: []
+            )(DOMAIN)
             if isinstance(entries, (list, tuple)) and entries:
                 return self.async_abort(reason="single_instance")
             self._discovered = await _discover_inputs(self.hass)
@@ -358,8 +679,12 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
                 step_id="user",
                 data_schema=vol.Schema(
                     {
-                        vol.Optional("grid_power", default=self._discovered.get("grid_power") or ""): _entity_selector("sensor"),
-                        vol.Optional(CONF_BATTERY_SOC, default=self._discovered.get(CONF_BATTERY_SOC) or ""): _entity_selector("sensor"),
+                        _optional_entity_key(
+                            "grid_power", self._discovered.get("grid_power")
+                        ): _entity_selector("sensor"),
+                        _optional_entity_key(
+                            CONF_BATTERY_SOC, self._discovered.get(CONF_BATTERY_SOC)
+                        ): _entity_selector("sensor"),
                     }
                 ),
                 description_placeholders={"summary": self._discovery_summary()},
@@ -373,37 +698,111 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             step_id="load_monitoring",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_LOAD_SENSOR, default=self._discovered.get("grid_power") or ""): _entity_selector("sensor"),
-                    vol.Required(CONF_MAX_LOAD, default=5000): selector.NumberSelector(cast(Any, selector.NumberSelectorConfig)(min=100, max=50000, mode="box", unit_of_measurement="W")),
-                    vol.Required(CONF_AVERAGING_PERIOD, default=DEFAULT_AVERAGING_PERIOD): selector.NumberSelector(cast(Any, selector.NumberSelectorConfig)(min=1, max=300, mode="box", unit_of_measurement="s")),
-                    vol.Required(CONF_SAFETY_RESERVE, default=DEFAULT_SAFETY_RESERVE): selector.NumberSelector(cast(Any, selector.NumberSelectorConfig)(min=0, max=5000, mode="box", unit_of_measurement="W")),
-                    vol.Required(CONF_HYSTERESIS, default=DEFAULT_HYSTERESIS): selector.NumberSelector(cast(Any, selector.NumberSelectorConfig)(min=0, max=5000, mode="box", unit_of_measurement="W")),
-                    **_threshold_form_fields(),
+                    vol.Required(
+                        CONF_LOAD_SENSOR, default=self._discovered.get("grid_power") or ""
+                    ): _entity_selector("sensor"),
+                    vol.Required(CONF_MAX_LOAD, default=5000): selector.NumberSelector(
+                        cast(Any, selector.NumberSelectorConfig)(
+                            min=100, max=50000, mode="box", unit_of_measurement="W"
+                        )
+                    ),
+                    vol.Required(
+                        CONF_AVERAGING_PERIOD, default=DEFAULT_AVERAGING_PERIOD
+                    ): selector.NumberSelector(
+                        cast(Any, selector.NumberSelectorConfig)(
+                            min=1, max=300, mode="box", unit_of_measurement="s"
+                        )
+                    ),
+                    vol.Required(
+                        CONF_SAFETY_RESERVE, default=DEFAULT_SAFETY_RESERVE
+                    ): selector.NumberSelector(
+                        cast(Any, selector.NumberSelectorConfig)(
+                            min=0, max=5000, mode="box", unit_of_measurement="W"
+                        )
+                    ),
+                    vol.Required(
+                        CONF_HYSTERESIS, default=DEFAULT_HYSTERESIS
+                    ): selector.NumberSelector(
+                        cast(Any, selector.NumberSelectorConfig)(
+                            min=0, max=5000, mode="box", unit_of_measurement="W"
+                        )
+                    ),
                 }
             ),
             errors=errors or {},
+            description_placeholders={
+                "sensor_name": self._discovered.get("grid_power") or "selected sensor"
+            },
         )
 
     async def async_step_load_monitoring(self, user_input: dict[str, Any] | None = None) -> Any:
         if user_input is None:
             return self._load_monitoring_form()
-        thresholds, error = _parse_threshold_input(user_input)
-        if error:
-            return self._load_monitoring_form({"base": error})
         self._discovered.update(
             {
                 "grid_power": user_input.get(CONF_LOAD_SENSOR),
                 CONF_MAX_LOAD: user_input.get(CONF_MAX_LOAD, 5000),
-                CONF_AVERAGING_PERIOD: user_input.get(CONF_AVERAGING_PERIOD, DEFAULT_AVERAGING_PERIOD),
+                CONF_AVERAGING_PERIOD: user_input.get(
+                    CONF_AVERAGING_PERIOD, DEFAULT_AVERAGING_PERIOD
+                ),
                 CONF_SAFETY_RESERVE: user_input.get(CONF_SAFETY_RESERVE, DEFAULT_SAFETY_RESERVE),
                 CONF_HYSTERESIS: user_input.get(CONF_HYSTERESIS, DEFAULT_HYSTERESIS),
-                CONF_THRESHOLDS: thresholds,
             }
         )
+        # Keep accepting the old numbered payload for callers that submit an
+        # already-rendered legacy form, while the user-facing flow uses the
+        # repeatable threshold step below.
+        if CONF_THRESHOLD_COUNT in user_input:
+            thresholds, error = _parse_threshold_input(user_input)
+            if error or thresholds is None:
+                return self._load_monitoring_form({"base": error or "invalid_thresholds"})
+            self._discovered[CONF_THRESHOLDS] = thresholds
+            return await self.async_step_devices()
+        self._thresholds = []
+        self._threshold_seed = _threshold_defaults(None)
+        return await self.async_step_thresholds()
+
+    def _threshold_form(self, errors: dict[str, str] | None = None) -> Any:
+        default = _next_threshold_default(self._thresholds, self._threshold_seed)
+        return self.async_show_form(
+            step_id="thresholds",
+            data_schema=vol.Schema(
+                _threshold_step_fields(
+                    default,
+                    add_another_default=len(self._thresholds) + 1 < len(self._threshold_seed),
+                )
+            ),
+            errors=errors or {},
+            description_placeholders={
+                "index": str(len(self._thresholds) + 1),
+                "count": str(len(self._thresholds)),
+            },
+        )
+
+    async def async_step_thresholds(self, user_input: dict[str, Any] | None = None) -> Any:
+        """Collect one or more threshold pairs without fixed UI positions."""
+        if self._reconfigure_pending is not None:
+            return await self.async_step_reconfigure_thresholds(user_input)
+        if user_input is None:
+            return self._threshold_form()
+        previous = self._thresholds[-1]["power_limit"] if self._thresholds else 0.0
+        pair, error = _parse_threshold_step(user_input, previous)
+        if pair is None or error:
+            return self._threshold_form({"base": error or "invalid_thresholds"})
+        if len(self._thresholds) >= MAX_CUSTOM_THRESHOLDS or not _threshold_add_allowed(
+            self._thresholds, pair, user_input
+        ):
+            return self._threshold_form({"base": "invalid_thresholds"})
+        self._thresholds.append(pair)
+        if user_input.get(CONF_ADD_THRESHOLD, False):
+            return await self.async_step_thresholds()
+        self._discovered[CONF_THRESHOLDS] = [dict(item) for item in self._thresholds]
         return await self.async_step_devices()
 
     def _device_name(self, candidate: Mapping[str, Any]) -> str:
-        return str(candidate.get("name") or _friendly(self.hass, str(candidate.get("entity_id") or "")))
+        return str(
+            candidate.get("name") or _friendly(self.hass, str(candidate.get("entity_id") or ""))
+        )
 
     def _device_selection_form(self, errors: dict[str, str] | None = None) -> Any:
         options = [
@@ -411,40 +810,73 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             for item in self._discovered.get("devices", [])
             if isinstance(item, dict) and item.get("entity_id")
         ]
+        discovered = ", ".join(option["label"] for option in options) or "none discovered"
         return self.async_show_form(
             step_id="devices",
             data_schema=vol.Schema(
                 {
-                    vol.Optional(CONF_DISCOVERED_DEVICES, default=[]): selector.SelectSelector(selector.SelectSelectorConfig(options=options, multiple=True)),
+                    vol.Optional(CONF_DISCOVERED_DEVICES, default=[]): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=options, multiple=True)
+                    ),
                     vol.Optional(CONF_ADD_CUSTOM_DEVICE, default=False): bool,
                 }
             ),
             errors=errors or {},
+            description_placeholders={"count": str(len(self._devices)), "discovered": discovered},
         )
 
-    def _device_config_form(self, candidate: dict[str, Any] | None = None, errors: dict[str, str] | None = None) -> Any:
+    def _device_config_form(
+        self, candidate: dict[str, Any] | None = None, errors: dict[str, str] | None = None
+    ) -> Any:
         candidate = candidate or {}
         candidate_name = self._device_name(candidate) if candidate else ""
         power_sensor = _sensor_entity_id(candidate.get("power_sensor")) or ""
         status = f"{candidate_name or 'Custom device'} — measured-power sensor: {power_sensor or 'not selected'}"
         fields: dict[Any, Any] = {
-            vol.Required(CONF_DEVICE_ENTITY): _entity_selector(["switch", "light", "input_boolean"]),
+            vol.Required(CONF_DEVICE_ENTITY): _entity_selector(
+                ["switch", "light", "input_boolean"]
+            ),
             vol.Optional(CONF_DEVICE_NAME, default=candidate_name): selector.TextSelector(),
-            vol.Required(CONF_DEVICE_EXPECTED_POWER, default=candidate.get(CONF_DEVICE_EXPECTED_POWER, 2000)): selector.NumberSelector(cast(Any, selector.NumberSelectorConfig)(min=1, max=50000, mode="box", unit_of_measurement="W")),
-            vol.Optional(CONF_DEVICE_POWER_SENSOR, default=power_sensor): _entity_selector("sensor"),
-            vol.Optional(CONF_DEVICE_ACTUATORS, default=list(candidate.get(CONF_DEVICE_ACTUATORS, ()) or ())): _entity_selector(["switch", "light", "input_boolean", "climate"], multiple=True),
+            vol.Required(
+                CONF_DEVICE_EXPECTED_POWER, default=candidate.get(CONF_DEVICE_EXPECTED_POWER, 2000)
+            ): selector.NumberSelector(
+                cast(Any, selector.NumberSelectorConfig)(
+                    min=1, max=50000, mode="box", unit_of_measurement="W"
+                )
+            ),
+            _optional_entity_key(CONF_DEVICE_POWER_SENSOR, power_sensor): _entity_selector(
+                "sensor"
+            ),
+            vol.Optional(
+                CONF_DEVICE_ACTUATORS, default=list(candidate.get(CONF_DEVICE_ACTUATORS, ()) or ())
+            ): _entity_selector(["switch", "light", "input_boolean", "climate"], multiple=True),
         }
         if not candidate:
             fields[vol.Optional(CONF_ADD_ANOTHER, default=False)] = bool
-        return self.async_show_form(step_id="devices", data_schema=vol.Schema(fields), errors=errors or {}, description_placeholders={"count": str(len(self._devices)), "discovered": status})
+        return self.async_show_form(
+            step_id="devices",
+            data_schema=vol.Schema(fields),
+            errors=errors or {},
+            description_placeholders={"count": str(len(self._devices)), "discovered": status},
+        )
 
-    def _build_device(self, user_input: dict[str, Any], candidate: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _build_device(
+        self, user_input: dict[str, Any], candidate: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         candidate = candidate or {}
-        entity = _entity_id(user_input.get(CONF_DEVICE_ENTITY), frozenset({"switch", "light", "input_boolean"}))
+        entity = _entity_id(
+            user_input.get(CONF_DEVICE_ENTITY), frozenset({"switch", "light", "input_boolean"})
+        )
         if entity is None:
             raise ValueError("control entity must be valid")
-        name = user_input.get(CONF_DEVICE_NAME) or (self._device_name(candidate) if candidate else _friendly(self.hass, entity))
-        power_sensor = _sensor_entity_id(user_input.get(CONF_DEVICE_POWER_SENSOR)) if CONF_DEVICE_POWER_SENSOR in user_input else _sensor_entity_id(candidate.get("power_sensor"))
+        name = user_input.get(CONF_DEVICE_NAME) or (
+            self._device_name(candidate) if candidate else _friendly(self.hass, entity)
+        )
+        power_sensor = (
+            _sensor_entity_id(user_input.get(CONF_DEVICE_POWER_SENSOR))
+            if CONF_DEVICE_POWER_SENSOR in user_input
+            else _sensor_entity_id(candidate.get("power_sensor"))
+        )
         raw_actuators = user_input.get(CONF_DEVICE_ACTUATORS, []) or []
         actuator_values: list[str] = []
         if isinstance(raw_actuators, (list, tuple)):
@@ -468,7 +900,11 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
         if self._devices_phase == "selection":
             if user_input is None:
                 return self._device_selection_form()
-            candidates = {item["entity_id"]: item for item in self._discovered.get("devices", []) if isinstance(item, dict) and item.get("entity_id")}
+            candidates = {
+                item["entity_id"]: item
+                for item in self._discovered.get("devices", [])
+                if isinstance(item, dict) and item.get("entity_id")
+            }
             selected = user_input.get(CONF_DISCOVERED_DEVICES, []) or []
             if isinstance(selected, str):
                 selected = [selected]
@@ -511,62 +947,172 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
 
     @staticmethod
     def _priority_field(index: int) -> str:
+        """Legacy numbered priority field accepted from older callers."""
         return f"priority_{index + 1}"
 
     def _priority_form(self, errors: dict[str, str] | None = None) -> Any:
-        options = [selector.SelectOptionDict(value=d[CONF_DEVICE_ID], label=d.get(CONF_DEVICE_NAME, d[CONF_DEVICE_ENTITY])) for d in self._devices]
+        control_entities = [
+            str(device[CONF_DEVICE_ENTITY])
+            for device in self._devices
+            if device.get(CONF_DEVICE_ENTITY)
+        ]
         fields: dict[Any, Any] = {}
-        for index, device in enumerate(self._devices):
-            fields[vol.Required(self._priority_field(index), default=device[CONF_DEVICE_ID])] = selector.SelectSelector(selector.SelectSelectorConfig(options=options))
-        fields[vol.Optional(CONF_PAUSE_PERIOD, default=DEFAULT_PAUSE_PERIOD)] = selector.NumberSelector(cast(Any, selector.NumberSelectorConfig)(min=0, max=86400, mode="box", unit_of_measurement="s"))
-        return self.async_show_form(step_id="priority", data_schema=vol.Schema(fields), errors=errors or {}, description_placeholders={"device_list": "\n".join(f"{i + 1}. {d.get(CONF_DEVICE_NAME, d.get(CONF_DEVICE_ENTITY))}" for i, d in enumerate(self._devices))})
+        if control_entities:
+            fields[vol.Required(CONF_PRIORITY_ORDER, default=control_entities)] = (
+                selector.EntitySelector(
+                    selector.EntitySelectorConfig(
+                        include_entities=control_entities,
+                        multiple=True,
+                        reorder=True,
+                    )
+                )
+            )
+        fields[vol.Optional(CONF_PAUSE_PERIOD, default=DEFAULT_PAUSE_PERIOD)] = (
+            selector.NumberSelector(
+                cast(Any, selector.NumberSelectorConfig)(
+                    min=0,
+                    max=86400,
+                    mode="box",
+                    unit_of_measurement="s",
+                )
+            )
+        )
+        return self.async_show_form(
+            step_id="priority",
+            data_schema=vol.Schema(fields),
+            errors=errors or {},
+            description_placeholders={
+                "device_list": "\n".join(
+                    f"{i + 1}. {d.get(CONF_DEVICE_NAME, d.get(CONF_DEVICE_ENTITY))}"
+                    for i, d in enumerate(self._devices)
+                )
+                or "none configured"
+            },
+        )
 
     async def async_step_priority(self, user_input: dict[str, Any] | None = None) -> Any:
         if user_input is None:
             return self._priority_form()
-        selected = [user_input.get(self._priority_field(index)) for index in range(len(self._devices))]
-        by_id = {d[CONF_DEVICE_ID]: d for d in self._devices}
-        if len(selected) != len(by_id) or set(selected) != set(by_id):
-            return self._priority_form({"base": "invalid_priority_order"})
-        self._devices = [by_id[device_id] for device_id in selected]
+        if not self._devices:
+            self._pause_period = user_input.get(CONF_PAUSE_PERIOD, DEFAULT_PAUSE_PERIOD)
+            return await self.async_step_grid_loss()
+
+        selected_entities = user_input.get(CONF_PRIORITY_ORDER)
+        if selected_entities is not None:
+            if isinstance(selected_entities, str):
+                selected_entities = [selected_entities]
+            by_entity = {
+                device.get(CONF_DEVICE_ENTITY): device
+                for device in self._devices
+                if device.get(CONF_DEVICE_ENTITY)
+            }
+            if (
+                not isinstance(selected_entities, list)
+                or len(selected_entities) != len(by_entity)
+                or len(set(selected_entities)) != len(selected_entities)
+                or set(selected_entities) != set(by_entity)
+            ):
+                return self._priority_form({"base": "invalid_priority_order"})
+            self._devices = [by_entity[entity_id] for entity_id in selected_entities]
+        else:
+            legacy_ids = [
+                user_input.get(self._priority_field(index)) for index in range(len(self._devices))
+            ]
+            by_id = {device.get(CONF_DEVICE_ID): device for device in self._devices}
+            if (
+                len(legacy_ids) != len(by_id)
+                or len(set(legacy_ids)) != len(legacy_ids)
+                or set(legacy_ids) != set(by_id)
+            ):
+                return self._priority_form({"base": "invalid_priority_order"})
+            self._devices = [by_id[device_id] for device_id in legacy_ids]
+
         for index, device in enumerate(self._devices, start=1):
             device[CONF_PRIORITY] = index
             device[CONF_SHED_PRIORITY] = index
         self._pause_period = user_input.get(CONF_PAUSE_PERIOD, DEFAULT_PAUSE_PERIOD)
         return await self.async_step_grid_loss()
 
+    def _battery_info(self) -> str:
+        soc = self._discovered.get(CONF_BATTERY_SOC)
+        if soc:
+            return f"Battery SoC discovered: {soc}. It is used only in battery-threshold mode."
+        return "Battery SoC is optional unless battery-threshold mode is selected."
+
     def _grid_loss_form(self, errors: dict[str, str] | None = None) -> Any:
-        soc = self._discovered.get(CONF_BATTERY_SOC) or ""
+        """Select the grid-loss mode before rendering mode-specific fields."""
         return self.async_show_form(
             step_id="grid_loss",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_GRID_LOSS_MODE, default=GRID_LOSS_MODE_SENSOR): selector.SelectSelector(selector.SelectSelectorConfig(options=[selector.SelectOptionDict(value=GRID_LOSS_MODE_SENSOR, label="Grid loss sensor"), selector.SelectOptionDict(value=GRID_LOSS_MODE_THRESHOLD, label="Battery threshold")])),
-                    vol.Optional(CONF_GRID_LOSS_SENSOR): _entity_selector("binary_sensor"),
-                    vol.Optional(CONF_BATTERY_SOC, default=soc): _entity_selector("sensor"),
-                    vol.Optional(CONF_BATTERY_THRESHOLD, default=20): selector.NumberSelector(cast(Any, selector.NumberSelectorConfig)(min=0, max=100, mode="box", unit_of_measurement="%")),
+                    vol.Required(
+                        CONF_GRID_LOSS_MODE,
+                        default=self._selected_grid_loss_mode or GRID_LOSS_MODE_SENSOR,
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(
+                                    value=GRID_LOSS_MODE_SENSOR, label="Grid loss sensor"
+                                ),
+                                selector.SelectOptionDict(
+                                    value=GRID_LOSS_MODE_THRESHOLD, label="Battery threshold"
+                                ),
+                            ]
+                        )
+                    ),
                 }
             ),
             errors=errors or {},
+            description_placeholders={"battery_info": self._battery_info()},
         )
 
-    async def async_step_grid_loss(self, user_input: dict[str, Any] | None = None) -> Any:
-        if user_input is None:
-            return self._grid_loss_form()
-        mode = user_input.get(CONF_GRID_LOSS_MODE, GRID_LOSS_MODE_SENSOR)
-        grid_sensor = _entity_id(user_input.get(CONF_GRID_LOSS_SENSOR), frozenset({"binary_sensor"}))
-        battery_soc = _sensor_entity_id(user_input.get(CONF_BATTERY_SOC) or self._discovered.get(CONF_BATTERY_SOC))
+    def _grid_loss_source_form(self, mode: str, errors: dict[str, str] | None = None) -> Any:
+        fields: dict[Any, Any] = {}
+        if mode == GRID_LOSS_MODE_SENSOR:
+            fields[vol.Required(CONF_GRID_LOSS_SENSOR)] = _entity_selector("binary_sensor")
+        else:
+            soc = self._discovered.get(CONF_BATTERY_SOC)
+            if soc:
+                fields[vol.Required(CONF_BATTERY_SOC, default=soc)] = _entity_selector("sensor")
+            else:
+                fields[vol.Required(CONF_BATTERY_SOC)] = _entity_selector("sensor")
+            fields[vol.Required(CONF_BATTERY_THRESHOLD, default=20)] = selector.NumberSelector(
+                cast(Any, selector.NumberSelectorConfig)(
+                    min=0,
+                    max=100,
+                    mode="box",
+                    unit_of_measurement="%",
+                )
+            )
+        return self.async_show_form(
+            step_id="grid_loss_source",
+            data_schema=vol.Schema(fields),
+            errors=errors or {},
+            description_placeholders={"battery_info": self._battery_info()},
+        )
+
+    async def _create_grid_loss_entry(self, user_input: dict[str, Any], mode: str) -> Any:
+        grid_sensor = _entity_id(
+            user_input.get(CONF_GRID_LOSS_SENSOR), frozenset({"binary_sensor"})
+        )
+        battery_soc = _sensor_entity_id(
+            user_input.get(CONF_BATTERY_SOC) or self._discovered.get(CONF_BATTERY_SOC)
+        )
         if mode == GRID_LOSS_MODE_SENSOR and grid_sensor is None:
-            return self._grid_loss_form({"base": "missing_grid_loss_sensor"})
+            return self._grid_loss_source_form(mode, {"base": "missing_grid_loss_sensor"})
         if mode == GRID_LOSS_MODE_THRESHOLD and battery_soc is None:
-            return self._grid_loss_form({"base": "missing_battery_soc_sensor"})
+            return self._grid_loss_source_form(mode, {"base": "missing_battery_soc_sensor"})
         data = {
             CONF_LOAD_SENSOR: self._discovered.get("grid_power"),
             CONF_MAX_LOAD: self._discovered.get(CONF_MAX_LOAD, 5000),
-            CONF_AVERAGING_PERIOD: self._discovered.get(CONF_AVERAGING_PERIOD, DEFAULT_AVERAGING_PERIOD),
+            CONF_AVERAGING_PERIOD: self._discovered.get(
+                CONF_AVERAGING_PERIOD, DEFAULT_AVERAGING_PERIOD
+            ),
             CONF_SAFETY_RESERVE: self._discovered.get(CONF_SAFETY_RESERVE, DEFAULT_SAFETY_RESERVE),
             CONF_HYSTERESIS: self._discovered.get(CONF_HYSTERESIS, DEFAULT_HYSTERESIS),
-            CONF_THRESHOLDS: self._discovered.get(CONF_THRESHOLDS, [dict(item) for item in _CANONICAL_THRESHOLD_INPUTS]),
+            CONF_THRESHOLDS: self._discovered.get(
+                CONF_THRESHOLDS, [dict(item) for item in _CANONICAL_THRESHOLD_INPUTS]
+            ),
             CONF_DEVICES: self._devices,
             CONF_PAUSE_PERIOD: self._pause_period,
             CONF_GRID_LOSS_MODE: mode,
@@ -578,6 +1124,42 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             data[CONF_BATTERY_THRESHOLD] = user_input.get(CONF_BATTERY_THRESHOLD, 20)
         return self.async_create_entry(title="Power Orchestrator", data=data)
 
+    async def async_step_grid_loss(self, user_input: dict[str, Any] | None = None) -> Any:
+        if user_input is None:
+            return self._grid_loss_form()
+        mode = user_input.get(CONF_GRID_LOSS_MODE, GRID_LOSS_MODE_SENSOR)
+        if mode not in (GRID_LOSS_MODE_SENSOR, GRID_LOSS_MODE_THRESHOLD):
+            return self._grid_loss_form({"base": "invalid_grid_loss_mode"})
+        self._selected_grid_loss_mode = mode
+        # Accept the old one-screen submission shape for compatibility with
+        # existing callers and migrations.
+        if CONF_GRID_LOSS_SENSOR in user_input or CONF_BATTERY_SOC in user_input:
+            return await self._create_grid_loss_entry(user_input, mode)
+        return self._grid_loss_source_form(mode)
+
+    async def async_step_grid_loss_source(self, user_input: dict[str, Any] | None = None) -> Any:
+        mode = self._selected_grid_loss_mode or GRID_LOSS_MODE_SENSOR
+        if user_input is None:
+            return self._grid_loss_source_form(mode)
+        return await self._create_grid_loss_entry(user_input, mode)
+
+    def _reconfigure_threshold_form(self, errors: dict[str, str] | None = None) -> Any:
+        default = _next_threshold_default(self._thresholds, self._threshold_seed)
+        return self.async_show_form(
+            step_id="thresholds",
+            data_schema=vol.Schema(
+                _threshold_step_fields(
+                    default,
+                    add_another_default=len(self._thresholds) + 1 < len(self._threshold_seed),
+                )
+            ),
+            errors=errors or {},
+            description_placeholders={
+                "index": str(len(self._thresholds) + 1),
+                "count": str(len(self._thresholds)),
+            },
+        )
+
     async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> Any:
         entry = self._get_reconfigure_entry()
         if entry is None:
@@ -585,19 +1167,62 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
         schema = _options_schema_for_entry(entry)
         if user_input is None:
             return self.async_show_form(step_id="reconfigure", data_schema=schema)
-        options = PowerOrchestratorOptionsFlow(entry)
-        result = await options.async_step_init(user_input)
-        if result.get("type") != "create_entry":
-            return self.async_show_form(step_id="reconfigure", data_schema=schema, errors=result.get("errors", {}))
-        return self.async_update_and_abort(entry, data=result.get("data", {}), options={}, reason="reconfigure_successful")
+        prepared, submitted_thresholds, errors = _prepare_options_submission(entry, user_input)
+        if errors or prepared is None:
+            return self.async_show_form(
+                step_id="reconfigure",
+                data_schema=schema,
+                errors=errors,
+            )
+        self._reconfigure_entry = entry
+        if submitted_thresholds is not None:
+            prepared[CONF_THRESHOLDS] = submitted_thresholds
+            return self.async_update_and_abort(
+                entry,
+                data=prepared,
+                options={},
+                reason="reconfigure_successful",
+            )
+        self._reconfigure_pending = prepared
+        self._thresholds = []
+        self._threshold_seed = _threshold_defaults(_entry_current(entry, CONF_THRESHOLDS, None))
+        return self._reconfigure_threshold_form()
+
+    async def async_step_reconfigure_thresholds(
+        self, user_input: dict[str, Any] | None = None
+    ) -> Any:
+        if self._reconfigure_entry is None or self._reconfigure_pending is None:
+            return self.async_abort(reason="entry_not_loaded")
+        if user_input is None:
+            return self._reconfigure_threshold_form()
+        previous = self._thresholds[-1]["power_limit"] if self._thresholds else 0.0
+        pair, error = _parse_threshold_step(user_input, previous)
+        if pair is None or error:
+            return self._reconfigure_threshold_form({"base": error or "invalid_thresholds"})
+        if len(self._thresholds) >= MAX_CUSTOM_THRESHOLDS or not _threshold_add_allowed(
+            self._thresholds, pair, user_input
+        ):
+            return self._reconfigure_threshold_form({"base": "invalid_thresholds"})
+        self._thresholds.append(pair)
+        if user_input.get(CONF_ADD_THRESHOLD, False):
+            return self._reconfigure_threshold_form()
+        self._reconfigure_pending[CONF_THRESHOLDS] = [dict(item) for item in self._thresholds]
+        return self.async_update_and_abort(
+            self._reconfigure_entry,
+            data=self._reconfigure_pending,
+            options={},
+            reason="reconfigure_successful",
+        )
 
 
 class PowerOrchestratorOptionsFlow(config_entries.OptionsFlow):
     """Validate runtime/safety options without any activation fields."""
 
     def __init__(self, entry: Any) -> None:
-        super().__init__(entry)  # type: ignore[call-arg]
         self._entry = entry
+        self._pending: dict[str, Any] | None = None
+        self._thresholds: list[dict[str, float]] = []
+        self._threshold_seed: list[dict[str, float]] = []
 
     def _current(self, key: str, default: Any = None) -> Any:
         return _entry_current(self._entry, key, default)
@@ -605,62 +1230,66 @@ class PowerOrchestratorOptionsFlow(config_entries.OptionsFlow):
     def _options_schema(self) -> vol.Schema:
         return _options_schema_for_entry(self._entry)
 
+    def _threshold_form(self, errors: dict[str, str] | None = None) -> Any:
+        default = _next_threshold_default(self._thresholds, self._threshold_seed)
+        return self.async_show_form(
+            step_id="thresholds",
+            data_schema=vol.Schema(
+                _threshold_step_fields(
+                    default,
+                    add_another_default=len(self._thresholds) + 1 < len(self._threshold_seed),
+                )
+            ),
+            errors=errors or {},
+            description_placeholders={
+                "index": str(len(self._thresholds) + 1),
+                "count": str(len(self._thresholds)),
+            },
+        )
+
+    def _finish(self) -> Any:
+        if self._pending is None:
+            return self.async_abort(reason="invalid_options_state")
+        self._pending[CONF_THRESHOLDS] = [dict(item) for item in self._thresholds]
+        return self.async_create_entry(title="", data=self._pending)
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> Any:
         if user_input is None:
             return self.async_show_form(step_id="init", data_schema=self._options_schema())
-        errors: dict[str, str] = {}
-        load_sensor = _sensor_entity_id(user_input.get(CONF_LOAD_SENSOR, self._current(CONF_LOAD_SENSOR, "")))
-        if load_sensor is None:
-            errors["base"] = "invalid_load_sensor"
-        mode = user_input.get(CONF_GRID_LOSS_MODE, self._current(CONF_GRID_LOSS_MODE, GRID_LOSS_MODE_SENSOR))
-        grid_sensor = _entity_id(user_input.get(CONF_GRID_LOSS_SENSOR, self._current(CONF_GRID_LOSS_SENSOR, "")), frozenset({"binary_sensor"}))
-        battery_soc = _sensor_entity_id(user_input.get(CONF_BATTERY_SOC, self._current(CONF_BATTERY_SOC, "")))
-        if mode == GRID_LOSS_MODE_SENSOR and grid_sensor is None:
-            errors["base"] = "missing_grid_loss_sensor"
-        if mode == GRID_LOSS_MODE_THRESHOLD and battery_soc is None:
-            errors["base"] = "missing_battery_soc_sensor"
-        try:
-            devices = _normalize_options_devices(user_input.get(CONF_DEVICES, self._current(CONF_DEVICES, [])))
-        except ValueError:
-            devices = []
-            errors.setdefault("base", "invalid_devices")
-        thresholds, threshold_error = _parse_threshold_input(user_input, _threshold_defaults(self._current(CONF_THRESHOLDS, None)))
-        if threshold_error:
-            errors.setdefault("base", threshold_error)
-        numeric = {
-            CONF_MAX_LOAD: (5000, 100, 50000),
-            CONF_AVERAGING_PERIOD: (DEFAULT_AVERAGING_PERIOD, 1, 300),
-            CONF_SAFETY_RESERVE: (DEFAULT_SAFETY_RESERVE, 0, 5000),
-            CONF_HYSTERESIS: (DEFAULT_HYSTERESIS, 0, 5000),
-            CONF_PAUSE_PERIOD: (DEFAULT_PAUSE_PERIOD, 0, 86400),
-            CONF_BATTERY_THRESHOLD: (20, 0, 100),
-        }
-        values: dict[str, int | float] = {}
-        for key, (default, minimum, maximum) in numeric.items():
-            raw = user_input.get(key, self._current(key, default))
-            if isinstance(raw, bool):
-                errors.setdefault("base", "invalid_numeric_setting")
-                continue
-            try:
-                converted = float(raw)
-            except (TypeError, ValueError):
-                errors.setdefault("base", "invalid_numeric_setting")
-                continue
-            if not math.isfinite(converted) or not minimum <= converted <= maximum:
-                errors.setdefault("base", "invalid_numeric_setting")
-                continue
-            values[key] = int(converted) if converted.is_integer() else converted
-        if errors:
-            return self.async_show_form(step_id="init", data_schema=self._options_schema(), errors=errors)
-        normalized = dict(user_input)
-        normalized.update(values)
-        normalized[CONF_LOAD_SENSOR] = load_sensor
-        normalized[CONF_DEVICES] = devices
-        normalized[CONF_THRESHOLDS] = thresholds
-        normalized[CONF_GRID_LOSS_MODE] = mode
-        normalized[CONF_GRID_LOSS_SENSOR] = grid_sensor if mode == GRID_LOSS_MODE_SENSOR else None
-        normalized[CONF_BATTERY_SOC] = battery_soc if mode == GRID_LOSS_MODE_THRESHOLD else None
-        return self.async_create_entry(title="", data=normalized)
+        prepared, submitted_thresholds, errors = _prepare_options_submission(
+            self._entry, user_input
+        )
+        if errors or prepared is None:
+            return self.async_show_form(
+                step_id="init",
+                data_schema=self._options_schema(),
+                errors=errors,
+            )
+        if submitted_thresholds is not None:
+            prepared[CONF_THRESHOLDS] = submitted_thresholds
+            return self.async_create_entry(title="", data=prepared)
+        self._pending = prepared
+        self._thresholds = []
+        self._threshold_seed = _threshold_defaults(self._current(CONF_THRESHOLDS, None))
+        return self._threshold_form()
+
+    async def async_step_thresholds(self, user_input: dict[str, Any] | None = None) -> Any:
+        if self._pending is None:
+            return self.async_abort(reason="invalid_options_state")
+        if user_input is None:
+            return self._threshold_form()
+        previous = self._thresholds[-1]["power_limit"] if self._thresholds else 0.0
+        pair, error = _parse_threshold_step(user_input, previous)
+        if pair is None or error:
+            return self._threshold_form({"base": error or "invalid_thresholds"})
+        if len(self._thresholds) >= MAX_CUSTOM_THRESHOLDS or not _threshold_add_allowed(
+            self._thresholds, pair, user_input
+        ):
+            return self._threshold_form({"base": "invalid_thresholds"})
+        self._thresholds.append(pair)
+        if user_input.get(CONF_ADD_THRESHOLD, False):
+            return self._threshold_form()
+        return self._finish()
 
 
 @callback
