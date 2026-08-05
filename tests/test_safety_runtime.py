@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -85,6 +85,38 @@ def test_numeric_load_ignores_timestamp_age_but_unavailable_state_blocks() -> No
     assert coordinator._read_load_sensor() == 0.0
     assert coordinator.load_sensor_valid is False
     assert coordinator.load_sensor_reason == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_available_unchanged_aggregate_state_remains_usable_after_window() -> None:
+    """A valid unchanged HA state is not aged out by the averaging window."""
+    coordinator = _coordinator(execution_mode="observe")
+    coordinator._refresh_device_states = AsyncMock()
+    report = datetime.fromtimestamp(100, timezone.utc)
+    grid_state = SimpleNamespace(
+        state="on",
+        attributes={},
+        last_reported=report,
+        last_updated=report,
+    )
+    load_state = SimpleNamespace(
+        state="0",
+        attributes={"unit_of_measurement": "W"},
+        last_reported=report,
+        last_updated=report,
+    )
+    coordinator.hass.states.get.side_effect = lambda entity_id: (
+        grid_state if entity_id == "binary_sensor.grid" else load_state
+    )
+    clock = [1000.0]
+    with patch("power_orchestrator.coordinator.time.time", side_effect=lambda: clock[0]):
+        await coordinator._evaluate()
+        clock[0] += coordinator._averaging_period + 1
+        await coordinator._evaluate()
+        assert coordinator.load_sensor_valid is True
+        assert coordinator.current_load == 0.0
+        assert coordinator.average_load == 0.0
+        assert coordinator.status != STATUS_SAFETY_BLOCKED
 
 
 def test_zero_measured_power_is_valid_when_numeric_even_if_old_report() -> None:

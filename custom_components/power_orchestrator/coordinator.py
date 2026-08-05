@@ -357,8 +357,12 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         await self._refresh_device_states()
         load = self._read_load_sensor()
         if self._load_sensor_valid:
-            if self._accept_load_report():
-                self._append_load_sample(load)
+            self._accept_load_report()
+            # Sampling an available state is independent from the generation
+            # fence. ``last_reported`` only gates causal post-shed
+            # reconciliation; it must not make an unchanged valid reading
+            # disappear from the averaging window.
+            self._append_load_sample(load)
             pending = self._policy_engine.runtime.pending_post_shed_generation
             if pending is not None:
                 if self._policy_engine.runtime.pending_post_shed_after_reported_at is None:

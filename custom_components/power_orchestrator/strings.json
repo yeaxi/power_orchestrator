@@ -103,7 +103,7 @@
         "data_description": {
           "load_sensor": "Authoritative whole-house power sensor. Available, non-negative readings in watts drive shedding decisions; unavailable, unknown, or unsupported-unit readings block planner actions.",
           "max_load": "Hard average-load ceiling in watts. If the average exceeds it, the coordinator sheds one lowest-priority active device per evaluation cycle.",
-          "averaging_period": "Time window used to calculate average load. A longer window smooths short spikes, but it never extends the separate safety-input availability limit.",
+          "averaging_period": "Time window used to calculate average load. A longer window smooths short spikes; it does not change the source entity's semantic availability.",
           "safety_reserve": "Watts kept unused below the maximum load to protect headroom for unexpected demand.",
           "hysteresis": "Additional watt margin kept after a shedding decision to reduce on/off cycling; it never enables a device.",
           "threshold_count": "How many custom power-limit and time pairs to use. Maximum 10; power limits must be strictly increasing.",
@@ -219,7 +219,7 @@
         "data_description": {
           "load_sensor": "Authoritative whole-house power sensor. Invalid, unavailable, unknown, or wrong-unit values block planner actions.",
           "max_load": "Hard total-load ceiling in watts used for bounded shedding decisions.",
-          "averaging_period": "Average-load window; it never extends independent safety availability limits.",
+          "averaging_period": "Average-load window; it does not change source-entity semantic availability. Unavailable or unknown input blocks normal planner actions.",
           "safety_reserve": "Watts held back below the maximum to protect headroom during shedding.",
           "hysteresis": "Additional margin kept after a shedding decision; it never enables a device.",
           "pause_period": "Seconds a shed device remains paused to prevent rapid repeated shedding.",

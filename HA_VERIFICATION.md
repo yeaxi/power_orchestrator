@@ -12,7 +12,7 @@
 - `auto`/`off` і `observe`/`live` мають чіткі межі;
 - перевищення ліміту виконує bounded stop з readback;
 - аварійний grid/battery стан виконує all-stop path;
-- unknown/unavailable/invalid input не authorizes фізичну дію;
+- invalid aggregate/device input не authorizes ordinary physical action; unavailable/off grid source дозволяє лише emergency stop path для відомих ON loads;
 - після restart валідний persisted mode відновлюється без безумовного скидання;
 - немає PV/forecast admission, normal enable або automatic re-enable surface.
 

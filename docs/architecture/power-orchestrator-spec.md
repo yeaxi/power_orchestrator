@@ -34,7 +34,7 @@ Before a normal decision, the coordinator validates:
 - managed-device relay and optional actuator states;
 - optional measured-power sensors, including units and source-reported availability.
 
-Unknown, unavailable, contradictory, non-finite, negative, or incorrectly-unitized telemetry fails closed. It never becomes a synthetic `0 W` value and never grants permission for a physical action.
+Unknown, unavailable, contradictory, non-finite, negative, or incorrectly-unitized aggregate/device telemetry fails closed for normal decisions. It never becomes a synthetic `0 W` value or grants permission for a normal physical action. An unavailable, OFF, or otherwise unsafe grid source selects only the emergency stop path for known-on loads; it never authorizes a normal action.
 
 ## Evaluation order
 
