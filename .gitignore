@@ -33,3 +33,23 @@ dist/
 *.swo
 
 # Project-specific AGENTS.md is part of the tracked project context
+
+# Credential-bearing and local backup artifacts
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.sqlite
+*.sqlite3
+*.db
+*.db-*
+*.log
+*.zip
+*.tar
+*.tar.gz
+.secrets/
+secrets/
+credentials/
+**/auth.json
