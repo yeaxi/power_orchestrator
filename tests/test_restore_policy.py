@@ -38,6 +38,17 @@ def test_from_mapping_parses_enabled_config() -> None:
     assert config.cooldown_s == 600.0
 
 
+def test_from_mapping_defaults_missing_timings_conservatively() -> None:
+    # An enabled policy that omits dwell/cooldown must NOT be able to restore on
+    # the first cycle; missing timings fall back to the conservative defaults.
+    config = RestoreConfig.from_mapping(
+        {"restore_enabled": True, "restore_threshold": 4000, "restore_hysteresis": 200}
+    )
+    assert config.enabled is True
+    assert config.dwell_s >= 300.0
+    assert config.cooldown_s >= 600.0
+
+
 def test_from_mapping_disables_on_degenerate_ceiling() -> None:
     # hysteresis >= threshold means the ceiling can never accrue headroom.
     config = RestoreConfig.from_mapping(

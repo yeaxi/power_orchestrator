@@ -10,6 +10,9 @@ from typing import Any, Mapping
 from .const import (
     DEFAULT_HARD_INTERLOCK,
     DEFAULT_POLICY_VERSION,
+    DEFAULT_RESTORE_COOLDOWN,
+    DEFAULT_RESTORE_DWELL,
+    DEFAULT_RESTORE_HYSTERESIS,
     DEFAULT_SAFETY_RESERVE,
     DEFAULT_SHED_CRITICAL_DURATION,
     DEFAULT_SHED_CRITICAL_LIMIT,
@@ -286,9 +289,12 @@ class RestoreConfig:
 
         enabled = bool(data.get("restore_enabled", False))
         threshold = number("restore_threshold", 0.0)
-        hysteresis = number("restore_hysteresis", 0.0)
-        dwell = number("restore_dwell", 0.0, maximum=MAX_POLICY_DURATION_S)
-        cooldown = number("restore_cooldown", 0.0, maximum=MAX_POLICY_DURATION_S)
+        # Missing timings fall back to conservative defaults (not 0) so a
+        # partially-specified but enabled policy cannot restore on the first
+        # cycle. Explicit 0 is still honored for tests/operators who opt into it.
+        hysteresis = number("restore_hysteresis", DEFAULT_RESTORE_HYSTERESIS)
+        dwell = number("restore_dwell", DEFAULT_RESTORE_DWELL, maximum=MAX_POLICY_DURATION_S)
+        cooldown = number("restore_cooldown", DEFAULT_RESTORE_COOLDOWN, maximum=MAX_POLICY_DURATION_S)
         # A restore ceiling that is not positive can never accrue headroom;
         # disable rather than accept a degenerate configuration.
         if threshold - hysteresis <= 0:
