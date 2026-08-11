@@ -87,3 +87,37 @@ authorize_shedding:
       required: true
       selector:
         boolean: {}
+
+authorize_restore:
+  name: Arm guarded restore
+  description: "Arm the fail-closed restore lane so the planner may re-enable loads it shed, once safe headroom returns. Arming performs no physical action and requires live execution with auto mode. Disarmed automatically by observe/off."
+  fields:
+    confirm_restore:
+      name: Confirm restore ownership
+      description: "Must be true to arm guarded restore of planner-shed loads."
+      required: true
+      selector:
+        boolean: {}
+
+request_restore:
+  name: Request guarded load restore
+  description: "Request a guarded re-enable of one load the planner previously shed. Only planner-shed, opted-in loads are eligible; the integration never starts a never-shed or PV/forecast-admitted load."
+  fields:
+    device_id:
+      name: Logical device ID
+      description: "Stable configured device_id of a load the planner shed."
+      required: true
+      selector:
+        text: {}
+    confirm_restore:
+      name: Confirm restore
+      description: "Must be true to request a guarded restore."
+      required: true
+      selector:
+        boolean: {}
+    source:
+      name: Request source
+      description: "Audit label for the caller."
+      required: false
+      selector:
+        text: {}
