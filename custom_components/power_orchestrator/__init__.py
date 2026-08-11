@@ -259,7 +259,7 @@ def _safe_number(value: Any, *, default: float, minimum: float, maximum: float) 
         return default
     try:
         converted = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return default
     if not math.isfinite(converted) or not minimum <= converted <= maximum:
         return default

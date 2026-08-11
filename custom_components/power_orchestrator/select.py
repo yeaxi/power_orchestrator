@@ -20,6 +20,10 @@ except ImportError:  # pragma: no cover - local Home Assistant test doubles
 from .const import DOMAIN, MODE_AUTO, MODE_OFF
 from .coordinator import PowerOrchestratorCoordinator
 
+# The single mode select drives actions through the coordinator, not direct
+# per-entity I/O, so its updates do not need to be serialized.
+PARALLEL_UPDATES = 0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,

@@ -5,7 +5,7 @@
   "config_flow": true,
   "documentation": "https://github.com/yeaxi/power_orchestrator",
   "issue_tracker": "https://github.com/yeaxi/power_orchestrator/issues",
-  "integration_type": "hub",
+  "integration_type": "service",
   "quality_scale": "platinum",
   "iot_class": "local_polling",
   "requirements": [],

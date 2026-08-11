@@ -306,7 +306,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return False
         try:
             soc = float(getattr(state, "state", ""))
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return False
         return math.isfinite(soc) and 0 <= soc <= 100
 
@@ -334,7 +334,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return False
         try:
             soc = float(getattr(state, "state", ""))
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return False
         threshold = self._battery_threshold
         if threshold is None:
@@ -552,7 +552,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return
         try:
             measured = float(raw)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             device.measured_power_reason = "non_numeric"
             return
         if not math.isfinite(measured) or measured < 0:
@@ -592,7 +592,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         normalized_unit = str(unit).strip().lower()
         try:
             value = float(getattr(state, "state", ""))
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             value = math.nan
         if normalized_unit in {"kw", "kilowatt", "kilowatts"}:
             value *= 1000
