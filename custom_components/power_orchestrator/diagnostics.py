@@ -4,18 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-
-try:
-    from homeassistant.components.diagnostics import async_redact_data
-except ImportError:  # pragma: no cover - local test doubles
-    def async_redact_data(data: Any, to_redact: set[str]) -> Any:  # type: ignore[no-redef]
-        if isinstance(data, dict):
-            return {key: "**REDACTED**" if key in to_redact else async_redact_data(value, to_redact) for key, value in data.items()}
-        if isinstance(data, list):
-            return [async_redact_data(value, to_redact) for value in data]
-        return data
 
 from .const import DOMAIN
 

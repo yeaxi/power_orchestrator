@@ -12,19 +12,13 @@ from typing import Any, cast
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers.event import (
+    EventStateChangedData,
+    async_track_state_change_event,
+)
 from homeassistant.helpers.storage import Store
-
-try:
-    from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-except ImportError:  # pragma: no cover - local test doubles
-
-    class HomeAssistantError(Exception):  # type: ignore[no-redef]
-        """Fallback Home Assistant error."""
-
-    class ServiceValidationError(HomeAssistantError):  # type: ignore[no-redef]
-        """Fallback service validation error."""
-
 
 from .const import (
     CONF_AVERAGING_PERIOD,
@@ -90,16 +84,13 @@ def _translated_error(
     *,
     reason: str | None = None,
 ) -> Exception:
-    """Construct a translated HA exception with local-test compatibility."""
+    """Construct a translated Home Assistant exception."""
     placeholders = {"reason": reason} if reason else None
-    try:
-        return cast(Any, exception_type)(
-            translation_domain=DOMAIN,
-            translation_key=translation_key,
-            translation_placeholders=placeholders,
-        )
-    except TypeError:
-        return exception_type(reason or translation_key)
+    return cast(Any, exception_type)(
+        translation_domain=DOMAIN,
+        translation_key=translation_key,
+        translation_placeholders=placeholders,
+    )
 
 
 def _loaded_runtimes(hass: HomeAssistant) -> list[PowerOrchestratorRuntimeData]:
@@ -157,15 +148,13 @@ def _repair_device_ids(hass: HomeAssistant, entry: ConfigEntry) -> set[str]:
 
 def _sync_repair_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Mirror durable quarantine into persistent Home Assistant issues."""
-    try:
-        from homeassistant.helpers.issue_registry import (
-            IssueSeverity,
-            async_create_issue,
-            async_delete_issue,
-            async_get,
-        )
-    except ImportError:  # pragma: no cover - local Home Assistant test doubles
-        return
+    from homeassistant.helpers.issue_registry import (
+        IssueSeverity,
+        async_create_issue,
+        async_delete_issue,
+        async_get,
+    )
+
     active_ids = _repair_device_ids(hass, entry)
     desired_ids = {_repair_issue_id(entry.entry_id, device_id) for device_id in active_ids}
     hass_data = getattr(hass, "data", None)
@@ -481,24 +470,20 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
         tracked_entities.update(device.control_entity_ids)
         if device.power_sensor_id:
             tracked_entities.add(device.power_sensor_id)
-    tracked_entities.discard(None)
+    tracked_entity_ids = sorted(e for e in tracked_entities if isinstance(e, str) and e)
 
-    async def _state_changed(event: Any) -> None:
-        entity_id = getattr(event, "data", {}).get("entity_id") if event is not None else None
-        if entity_id in tracked_entities:
-            await coordinator.async_force_evaluate()
-            _sync_repair_issues(hass, entry)
+    async def _state_changed(event: Event[EventStateChangedData]) -> None:
+        # Only the tracked entities are subscribed, so any delivered event is
+        # relevant and triggers one guarded re-evaluation.
+        await coordinator.async_force_evaluate()
+        _sync_repair_issues(hass, entry)
 
-    bus = getattr(hass, "bus", None)
-    listen = getattr(bus, "async_listen", None)
-    if callable(listen):
-        raw_remove_listener = listen("state_changed", _state_changed)
-        if callable(raw_remove_listener):
-            remove_listener = _idempotent_remover(raw_remove_listener)
-            runtime.repair_listener_remove = remove_listener
-            on_unload = getattr(entry, "async_on_unload", None)
-            if callable(on_unload):
-                on_unload(remove_listener)
+    if tracked_entity_ids:
+        remove_listener = _idempotent_remover(
+            async_track_state_change_event(hass, tracked_entity_ids, _state_changed)
+        )
+        runtime.repair_listener_remove = remove_listener
+        entry.async_on_unload(remove_listener)
 
     try:
         await coordinator.async_config_entry_first_refresh()

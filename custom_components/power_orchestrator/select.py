@@ -5,17 +5,9 @@ from typing import Any, cast
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
-try:
-    from homeassistant.exceptions import ServiceValidationError
-except ImportError:  # pragma: no cover - local Home Assistant test doubles
-    class ServiceValidationError(ValueError):  # type: ignore[no-redef]
-        """Fallback validation error for local entity tests."""
-
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__(*args)
 
 from .const import DOMAIN, MODE_AUTO, MODE_OFF
 from .coordinator import PowerOrchestratorCoordinator

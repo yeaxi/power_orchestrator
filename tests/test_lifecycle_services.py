@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 
 import power_orchestrator as integration
 from power_orchestrator.const import DOMAIN, MODE_AUTO, MODE_OFF
@@ -219,8 +220,8 @@ async def test_service_registration_short_circuits_when_already_registered() -> 
 def test_service_source_and_translated_errors_fail_closed() -> None:
     with pytest.raises(Exception):
         integration._service_source(SimpleNamespace(data={"source": ""}, context=None))
-    error = integration._translated_error(Exception, "test_error", reason="x")
-    assert isinstance(error, Exception)
+    error = integration._translated_error(HomeAssistantError, "test_error", reason="x")
+    assert isinstance(error, HomeAssistantError)
 
 
 def test_repair_helpers_and_unregister_are_bounded() -> None:
