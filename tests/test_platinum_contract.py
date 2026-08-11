@@ -67,12 +67,18 @@ def test_binary_diagnostic_entities_have_translation_metadata() -> None:
         PowerOrchestratorActionJournalHealthySensor,
     ):
         assert getattr(entity_class, "_attr_translation_key", None)
-        assert not hasattr(entity_class, "_attr_icon")
+        # The entity must not hard-code an icon of its own; icons come from
+        # icon translations. (The Home Assistant base class defines a default
+        # ``_attr_icon``, so only inspect this class's own namespace.)
+        assert "_attr_icon" not in entity_class.__dict__
 
 
 def test_repair_issue_does_not_mutate_model() -> None:
     model = PowerModel()
     model.add_device(ManagedDevice("d1", "Device", "switch.d1"))
     before = model.get_device("d1").is_on
-    _sync_repair_issues(SimpleNamespace(), SimpleNamespace())
+    # The repair sync only reflects durable state into the issue registry; it
+    # must never touch the logical model. A bare entry (no runtime) yields no
+    # active issues and the registry lookup fails closed.
+    _sync_repair_issues(SimpleNamespace(data={}), SimpleNamespace(entry_id="entry-x"))
     assert model.get_device("d1").is_on == before

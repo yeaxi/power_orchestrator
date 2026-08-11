@@ -1,25 +1,18 @@
-"""Add mocks to path before any HA imports."""
-import os
-import sys
+"""Shared fixtures for the Power Orchestrator test suite.
+
+The suite runs against a real Home Assistant runtime via
+``pytest-homeassistant-custom-component``. There is no bespoke mock package;
+unit tests that need a lightweight ``hass`` build their own ``MagicMock``,
+while integration tests use the plugin-provided ``hass`` fixture together with
+``enable_custom_integrations``.
+"""
+
 import pytest
 
-# Add mocks directory to sys.path BEFORE any other imports
-mocks_dir = os.path.join(os.path.dirname(__file__), "..", "mocks")
-if mocks_dir not in sys.path:
-    sys.path.insert(0, mocks_dir)
+pytest_plugins = ("pytest_homeassistant_custom_component",)
 
-# Set asyncio mode
-pytest_plugins = ("pytest_asyncio",)
 
-# Now import homeassistant to verify it works
-import homeassistant.config_entries
-import homeassistant.core
-import homeassistant.const
-import homeassistant.helpers.storage
-import homeassistant.helpers.update_coordinator
-import homeassistant.helpers.entity_platform
-import homeassistant.helpers.selector
-import homeassistant.components.energy
-import homeassistant.components.sensor
-import homeassistant.components.binary_sensor
-import homeassistant.components.select
+@pytest.fixture(autouse=True)
+def _auto_enable_custom_integrations(enable_custom_integrations):
+    """Permit the custom integration to load in every test that boots hass."""
+    yield

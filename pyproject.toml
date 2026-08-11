@@ -17,13 +17,12 @@ quality = ["coverage[toml]", "mypy", "ruff"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["custom_components", "mocks"]
+pythonpath = ["custom_components"]
 asyncio_mode = "auto"
 
 [tool.ruff]
 target-version = "py314"
 line-length = 100
-exclude = ["mocks"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
