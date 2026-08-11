@@ -100,8 +100,8 @@ async def _setup_loaded(hass) -> MockConfigEntry:
     return entry
 
 
-def _restore_entry() -> MockConfigEntry:
-    """Entry with guarded restore enabled and no pause/cooldown/dwell delays."""
+def _restore_entry(*, dwell: int = 0) -> MockConfigEntry:
+    """Entry with guarded restore enabled; ``dwell`` controls the headroom timer."""
     return MockConfigEntry(
         domain=DOMAIN,
         title="Power Orchestrator restore",
@@ -115,7 +115,7 @@ def _restore_entry() -> MockConfigEntry:
             CONF_RESTORE_ENABLED: True,
             CONF_RESTORE_THRESHOLD: 4000,
             CONF_RESTORE_HYSTERESIS: 200,
-            CONF_RESTORE_DWELL: 0,
+            CONF_RESTORE_DWELL: dwell,
             CONF_RESTORE_COOLDOWN: 0,
             CONF_DEVICES: [
                 {
@@ -133,10 +133,10 @@ def _restore_entry() -> MockConfigEntry:
     )
 
 
-async def _setup_restore(hass) -> MockConfigEntry:
+async def _setup_restore(hass, *, dwell: int = 0) -> MockConfigEntry:
     _install_integration(hass)
     await _prepare_entities(hass)
-    entry = _restore_entry()
+    entry = _restore_entry(dwell=dwell)
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -179,6 +179,51 @@ async def test_guarded_restore_reenables_planner_shed_load(hass):
     # turn-on state change triggers a follow-up evaluation.)
     assert hass.states.get(ACTUATOR).state == "on"
     assert "boiler" not in coordinator.data["planner_shed_devices"]
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_request_restore_enforces_headroom(hass):
+    """An explicit restore request still honors headroom (not just arming).
+
+    A long dwell keeps the *policy* restore lane from firing, so this isolates
+    the operator request path, which bypasses only the time-based dwell.
+    """
+    await _setup_restore(hass, dwell=3600)
+    await _shed_the_boiler(hass)
+    await hass.services.async_call(
+        DOMAIN, "authorize_restore", {"confirm_restore": True}, blocking=True
+    )
+    await hass.async_block_till_done()
+
+    # Bring the load down but keep it above the restore ceiling. This newer
+    # report reconciles the post-shed fence; policy restore stays idle (dwell).
+    hass.states.async_set(LOAD_SENSOR, "5000", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR).state == "off"
+
+    # Insufficient headroom: the explicit request must be refused (no ON).
+    await hass.services.async_call(
+        DOMAIN,
+        "request_restore",
+        {"device_id": "boiler", "confirm_restore": True},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR).state == "off"
+
+    # With real headroom the operator request restores the load.
+    hass.states.async_set(LOAD_SENSOR, "3000", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    await hass.services.async_call(
+        DOMAIN,
+        "request_restore",
+        {"device_id": "boiler", "confirm_restore": True},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR).state == "on"
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")

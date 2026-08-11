@@ -121,6 +121,21 @@ def test_restore_fence_blocks_until_causal_newer_report() -> None:
     assert engine.runtime.pending_post_restore_generation is None
 
 
+def test_invalid_load_resets_restore_dwell() -> None:
+    engine = _engine()
+    config = RestoreConfig(enabled=True, threshold_w=4000, hysteresis_w=200, dwell_s=300)
+    # Accrue some dwell below the ceiling.
+    engine.observe_restore_headroom(3000.0, now=0.0, config=config)
+    assert engine.runtime.restore_since == 0.0
+    # Invalid telemetry must reset the dwell so it cannot resume from a stale start.
+    engine.observe_restore_headroom(float("nan"), now=100.0, config=config)
+    assert engine.runtime.restore_since is None
+    # After recovery the dwell starts fresh; not immediately satisfied.
+    later = engine.observe_restore_headroom(3000.0, now=200.0, config=config)
+    assert later.triggered is False
+    assert engine.runtime.restore_since == 200.0
+
+
 def test_device_restore_enabled_round_trips() -> None:
     device = ManagedDevice("d1", "Boiler", "switch.d1", restore_enabled=True)
     restored = ManagedDevice.from_dict(device.to_dict())
