@@ -329,6 +329,11 @@ class RuntimeStore:
             "pending_post_shed_after_reported_at": runtime.pending_post_shed_after_reported_at,
             "pending_operation_id": runtime.pending_operation_id,
             "last_shed_load_generation": runtime.last_shed_load_generation,
+            "restore_since": runtime.restore_since,
+            "pending_post_restore_generation": runtime.pending_post_restore_generation,
+            "pending_post_restore_after_reported_at": runtime.pending_post_restore_after_reported_at,
+            "pending_restore_operation_id": runtime.pending_restore_operation_id,
+            "last_restore_load_generation": runtime.last_restore_load_generation,
             "last_telemetry_validity": runtime.last_telemetry_validity.value,
             "last_reason_code": runtime.last_reason_code.value,
             "decision_sequence": runtime.decision_sequence,
@@ -365,6 +370,31 @@ class RuntimeStore:
         runtime.pending_operation_id = raw.get("pending_operation_id") if isinstance(raw.get("pending_operation_id"), str) else None
         last_generation = raw.get("last_shed_load_generation")
         runtime.last_shed_load_generation = last_generation if isinstance(last_generation, int) and last_generation >= 0 else None
+        restore_pending = raw.get("pending_post_restore_generation")
+        runtime.pending_post_restore_generation = (
+            restore_pending
+            if isinstance(restore_pending, int)
+            and not isinstance(restore_pending, bool)
+            and restore_pending >= 0
+            else None
+        )
+        runtime.pending_post_restore_after_reported_at = self._finite_or_none(
+            raw.get("pending_post_restore_after_reported_at")
+        )
+        runtime.pending_restore_operation_id = (
+            raw.get("pending_restore_operation_id")
+            if isinstance(raw.get("pending_restore_operation_id"), str)
+            else None
+        )
+        runtime.restore_since = self._finite_or_none(raw.get("restore_since"))
+        last_restore_generation = raw.get("last_restore_load_generation")
+        runtime.last_restore_load_generation = (
+            last_restore_generation
+            if isinstance(last_restore_generation, int)
+            and not isinstance(last_restore_generation, bool)
+            and last_restore_generation >= 0
+            else None
+        )
         try:
             runtime.last_telemetry_validity = TelemetryValidity(
                 raw.get("last_telemetry_validity", TelemetryValidity.UNKNOWN.value)
