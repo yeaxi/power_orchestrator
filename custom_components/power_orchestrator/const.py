@@ -46,6 +46,20 @@ CONF_ADD_THRESHOLD: Final = "add_threshold"
 CONF_PRIORITY_ORDER: Final = "priority_order"
 MAX_CUSTOM_THRESHOLDS: Final = 64
 
+# Guarded restore (opt-in orchestration). Off by default; a load is only ever
+# re-enabled if it was shed by the planner itself, its per-load opt-in is set,
+# and restore is explicitly armed under live execution. No PV/forecast/
+# generation admission is implied by any of these.
+CONF_RESTORE_ENABLED: Final = "restore_enabled"
+CONF_RESTORE_THRESHOLD: Final = "restore_threshold"
+CONF_RESTORE_HYSTERESIS: Final = "restore_hysteresis"
+CONF_RESTORE_DWELL: Final = "restore_dwell"
+CONF_RESTORE_COOLDOWN: Final = "restore_cooldown"
+# Per-device opt-in key stored inside each device mapping.
+CONF_DEVICE_RESTORE_ENABLED: Final = "restore_enabled"
+# Persisted runtime arm flag (never a config-flow field).
+CONF_RESTORE_ARMED: Final = "restore_armed"
+
 # Grid-loss safety modes
 GRID_LOSS_MODE_SENSOR: Final = "grid_loss_sensor"
 GRID_LOSS_MODE_THRESHOLD: Final = "battery_threshold"
@@ -66,6 +80,7 @@ STATUS_GRID_LOSS: Final = "grid_loss"
 STATUS_SAFETY_BLOCKED: Final = "safety_blocked"
 STATUS_OBSERVE: Final = "observe"
 STATUS_FAULT: Final = "fault"
+STATUS_LOAD_RESTORING: Final = "load_restoring"
 
 # Defaults and safety bounds
 DEFAULT_AVERAGING_PERIOD: Final = 10
@@ -82,6 +97,13 @@ DEFAULT_SHED_FAST_LIMIT: Final = 7000.0
 DEFAULT_SHED_FAST_DURATION: Final = 30.0
 DEFAULT_SHED_CRITICAL_LIMIT: Final = 8000.0
 DEFAULT_SHED_CRITICAL_DURATION: Final = 5.0
+
+# Guarded-restore defaults (conservative; restore stays disabled unless the
+# operator opts in globally and per-load and arms it under live execution).
+DEFAULT_RESTORE_ENABLED: Final = False
+DEFAULT_RESTORE_HYSTERESIS: Final = 200.0
+DEFAULT_RESTORE_DWELL: Final = 300.0
+DEFAULT_RESTORE_COOLDOWN: Final = 600.0
 
 EVALUATION_INTERVAL: Final = 30
 RELAY_READBACK_TIMEOUT_SECONDS: Final = 2.0

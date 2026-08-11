@@ -30,7 +30,9 @@ class PolicyPhase(str, Enum):
     STARTUP = "startup"
     MONITORING = "monitoring"
     SHEDDING = "shedding"
+    RESTORING = "restoring"
     WAITING_LOAD_RECONCILIATION = "waiting_load_reconciliation"
+    WAITING_RESTORE_RECONCILIATION = "waiting_restore_reconciliation"
     GRID_LOSS = "grid_loss"
     FAULT = "fault"
 
@@ -44,6 +46,13 @@ class ReasonCode(str, Enum):
     SHED_CRITICAL_OVERLOAD = "shed_critical_overload"
     SHED_CUSTOM_THRESHOLD = "shed_custom_threshold"
     HARD_INTERLOCK = "hard_interlock"
+    RESTORE_HEADROOM_AVAILABLE = "restore_headroom_available"
+    RESTORE_BLOCKED_OVERLOAD = "restore_blocked_overload"
+    RESTORE_BLOCKED_FENCE = "restore_blocked_fence"
+    RESTORE_BLOCKED_NOT_ARMED = "restore_blocked_not_armed"
+    RESTORE_BLOCKED_NO_CANDIDATES = "restore_blocked_no_candidates"
+    RESTORE_COOLDOWN = "restore_cooldown"
+    RESTORE_OBSERVE_MODE = "restore_observe_mode"
     TELEMETRY_INVALID = "telemetry_invalid"
     TELEMETRY_STALE = "telemetry_stale"
     EXTERNAL_OWNERSHIP = "external_ownership"
@@ -233,6 +242,72 @@ class PolicyConfig:
             return DEFAULT_POLICY
 
 
+@dataclass(frozen=True)
+class RestoreConfig:
+    """Bounded, fail-closed policy for guarded re-enable of planner-shed loads.
+
+    Disabled by default. The restore ceiling is ``threshold - hysteresis``; the
+    aggregate load must stay at or below it for ``dwell_s`` before any restore
+    is permitted. This describes only *when it is safe to consider* restoring a
+    load the planner itself shed; it never admits new or never-shed loads.
+    """
+
+    enabled: bool = False
+    threshold_w: float = 0.0
+    hysteresis_w: float = 0.0
+    dwell_s: float = 0.0
+    cooldown_s: float = 0.0
+
+    def __post_init__(self) -> None:
+        for value in (self.threshold_w, self.hysteresis_w, self.dwell_s, self.cooldown_s):
+            if not math.isfinite(value) or value < 0:
+                raise ValueError("restore configuration must be finite and non-negative")
+
+    @property
+    def ceiling_w(self) -> float:
+        """Return the load at or below which restore headroom accrues."""
+        return self.threshold_w - self.hysteresis_w
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "RestoreConfig":
+        """Build a fail-closed restore policy; any invalid input disables it."""
+
+        def number(key: str, default: float, maximum: float = MAX_POLICY_POWER_W) -> float:
+            value = data.get(key, default)
+            if isinstance(value, bool):
+                return default
+            try:
+                converted = float(value)
+            except (TypeError, ValueError):
+                return default
+            if not math.isfinite(converted) or converted < 0 or converted > maximum:
+                return default
+            return converted
+
+        enabled = bool(data.get("restore_enabled", False))
+        threshold = number("restore_threshold", 0.0)
+        hysteresis = number("restore_hysteresis", 0.0)
+        dwell = number("restore_dwell", 0.0, maximum=MAX_POLICY_DURATION_S)
+        cooldown = number("restore_cooldown", 0.0, maximum=MAX_POLICY_DURATION_S)
+        # A restore ceiling that is not positive can never accrue headroom;
+        # disable rather than accept a degenerate configuration.
+        if threshold - hysteresis <= 0:
+            enabled = False
+        try:
+            return cls(
+                enabled=enabled,
+                threshold_w=threshold,
+                hysteresis_w=hysteresis,
+                dwell_s=dwell,
+                cooldown_s=cooldown,
+            )
+        except ValueError:
+            return cls()
+
+
+DEFAULT_RESTORE = RestoreConfig()
+
+
 @dataclass
 class PolicyRuntime:
     """Mutable bounded state reduced by :class:`PolicyEngine`."""
@@ -248,6 +323,12 @@ class PolicyRuntime:
     last_telemetry_validity: TelemetryValidity = TelemetryValidity.UNKNOWN
     last_reason_code: ReasonCode = ReasonCode.SAFETY_BLOCKED
     decision_sequence: int = 0
+    # Restore-lane runtime, symmetric with the shed post-action fence.
+    restore_since: float | None = None
+    pending_post_restore_generation: int | None = None
+    pending_post_restore_after_reported_at: float | None = None
+    pending_restore_operation_id: str | None = None
+    last_restore_load_generation: int | None = None
 
 
 @dataclass(frozen=True)
@@ -384,6 +465,83 @@ class PolicyEngine:
         self.runtime.pending_post_shed_generation = None
         self.runtime.pending_post_shed_after_reported_at = None
         self.runtime.pending_operation_id = None
+        self.runtime.phase = PolicyPhase.MONITORING
+        return True
+
+    def observe_restore_headroom(
+        self,
+        load_w: float,
+        *,
+        now: float,
+        config: RestoreConfig,
+    ) -> PolicyDecision:
+        """Advance the restore dwell timer from one newly reported aggregate value.
+
+        Returns a triggered decision only when restore is enabled and the load
+        has stayed at or below the restore ceiling for the full dwell. Any
+        invalid load or a load above the ceiling resets the dwell and fails
+        closed (no restore).
+        """
+        if not config.enabled:
+            self.runtime.restore_since = None
+            return PolicyDecision(False, None, ReasonCode.RESTORE_BLOCKED_NOT_ARMED)
+        if isinstance(load_w, bool) or not math.isfinite(load_w) or load_w < 0:
+            self.runtime.restore_since = None
+            return PolicyDecision(False, None, ReasonCode.TELEMETRY_INVALID)
+        if load_w > config.ceiling_w:
+            self.runtime.restore_since = None
+            return PolicyDecision(False, None, ReasonCode.RESTORE_BLOCKED_OVERLOAD)
+
+        if self.runtime.restore_since is None:
+            self.runtime.restore_since = now
+        elapsed = now - self.runtime.restore_since
+        triggered = elapsed >= config.dwell_s
+        return PolicyDecision(
+            triggered,
+            "restore" if triggered else None,
+            ReasonCode.RESTORE_HEADROOM_AVAILABLE,
+            max(0.0, elapsed),
+        )
+
+    def append_restore(
+        self,
+        *,
+        operation_id: str,
+        load_generation: int,
+    ) -> None:
+        """Install a one-report barrier after a confirmed physical restore."""
+        self.runtime.last_restore_load_generation = load_generation
+        self.runtime.pending_post_restore_generation = load_generation
+        self.runtime.pending_post_restore_after_reported_at = None
+        self.runtime.pending_restore_operation_id = operation_id
+        self.runtime.restore_since = None
+        self.runtime.phase = PolicyPhase.WAITING_RESTORE_RECONCILIATION
+
+    def set_post_restore_fence(self, reported_at: float | None) -> None:
+        """Record the causal relay report required before the next restore."""
+        if reported_at is None or not math.isfinite(reported_at):
+            self.runtime.pending_post_restore_after_reported_at = None
+        else:
+            self.runtime.pending_post_restore_after_reported_at = reported_at
+
+    def can_restore_again(self, load_generation: int) -> bool:
+        """Require an aggregate report newer than the last confirmed restore."""
+        pending = self.runtime.pending_post_restore_generation
+        return pending is None or load_generation > pending
+
+    def reconcile_restore(self, load_generation: int, *, reported_at: float | None) -> bool:
+        """Release the restore barrier only after a causal newer aggregate report."""
+        pending = self.runtime.pending_post_restore_generation
+        fence = self.runtime.pending_post_restore_after_reported_at
+        if pending is None:
+            return True
+        if load_generation <= pending or fence is None or reported_at is None:
+            return False
+        if not math.isfinite(reported_at) or reported_at <= fence:
+            return False
+        self.runtime.pending_post_restore_generation = None
+        self.runtime.pending_post_restore_after_reported_at = None
+        self.runtime.pending_restore_operation_id = None
         self.runtime.phase = PolicyPhase.MONITORING
         return True
 

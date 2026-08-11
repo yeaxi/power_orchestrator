@@ -22,6 +22,9 @@ class ManagedDevice:
     priority: int = 1
     shed_priority: int | None = None
     actuator_entity_ids: tuple[str, ...] = ()
+    # Per-load opt-in for guarded restore. Off by default; only loads with this
+    # set may ever be re-enabled by the planner after it shed them.
+    restore_enabled: bool = False
 
     # Runtime state is always reconciled from Home Assistant telemetry.
     is_on: bool | None = None
@@ -54,6 +57,7 @@ class ManagedDevice:
             "priority": self.priority,
             "shed_priority": self.shed_priority,
             "actuators": list(self.actuator_entity_ids),
+            "restore_enabled": self.restore_enabled,
             "is_on": self.is_on,
             "measured_power": self.measured_power if self.measured_power_valid else None,
             "measured_power_valid": self.measured_power_valid,
@@ -131,6 +135,7 @@ class ManagedDevice:
             priority=priority,
             shed_priority=shed_priority,
             actuator_entity_ids=actuators,
+            restore_enabled=bool(data.get("restore_enabled", False)),
             ownership=ownership,
             ownership_until=finite_timestamp(data.get("ownership_until")),
             pause_until=finite_timestamp(data.get("pause_until")),
