@@ -1,8 +1,8 @@
 # Power Orchestrator ⚡
 
-`power_orchestrator` is a safety-first Home Assistant custom integration for one purpose: **bounded load shedding**. It monitors an aggregate load and disconnects configured optional loads when the configured limits or safety conditions require it.
+`power_orchestrator` is a safety-first Home Assistant custom integration for **bounded load shedding** with an optional **guarded restore** of the loads it shed. It monitors an aggregate load and disconnects configured optional loads when the configured limits or safety conditions require it, and — only when explicitly enabled and armed — re-enables those same loads once it is safe to do so.
 
-It does not perform PV prioritization, generation-based admission, normal load enabling, or automatic re-enabling after a shed.
+It does not perform PV prioritization, generation-based admission, or normal load enabling. Guarded restore is off by default, per-load opt-in, requires `live` execution with explicit arming, only ever re-enables loads the planner itself shed, and uses the same causal readback discipline as the stop path.
 
 ## Features
 
@@ -13,6 +13,7 @@ It does not perform PV prioritization, generation-based admission, normal load e
 - Grid-loss sensor mode or battery-SoC safety mode.
 - Emergency all-stop path for unsafe grid/battery/input conditions.
 - `auto`/`off` planner mode persisted through Home Assistant restarts.
+- Optional guarded restore: fail-closed, opt-in, armed re-enable of planner-shed loads when headroom returns.
 - `live`/`observe` execution mode; observe mode never sends physical service calls.
 - Bounded physical readback and durable fault/quarantine state.
 - Diagnostics, action journal, and redacted config-entry diagnostics.
@@ -70,7 +71,7 @@ If readback is missing or contradictory, the load is marked unknown/faulted and 
 - A grid-loss or invalid battery safety source triggers the emergency stop path.
 - `off` blocks ordinary planner actions; emergency safety handling remains active.
 - `observe` records intended actions but never calls a physical Home Assistant service.
-- There is no normal automatic enable or re-enable path.
+- There is no normal automatic *enable* of never-shed loads. The only re-enable path is the guarded restore of planner-shed loads, which is off by default and requires explicit arming under `live` execution.
 
 ### Restart behavior
 
@@ -92,9 +93,10 @@ Power Orchestrator manages existing Home Assistant entities directly. It support
 - optional per-load measured-power sensors;
 - one aggregate load sensor;
 - one grid-loss binary sensor or battery SoC safety source;
-- deterministic load-shedding thresholds and pause periods.
+- deterministic load-shedding thresholds and pause periods;
+- optional guarded restore (opt-in, armed) of loads the planner shed.
 
-It does **not** support PV priority, forecast-based decisions, generation-based admission, normal automatic enabling, or automatic recovery/re-enabling.
+It does **not** support PV priority, forecast-based decisions, generation-based admission, or normal automatic enabling of never-shed loads. Re-enabling is limited to the guarded restore of planner-shed loads described above.
 
 ## Entities
 
@@ -124,6 +126,8 @@ All entities use stable config-entry-scoped unique IDs.
 | `power_orchestrator.request_stop` | `device_id`, optional `source` | Request one guarded load stop |
 | `power_orchestrator.clear_quarantine` | `device_id`, optional `source` | Clear a fault only after independent evidence |
 | `power_orchestrator.set_execution_mode` | `execution_mode`, optional `confirm_live` | Select `observe` or explicitly confirmed `live` |
+| `power_orchestrator.authorize_restore` | `confirm_restore` | Arm guarded restore (no physical action; requires `live`+`auto`) |
+| `power_orchestrator.request_restore` | `device_id`, `confirm_restore`, optional `source` | Request one guarded restore of a planner-shed load |
 
 Runtime handlers validate every field independently of `services.yaml`. Raw relay, climate, or other physical services should not be called around the integration boundary.
 
@@ -167,6 +171,7 @@ Verify that the config entry remained loaded and that the integration was allowe
 - Existing automations remain external owners and must be reviewed separately.
 - `observe` is not live evidence; it deliberately sends no physical service calls.
 - A persisted fault requires explicit evidence-based reconciliation and is not cleared by restart.
+- Guarded restore only re-enables loads the planner itself shed; it never starts never-shed loads, is disarmed on restart (re-arm explicitly), and excludes `climate` loads.
 - This repository has not received an official Home Assistant Core quality-scale review.
 
 ## Removal

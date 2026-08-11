@@ -2,17 +2,19 @@
 
 ## Scope
 
-Power Orchestrator is a bounded Home Assistant integration for **load shedding only**. Its only normal physical purpose is to turn off already-running optional loads when aggregate demand or a safety condition requires it.
+Power Orchestrator is a bounded Home Assistant integration for **load shedding** with an optional **guarded restore** of the loads it shed. Its physical actions are: turn off already-running optional loads when aggregate demand or a safety condition requires it, and — only when guarded restore is enabled and explicitly armed — turn those same loads back on once headroom returns.
 
 The integration does **not** implement:
 
 - PV or solar-priority logic;
 - Forecast.Solar or generation-based admission;
-- normal load enabling or starting;
-- automatic re-enabling or recovery of loads after shedding;
+- normal load enabling or starting of never-shed loads;
+- automatic re-enabling of loads it did not itself shed;
 - battery/PV optimization or energy-production scheduling.
 
 These are removed from the runtime, config-flow, service, and persisted configuration contracts. Legacy persisted fields are accepted only long enough to be removed by the versioned migration.
+
+Guarded restore is a fail-closed, opt-in exception to the historical stop-only surface: it is disabled by default, per-load opt-in, requires `live` execution plus explicit arming, only re-enables loads the planner itself shed (never emergency/manual/service stops), excludes `climate` loads, restores at most one load per evaluation cycle, never runs during an active shed/emergency or a pending post-shed fence, and confirms the ON transition with the same causal readback used for stops.
 
 ## Safety boundaries
 
@@ -46,9 +48,10 @@ Each evaluation is serialized and follows this order:
 4. If required telemetry is invalid, publish `safety_blocked` and perform no normal action.
 5. If a configured overload threshold has remained active for its dwell time, shed at most one logical device at a time.
 6. Confirm the stop with causal relay/actuator readback and wait for a newer aggregate-load report before another normal shed.
-7. Otherwise remain in monitoring/observe state.
+7. If — and only if — guarded restore is enabled and armed, no shed fired, and the aggregate load has stayed at or below the restore ceiling for the restore dwell, restore at most one planner-shed load, confirmed by causal ON readback.
+8. Otherwise remain in monitoring/observe state.
 
-There is no evaluation branch that calls `turn_on`, requests a start, restores a shed device, or enables a load based on capacity, PV, forecast, or battery state.
+No evaluation branch requests a start or enables a load based on capacity, PV, forecast, or battery state. The only `turn_on` path is the guarded restore of a load the planner itself shed, subject to all gates in the Scope section.
 
 ## Logical devices and shedding
 
@@ -63,7 +66,7 @@ A managed device contains:
 
 A coupled relay and climate/HVAC entity is one logical device. Partial or unconfirmed stop readback is a fault, not a successful shed.
 
-Normal shedding is bounded to one logical device per evaluation. The coordinator never restores a device automatically. A device that was already on before the integration observed it is treated as externally owned for the configured grace period; the planner does not use that observation as permission to start it.
+Normal shedding is bounded to one logical device per evaluation. The coordinator restores a device only through the guarded restore lane (opt-in, armed, planner-shed only, one per cycle). A device that was already on before the integration observed it is treated as externally owned for the configured grace period; the planner does not use that observation as permission to start it, and a manual re-enable relinquishes any restore claim.
 
 ## Faults and quarantine
 
@@ -87,15 +90,17 @@ Fault/quarantine state is persisted and blocks further unsafe actions for that d
 
 ## Public services
 
-The public service surface is deliberately stop-only:
+The public service surface is stop-first, with a guarded restore that only re-enables planner-shed loads:
 
 - `force_evaluate` — run a non-physical evaluation;
 - `set_mode` — persistently arm/disarm normal shedding policy;
 - `request_stop` — request a guarded logical-device stop;
 - `clear_quarantine` — clear a fault only after safety validation;
-- `set_execution_mode` — select `observe` or explicitly confirmed `live` execution.
+- `set_execution_mode` — select `observe` or explicitly confirmed `live` execution;
+- `authorize_restore` — arm the guarded restore lane (no physical action; requires `live`+`auto`);
+- `request_restore` — request one guarded restore of a planner-shed load.
 
-There is no public start/request-start service.
+There is no public start/request-start service and no service that enables a never-shed load.
 
 ## Verification requirements
 
