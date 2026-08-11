@@ -634,7 +634,7 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
     """Five-step onboarding flow for load shedding and safety sources."""
 
     VERSION = 2
-    MINOR_VERSION = 1
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         self._discovered: dict[str, Any] = {}

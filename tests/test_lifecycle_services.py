@@ -53,6 +53,7 @@ def test_normalize_devices_rejects_duplicates_and_preserves_only_shedding_fields
             "priority": 2,
             "shed_priority": 1,
             "actuators": ["light.load_1"],
+            "restore_enabled": False,
         }
     ]
 
@@ -96,7 +97,7 @@ async def test_setup_and_migration_initialize_registry_and_drop_unknown_fields()
     assert "solar_power" not in updated["options"]
     assert "only_from_solar" not in updated["options"]["devices"][0]
     assert updated["version"] == 2
-    assert updated["minor_version"] == 1
+    assert updated["minor_version"] == 2
 
 
 @pytest.mark.asyncio
@@ -151,7 +152,7 @@ async def test_unload_persists_runtime_and_unregisters_services() -> None:
     config_entries.async_unload_platforms.assert_awaited_once()
     runtime.repair_listener_remove.assert_called_once()
     assert entry.runtime_data is None
-    assert hass.services.async_remove.call_count == 6
+    assert hass.services.async_remove.call_count == 8
 
 
 @pytest.mark.asyncio
@@ -177,6 +178,8 @@ async def test_service_registration_exposes_only_safe_handlers() -> None:
         "clear_quarantine",
         "set_execution_mode",
         "authorize_shedding",
+        "authorize_restore",
+        "request_restore",
     }
 
     await registered["force_evaluate"](SimpleNamespace(data={}))
@@ -231,7 +234,7 @@ def test_repair_helpers_and_unregister_are_bounded() -> None:
     assert integration._repair_device_ids(SimpleNamespace(), entry) == {"d1"}
     hass = _hass_with_services()
     integration._unregister_services(hass)
-    assert hass.services.async_remove.call_count == 6
+    assert hass.services.async_remove.call_count == 8
     assert MODE_OFF != MODE_AUTO
 
 

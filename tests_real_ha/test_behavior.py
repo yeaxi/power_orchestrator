@@ -28,6 +28,12 @@ from power_orchestrator.const import (
     CONF_HYSTERESIS,
     CONF_LOAD_SENSOR,
     CONF_MAX_LOAD,
+    CONF_PAUSE_PERIOD,
+    CONF_RESTORE_COOLDOWN,
+    CONF_RESTORE_DWELL,
+    CONF_RESTORE_ENABLED,
+    CONF_RESTORE_HYSTERESIS,
+    CONF_RESTORE_THRESHOLD,
     CONF_SAFETY_RESERVE,
     DOMAIN,
     GRID_LOSS_MODE_SENSOR,
@@ -92,6 +98,103 @@ async def _setup_loaded(hass) -> MockConfigEntry:
     await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.LOADED
     return entry
+
+
+def _restore_entry() -> MockConfigEntry:
+    """Entry with guarded restore enabled and no pause/cooldown/dwell delays."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        title="Power Orchestrator restore",
+        data={
+            CONF_LOAD_SENSOR: LOAD_SENSOR,
+            CONF_MAX_LOAD: 5000,
+            CONF_AVERAGING_PERIOD: 30,
+            CONF_SAFETY_RESERVE: 200,
+            CONF_HYSTERESIS: 100,
+            CONF_PAUSE_PERIOD: 0,
+            CONF_RESTORE_ENABLED: True,
+            CONF_RESTORE_THRESHOLD: 4000,
+            CONF_RESTORE_HYSTERESIS: 200,
+            CONF_RESTORE_DWELL: 0,
+            CONF_RESTORE_COOLDOWN: 0,
+            CONF_DEVICES: [
+                {
+                    "device_id": "boiler",
+                    "name": "Test boiler",
+                    "entity": ACTUATOR,
+                    "expected_power": 500,
+                    "priority": 1,
+                    "restore_enabled": True,
+                }
+            ],
+            CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
+            CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
+        },
+    )
+
+
+async def _setup_restore(hass) -> MockConfigEntry:
+    _install_integration(hass)
+    await _prepare_entities(hass)
+    entry = _restore_entry()
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    return entry
+
+
+async def _shed_the_boiler(hass) -> None:
+    """Arm auto/live, drive an overload, and confirm the planner shed the load."""
+    await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
+    await hass.async_block_till_done()
+    hass.states.async_set(LOAD_SENSOR, "9500", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR).state == "off"
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_guarded_restore_reenables_planner_shed_load(hass):
+    """Once armed and safe, the planner restores a load it shed itself."""
+    entry = await _setup_restore(hass)
+    coordinator = entry.runtime_data.coordinator
+    await _shed_the_boiler(hass)
+
+    await hass.services.async_call(
+        DOMAIN, "authorize_restore", {"confirm_restore": True}, blocking=True
+    )
+    await hass.async_block_till_done()
+
+    # Load returns well under the restore ceiling; the pending post-shed fence
+    # reconciles on this newer report and the guarded restore then fires.
+    hass.states.async_set(LOAD_SENSOR, "3000", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
+    await hass.async_block_till_done()
+
+    # The planner-shed load is physically re-enabled and released from the
+    # restore-candidate set. (Status settles back to monitoring once the
+    # turn-on state change triggers a follow-up evaluation.)
+    assert hass.states.get(ACTUATOR).state == "on"
+    assert "boiler" not in coordinator.data["planner_shed_devices"]
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_restore_does_not_fire_until_armed(hass):
+    """A shed load stays off when restore is enabled but not explicitly armed."""
+    entry = await _setup_restore(hass)
+    coordinator = entry.runtime_data.coordinator
+    await _shed_the_boiler(hass)
+
+    assert coordinator.restore_commands_allowed is False
+    hass.states.async_set(LOAD_SENSOR, "3000", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(ACTUATOR).state == "off"
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")

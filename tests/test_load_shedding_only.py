@@ -127,6 +127,9 @@ def test_integration_has_no_pv_admission_or_normal_start_surface() -> None:
     )
     source = "\n".join((INTEGRATION / name).read_text() for name in production_files)
 
+    # PV/forecast/generation admission and the old normal-start surface remain
+    # permanently banned. Guarded restore is a bounded re-enable of loads the
+    # planner itself shed; it is NOT admission and does not reintroduce these.
     forbidden_tokens = (
         "only_from_solar",
         "solar_forecast",
@@ -135,12 +138,19 @@ def test_integration_has_no_pv_admission_or_normal_start_surface() -> None:
         "request_start",
         "async_request_start",
         "_perform_adding",
-        "turn_on",
     )
     for token in forbidden_tokens:
         assert token not in source, token
 
     assert not (INTEGRATION / "forecast.py").exists()
+
+    # ``turn_on`` is permitted ONLY as the guarded-restore actuation, and only
+    # inside the coordinator's command path — never in config flow, services
+    # metadata, policy, or the device model.
+    for name in production_files:
+        if name == "coordinator.py":
+            continue
+        assert "turn_on" not in (INTEGRATION / name).read_text(), f"turn_on outside coordinator: {name}"
 
 
 def test_config_flow_has_no_pv_or_forecast_fields() -> None:
