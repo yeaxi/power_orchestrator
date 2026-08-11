@@ -162,6 +162,27 @@ async def test_observe_mode_records_but_does_not_switch(hass):
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
+async def test_state_change_listener_triggers_evaluation(hass):
+    """A tracked-entity state change alone drives a guarded evaluation.
+
+    This exercises the entity-scoped ``async_track_state_change_event``
+    subscription without any explicit ``force_evaluate`` call.
+    """
+    entry = await _setup_loaded(hass)
+    coordinator = entry.runtime_data.coordinator
+    await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR).state == "on"
+
+    # Flip a tracked safety input; the listener must wake the coordinator.
+    hass.states.async_set(GRID_SENSOR, "off")
+    await hass.async_block_till_done()
+
+    assert hass.states.get(ACTUATOR).state == "off"
+    assert coordinator.status == "grid_loss"
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
 async def test_auto_mode_persists_across_reload(hass):
     """A persisted auto planner mode is restored after a config-entry reload."""
     entry = await _setup_loaded(hass)
