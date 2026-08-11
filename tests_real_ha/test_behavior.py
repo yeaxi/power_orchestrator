@@ -227,6 +227,38 @@ async def test_request_restore_enforces_headroom(hass):
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
+async def test_restore_dwell_resets_on_shed_cycle(hass):
+    """A shed cycle (load above the restore ceiling) restarts the restore dwell.
+
+    Uses a long dwell so the dwell is accrued but not yet satisfied; a shed cycle
+    skips the restore lane, so the reset must happen on the shed path itself.
+    """
+    entry = await _setup_restore(hass, dwell=3600)
+    coordinator = entry.runtime_data.coordinator
+    await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
+    await hass.async_block_till_done()
+    await hass.services.async_call(
+        DOMAIN, "authorize_restore", {"confirm_restore": True}, blocking=True
+    )
+    await hass.async_block_till_done()
+
+    # Accrue some below-ceiling dwell (long dwell -> not yet satisfied).
+    hass.states.async_set(LOAD_SENSOR, "3000", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
+    await hass.async_block_till_done()
+    assert coordinator._policy_engine.runtime.restore_since is not None
+
+    # A hard-interlock overload sheds and skips the restore lane; the dwell must
+    # still be reset so a later restore requires a fresh observation period.
+    hass.states.async_set(LOAD_SENSOR, "9500", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
+    await hass.async_block_till_done()
+    assert coordinator._policy_engine.runtime.restore_since is None
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
 async def test_restore_does_not_fire_until_armed(hass):
     """A shed load stays off when restore is enabled but not explicitly armed."""
     entry = await _setup_restore(hass)

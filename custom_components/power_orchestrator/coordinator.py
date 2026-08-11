@@ -213,6 +213,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             and self._restore_config.enabled
             and self._restore_armed
             and self._policy_engine.runtime.pending_post_shed_generation is None
+            # The post-restore barrier must be fully reconciled (not merely a
+            # newer generation) before another guarded ON is permitted.
+            and self._policy_engine.runtime.pending_post_restore_generation is None
         )
 
     @property
@@ -451,6 +454,12 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
         current = self.current_load
         average = self.average_load
+        # Any load above the restore ceiling breaks the continuous below-ceiling
+        # proof, even on cycles that shed or otherwise return before the restore
+        # lane runs. Reset the dwell here so a restore always requires a fresh
+        # observation period after load recovers.
+        if current > self._restore_config.ceiling_w:
+            self._policy_engine.runtime.restore_since = None
         hard_interlock = self._policy.hard_interlock_w
         if hard_interlock is not None and current >= hard_interlock:
             decision = PolicyDecision(True, "hard_interlock", ReasonCode.HARD_INTERLOCK)
