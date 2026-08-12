@@ -26,6 +26,7 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
     CONF_DEVICE_POWER_SENSOR,
+    CONF_DEVICE_RESTORE_ENABLED,
     CONF_DEVICES,
     CONF_DISCOVERED_DEVICES,
     CONF_GRID_LOSS_MODE,
@@ -36,6 +37,11 @@ from .const import (
     CONF_PAUSE_PERIOD,
     CONF_PRIORITY,
     CONF_PRIORITY_ORDER,
+    CONF_RESTORE_COOLDOWN,
+    CONF_RESTORE_DWELL,
+    CONF_RESTORE_ENABLED,
+    CONF_RESTORE_HYSTERESIS,
+    CONF_RESTORE_THRESHOLD,
     CONF_SAFETY_RESERVE,
     CONF_SHED_PRIORITY,
     CONF_THRESHOLD_COUNT,
@@ -46,6 +52,9 @@ from .const import (
     DEFAULT_HARD_INTERLOCK,
     DEFAULT_HYSTERESIS,
     DEFAULT_PAUSE_PERIOD,
+    DEFAULT_RESTORE_COOLDOWN,
+    DEFAULT_RESTORE_DWELL,
+    DEFAULT_RESTORE_HYSTERESIS,
     DEFAULT_SAFETY_RESERVE,
     DEFAULT_SHED_CRITICAL_DURATION,
     DEFAULT_SHED_CRITICAL_LIMIT,
@@ -377,6 +386,7 @@ def _normalize_options_devices(value: Any) -> list[dict[str, Any]]:
                 CONF_PRIORITY: priority,
                 CONF_SHED_PRIORITY: shed_priority,
                 CONF_DEVICE_ACTUATORS: actuators,
+                CONF_DEVICE_RESTORE_ENABLED: bool(raw.get(CONF_DEVICE_RESTORE_ENABLED, False)),
             }
         )
         seen_ids.add(device_id)
@@ -440,6 +450,42 @@ def _options_schema_for_entry(entry: Any) -> vol.Schema:
         vol.Required(
             CONF_PAUSE_PERIOD,
             default=_entry_current(entry, CONF_PAUSE_PERIOD, DEFAULT_PAUSE_PERIOD),
+        ): selector.NumberSelector(
+            cast(Any, selector.NumberSelectorConfig)(
+                min=0, max=86400, mode="box", unit_of_measurement="s"
+            )
+        ),
+        vol.Optional(
+            CONF_RESTORE_ENABLED,
+            default=bool(_entry_current(entry, CONF_RESTORE_ENABLED, False)),
+        ): selector.BooleanSelector(),
+        vol.Optional(
+            CONF_RESTORE_THRESHOLD,
+            default=_entry_current(entry, CONF_RESTORE_THRESHOLD, 3000),
+        ): selector.NumberSelector(
+            cast(Any, selector.NumberSelectorConfig)(
+                min=0, max=50000, mode="box", unit_of_measurement="W"
+            )
+        ),
+        vol.Optional(
+            CONF_RESTORE_HYSTERESIS,
+            default=_entry_current(entry, CONF_RESTORE_HYSTERESIS, DEFAULT_RESTORE_HYSTERESIS),
+        ): selector.NumberSelector(
+            cast(Any, selector.NumberSelectorConfig)(
+                min=0, max=5000, mode="box", unit_of_measurement="W"
+            )
+        ),
+        vol.Optional(
+            CONF_RESTORE_DWELL,
+            default=_entry_current(entry, CONF_RESTORE_DWELL, DEFAULT_RESTORE_DWELL),
+        ): selector.NumberSelector(
+            cast(Any, selector.NumberSelectorConfig)(
+                min=0, max=86400, mode="box", unit_of_measurement="s"
+            )
+        ),
+        vol.Optional(
+            CONF_RESTORE_COOLDOWN,
+            default=_entry_current(entry, CONF_RESTORE_COOLDOWN, DEFAULT_RESTORE_COOLDOWN),
         ): selector.NumberSelector(
             cast(Any, selector.NumberSelectorConfig)(
                 min=0, max=86400, mode="box", unit_of_measurement="s"
@@ -583,6 +629,10 @@ def _prepare_options_submission(
         CONF_SAFETY_RESERVE: (DEFAULT_SAFETY_RESERVE, 0, 5000),
         CONF_HYSTERESIS: (DEFAULT_HYSTERESIS, 0, 5000),
         CONF_PAUSE_PERIOD: (DEFAULT_PAUSE_PERIOD, 0, 86400),
+        CONF_RESTORE_THRESHOLD: (_entry_current(entry, CONF_RESTORE_THRESHOLD, 3000), 0, 50000),
+        CONF_RESTORE_HYSTERESIS: (DEFAULT_RESTORE_HYSTERESIS, 0, 5000),
+        CONF_RESTORE_DWELL: (DEFAULT_RESTORE_DWELL, 0, 86400),
+        CONF_RESTORE_COOLDOWN: (DEFAULT_RESTORE_COOLDOWN, 0, 86400),
     }
     if mode == GRID_LOSS_MODE_THRESHOLD:
         numeric_specs[CONF_BATTERY_THRESHOLD] = (20, 0, 100)
@@ -616,10 +666,15 @@ def _prepare_options_submission(
     if errors:
         return None, submitted_thresholds, errors
 
+    restore_enabled = bool(
+        user_input.get(CONF_RESTORE_ENABLED, _entry_current(entry, CONF_RESTORE_ENABLED, False))
+    )
+
     normalized: dict[str, Any] = {
         CONF_LOAD_SENSOR: load_sensor,
         CONF_DEVICES: devices,
         CONF_GRID_LOSS_MODE: mode,
+        CONF_RESTORE_ENABLED: restore_enabled,
     }
     normalized.update(values)
     if mode == GRID_LOSS_MODE_SENSOR:
@@ -850,6 +905,10 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             vol.Optional(
                 CONF_DEVICE_ACTUATORS, default=list(candidate.get(CONF_DEVICE_ACTUATORS, ()) or ())
             ): _entity_selector(["switch", "light", "input_boolean", "climate"], multiple=True),
+            vol.Optional(
+                CONF_DEVICE_RESTORE_ENABLED,
+                default=bool(candidate.get(CONF_DEVICE_RESTORE_ENABLED, False)),
+            ): selector.BooleanSelector(),
         }
         if not candidate:
             fields[vol.Optional(CONF_ADD_ANOTHER, default=False)] = bool
@@ -894,6 +953,12 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             CONF_DEVICE_EXPECTED_POWER: user_input.get(CONF_DEVICE_EXPECTED_POWER, 2000),
             CONF_DEVICE_POWER_SENSOR: power_sensor,
             CONF_DEVICE_ACTUATORS: actuator_values,
+            CONF_DEVICE_RESTORE_ENABLED: bool(
+                user_input.get(
+                    CONF_DEVICE_RESTORE_ENABLED,
+                    candidate.get(CONF_DEVICE_RESTORE_ENABLED, False),
+                )
+            ),
         }
 
     async def async_step_devices(self, user_input: dict[str, Any] | None = None) -> Any:
