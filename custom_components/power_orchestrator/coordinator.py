@@ -27,8 +27,6 @@ from .const import (
     EXECUTION_MODE_LIVE,
     EXECUTION_MODE_OBSERVE,
     EXTERNAL_OWNERSHIP_GRACE_SECONDS,
-    GRID_LOSS_MODE_SENSOR,
-    GRID_LOSS_MODE_THRESHOLD,
     MODE_AUTO,
     MODE_OFF,
     QUARANTINE_CLEAR_MAX_POWER_W,
@@ -57,9 +55,9 @@ from .states import (
     logical_device_state,
     ordinary_shedding_power_eligible,
     state_is_available,
-    state_reported_timestamp,
 )
 from .storage import RuntimeStore
+from .telemetry import SafetySource, read_load_sensor
 
 _LOGGER = logging.getLogger(__name__)
 _MAX_SHED_REJECTION_DETAILS = 12
@@ -119,6 +117,12 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         self._grid_loss_sensor = config.grid_loss_sensor
         self._battery_threshold = config.battery_threshold
         self._battery_soc_sensor = config.battery_soc_sensor
+        self._safety_source = SafetySource(
+            mode=config.grid_loss_mode,
+            grid_sensor=config.grid_loss_sensor,
+            battery_soc_sensor=config.battery_soc_sensor,
+            battery_threshold=config.battery_threshold,
+        )
         self._entry_id = config.entry_id
         self._execution_mode = (
             config.execution_mode
@@ -321,75 +325,17 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
     @property
     def grid_safety_source_configured(self) -> bool:
-        if self._grid_loss_mode == GRID_LOSS_MODE_SENSOR:
-            return bool(self._grid_loss_sensor)
-        if self._grid_loss_mode == GRID_LOSS_MODE_THRESHOLD:
-            return bool(self._battery_soc_sensor and self._battery_threshold is not None)
-        return False
+        return self._safety_source.configured
 
     @property
     def grid_safety_source_available(self) -> bool:
-        """Return whether the configured safety source reports a usable state.
-
-        Home Assistant's source entity owns semantic availability. Do
-        not infer unavailability from ``last_updated``: a valid numeric zero or
-        an unchanged binary state can be legitimately reported. The source
-        must publish ``unavailable``/``unknown`` when it cannot vouch for its
-        value.
-        """
-        if not self.grid_safety_source_configured:
-            return False
-        sensor_id = (
-            self._grid_loss_sensor
-            if self._grid_loss_mode == GRID_LOSS_MODE_SENSOR
-            else self._battery_soc_sensor
-        )
-        if not isinstance(sensor_id, str):
-            return False
-        state = self.hass.states.get(sensor_id)
-        if not state_is_available(state):
-            return False
-        if self._grid_loss_mode == GRID_LOSS_MODE_SENSOR:
-            return getattr(state, "state", None) in {STATE_ON, STATE_OFF}
-        unit = getattr(state, "attributes", {}).get("unit_of_measurement")
-        if str(unit).strip() not in {"%", "percent"}:
-            return False
-        try:
-            soc = float(getattr(state, "state", ""))
-        except (TypeError, ValueError):
-            return False
-        return math.isfinite(soc) and 0 <= soc <= 100
+        """Return whether the configured safety source reports a usable state."""
+        return self._safety_source.available(self.hass)
 
     @property
     def grid_ok(self) -> bool:
         """Return true only for a configured, available, valid safety source."""
-        if not self.grid_safety_source_configured:
-            return False
-        if self._grid_loss_mode == GRID_LOSS_MODE_SENSOR:
-            sensor_id = self._grid_loss_sensor
-            if not isinstance(sensor_id, str):
-                return False
-            state = self.hass.states.get(sensor_id)
-            if not self.grid_safety_source_available:
-                return False
-            return getattr(state, "state", None) == STATE_ON
-        sensor_id = self._battery_soc_sensor
-        if not isinstance(sensor_id, str):
-            return False
-        state = self.hass.states.get(sensor_id)
-        if not self.grid_safety_source_available:
-            return False
-        unit = getattr(state, "attributes", {}).get("unit_of_measurement")
-        if str(unit).strip() not in {"%", "percent"}:
-            return False
-        try:
-            soc = float(getattr(state, "state", ""))
-        except (TypeError, ValueError):
-            return False
-        threshold = self._battery_threshold
-        if threshold is None:
-            return False
-        return math.isfinite(soc) and 0 <= soc <= 100 and soc > float(threshold)
+        return self._safety_source.ok(self.hass)
 
     async def _async_update_data(self) -> dict[str, Any]:
         await self._evaluate_safely()
@@ -642,40 +588,12 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         device.measured_power_reason = "ok"
 
     def _read_load_sensor(self) -> float:
-        """Read an available, non-negative power value and retain its failure reason."""
-        state = self.hass.states.get(self._load_sensor)
-        if state is None:
-            self._load_sensor_valid = False
-            self._load_sensor_reason = "unavailable"
-            self._load_reported_at = None
-            return 0.0
-        if not state_is_available(state):
-            self._load_sensor_valid = False
-            self._load_sensor_reason = "unavailable"
-            self._load_reported_at = None
-            return 0.0
-        unit = getattr(state, "attributes", {}).get("unit_of_measurement")
-        normalized_unit = str(unit).strip().lower()
-        try:
-            value = float(getattr(state, "state", ""))
-        except (TypeError, ValueError):
-            value = math.nan
-        if normalized_unit in {"kw", "kilowatt", "kilowatts"}:
-            value *= 1000
-        elif normalized_unit not in {"w", "watt", "watts"}:
-            self._load_sensor_valid = False
-            self._load_sensor_reason = "unsupported_unit"
-            self._load_reported_at = None
-            return 0.0
-        if not math.isfinite(value) or value < 0:
-            self._load_sensor_valid = False
-            self._load_sensor_reason = "invalid_value"
-            self._load_reported_at = None
-            return 0.0
-        self._load_sensor_valid = True
-        self._load_sensor_reason = "ok"
-        self._load_reported_at = state_reported_timestamp(state)
-        return value
+        """Read the aggregate load, retaining validity and failure reason."""
+        reading = read_load_sensor(self.hass, self._load_sensor)
+        self._load_sensor_valid = reading.valid
+        self._load_sensor_reason = reading.reason
+        self._load_reported_at = reading.reported_at
+        return reading.value
 
     async def _handle_grid_loss(
         self,
