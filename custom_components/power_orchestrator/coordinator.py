@@ -7,7 +7,6 @@ import hashlib
 import logging
 import math
 import time
-import uuid
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -23,7 +22,6 @@ from .const import (
     EVALUATION_INTERVAL,
     EVENT_ACTION,
     EVENT_DECISION,
-    EVENT_SCHEMA_VERSION,
     EXECUTION_MODE_LIVE,
     EXECUTION_MODE_OBSERVE,
     EXTERNAL_OWNERSHIP_GRACE_SECONDS,
@@ -39,6 +37,7 @@ from .const import (
     STATUS_OBSERVE,
     STATUS_SAFETY_BLOCKED,
 )
+from .journal import emit_event, new_action_id, record_action
 from .policy import (
     Ownership,
     PolicyConfig,
@@ -1148,7 +1147,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             setter(device.device_id, device.pause_until)
 
     def _new_action_id(self, prefix: str) -> str:
-        return f"{prefix}_{uuid.uuid4().hex}"
+        return new_action_id(prefix)
 
     def _next_operation_id(self, device: ManagedDevice) -> int:
         del device
@@ -1156,15 +1155,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         return self._next_operation
 
     def _record_action(self, event: dict[str, Any]) -> None:
-        action_id = event.get("action_id")
-        if not isinstance(action_id, str) or not action_id:
-            return
-        record = dict(event)
-        record.setdefault("event_schema", EVENT_SCHEMA_VERSION)
-        record.setdefault("timestamp", time.time())
-        writer = getattr(self._store, "record_action", None)
-        if callable(writer):
-            writer(record)
+        if record_action(self._store, event):
             self._journal_dirty = True
 
     async def _record_observe_only_action(
@@ -1194,21 +1185,14 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         await self._persist_runtime_if_dirty()
 
     def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
-        bus = getattr(self.hass, "bus", None)
-        emitter = getattr(bus, "async_fire", None)
-        event = {
-            **data,
-            "schema_version": EVENT_SCHEMA_VERSION,
-            "event_type": event_type,
-            "entry_id": self._entry_id,
-            "execution_mode": self._execution_mode,
-            "mode": self._mode,
-        }
-        if callable(emitter):
-            try:
-                emitter(event_type, event)
-            except Exception:  # pragma: no cover - event delivery is non-safety-critical
-                _LOGGER.debug("Power Orchestrator event delivery failed", exc_info=True)
+        emit_event(
+            self.hass,
+            event_type,
+            data,
+            entry_id=self._entry_id,
+            execution_mode=self._execution_mode,
+            mode=self._mode,
+        )
 
     async def async_authorize_shedding(
         self,
