@@ -96,6 +96,19 @@ def test_hysteresis_band_does_not_reset_dwell_so_maturation_still_fires() -> Non
     assert decision.reason_code is ReasonCode.SHED_SUSTAINED_OVERLOAD
 
 
+def test_hysteresis_at_or_above_limit_falls_back_to_exact_limit_arming() -> None:
+    # A band >= the tier limit must not create a tier that never de-arms.
+    engine = _single_tier_engine(hysteresis_w=5000.0, duration_s=0.0)
+    engine.observe_load(150, now=0)  # arm (limit 5000? no: single-tier limit is 5000)
+    # limit is 5000; load 150 is below it, so it should not even arm.
+    assert engine.runtime.tier_since == {}
+    # Arm above the limit, then drop below: with band >= limit, de-arm at limit.
+    engine.observe_load(5100, now=1)
+    assert "t" in engine.runtime.tier_since
+    engine.observe_load(4999, now=2)
+    assert engine.runtime.tier_since == {}
+
+
 def test_hysteresis_does_not_affect_hard_interlock() -> None:
     engine = _single_tier_engine(hysteresis_w=200.0)
     decision = engine.observe_load(9000, now=0)

@@ -372,11 +372,16 @@ class PolicyEngine:
         band = max(0.0, self.policy.hysteresis_w)
         exceeded: list[ThresholdTier] = []
         for tier in self.policy.thresholds:
+            # Fail-safe: a band at or above a tier's limit would push the de-arm
+            # floor to <= 0, so the tier could never disarm and would keep
+            # shedding while load sits well below its limit. In that degenerate
+            # case fall back to exact-limit arming for that tier (band = 0).
+            tier_band = band if band < tier.limit_w else 0.0
             latched = tier.tier_id in self.runtime.tier_since
             if load_w > tier.limit_w:
                 exceeded.append(tier)
                 self.runtime.tier_since.setdefault(tier.tier_id, now)
-            elif latched and load_w > tier.limit_w - band:
+            elif latched and load_w > tier.limit_w - tier_band:
                 # Within the hysteresis band: stay armed and keep the dwell start
                 # so a brief dip does not de-arm or reset the tier.
                 exceeded.append(tier)
