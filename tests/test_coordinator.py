@@ -18,7 +18,7 @@ from power_orchestrator.const import (
     STATUS_LOAD_SHEDDING,
     STATUS_SAFETY_BLOCKED,
 )
-from power_orchestrator.coordinator import PowerOrchestratorCoordinator
+from power_orchestrator.coordinator import CoordinatorConfig, PowerOrchestratorCoordinator
 from power_orchestrator.policy import Ownership, PolicyConfig
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 from power_orchestrator.storage import RuntimeStore
@@ -97,18 +97,20 @@ def coordinator(
         hass=hass,
         model=model(),
         store=store,
-        load_sensor="sensor.load",
-        max_load=5000,
-        averaging_period=10,
-        safety_reserve=200,
-        hysteresis=100,
-        pause_period=60,
-        grid_loss_mode=grid_mode,
-        grid_loss_sensor=grid_sensor,
-        battery_threshold=battery_threshold,
-        battery_soc_sensor=battery_soc,
-        policy=policy,
-        execution_mode=execution_mode,
+        config=CoordinatorConfig(
+            load_sensor="sensor.load",
+            max_load=5000,
+            averaging_period=10,
+            safety_reserve=200,
+            hysteresis=100,
+            pause_period=60,
+            grid_loss_mode=grid_mode,
+            grid_loss_sensor=grid_sensor,
+            battery_threshold=battery_threshold,
+            battery_soc_sensor=battery_soc,
+            policy=policy,
+            execution_mode=execution_mode,
+        ),
     )
     result.mode = MODE_AUTO
     return result

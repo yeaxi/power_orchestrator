@@ -10,6 +10,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -57,6 +58,31 @@ _MAX_SHED_REJECTION_DETAILS = 12
 _MAX_LAST_ACTION_LENGTH = 255
 
 
+@dataclass(frozen=True)
+class CoordinatorConfig:
+    """Bounded static configuration for the coordinator.
+
+    Groups the load/safety/policy settings so the coordinator takes a single
+    config object instead of a long positional parameter list. Runtime state
+    (mode, faults, restore arm, etc.) is not part of this record.
+    """
+
+    load_sensor: str
+    max_load: float
+    averaging_period: float
+    safety_reserve: float
+    hysteresis: float
+    pause_period: float
+    grid_loss_mode: str
+    grid_loss_sensor: str | None = None
+    battery_threshold: float | None = None
+    battery_soc_sensor: str | None = None
+    entry_id: str = DOMAIN
+    policy: PolicyConfig | None = None
+    execution_mode: str = EXECUTION_MODE_LIVE
+    restore_config: RestoreConfig | None = None
+
+
 class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # type: ignore[misc]
     """Evaluate load telemetry and issue bounded physical OFF commands only."""
 
@@ -65,20 +91,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         hass: HomeAssistant,
         model: PowerModel,
         store: RuntimeStore,
-        load_sensor: str,
-        max_load: float,
-        averaging_period: float,
-        safety_reserve: float,
-        hysteresis: float,
-        pause_period: float,
-        grid_loss_mode: str,
-        grid_loss_sensor: str | None,
-        battery_threshold: float | None,
-        battery_soc_sensor: str | None,
-        entry_id: str = DOMAIN,
-        policy: PolicyConfig | None = None,
-        execution_mode: str = EXECUTION_MODE_LIVE,
-        restore_config: RestoreConfig | None = None,
+        config: CoordinatorConfig,
     ) -> None:
         super().__init__(
             hass,
@@ -88,23 +101,23 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         )
         self._model = model
         self._store = store
-        self._load_sensor = load_sensor
-        self._max_load = float(max_load)
-        self._averaging_period = max(1.0, float(averaging_period))
-        self._safety_reserve = max(0.0, float(safety_reserve))
-        self._hysteresis = max(0.0, float(hysteresis))
-        self._pause_period = max(0.0, float(pause_period))
-        self._grid_loss_mode = grid_loss_mode
-        self._grid_loss_sensor = grid_loss_sensor
-        self._battery_threshold = battery_threshold
-        self._battery_soc_sensor = battery_soc_sensor
-        self._entry_id = entry_id
+        self._load_sensor = config.load_sensor
+        self._max_load = float(config.max_load)
+        self._averaging_period = max(1.0, float(config.averaging_period))
+        self._safety_reserve = max(0.0, float(config.safety_reserve))
+        self._hysteresis = max(0.0, float(config.hysteresis))
+        self._pause_period = max(0.0, float(config.pause_period))
+        self._grid_loss_mode = config.grid_loss_mode
+        self._grid_loss_sensor = config.grid_loss_sensor
+        self._battery_threshold = config.battery_threshold
+        self._battery_soc_sensor = config.battery_soc_sensor
+        self._entry_id = config.entry_id
         self._execution_mode = (
-            execution_mode
-            if execution_mode in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE)
+            config.execution_mode
+            if config.execution_mode in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE)
             else EXECUTION_MODE_OBSERVE
         )
-        self._policy = policy or PolicyConfig.from_mapping(
+        self._policy = config.policy or PolicyConfig.from_mapping(
             {
                 "safety_reserve": self._safety_reserve,
                 "hard_interlock": self._max_load,
@@ -117,13 +130,13 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             }
         )
         self._policy_engine = PolicyEngine(self._policy)
-        self._policy_enabled = policy is not None
+        self._policy_enabled = config.policy is not None
         self._last_policy_decision = self._policy_engine.last_decision
 
         # Guarded restore is fail-closed: disabled unless configured, and never
         # armed automatically. ``_planner_shed_devices`` tracks only loads this
         # planner shed via ordinary policy (never emergency/service/manual).
-        self._restore_config = restore_config or RestoreConfig()
+        self._restore_config = config.restore_config or RestoreConfig()
         self._restore_armed = False
         self._planner_shed_devices: set[str] = set()
         self._restore_cooldown_until: dict[str, float] = {}
