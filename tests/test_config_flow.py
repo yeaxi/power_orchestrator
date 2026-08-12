@@ -12,10 +12,9 @@ from power_orchestrator.config_flow import (
     _entity_id,
     _friendly,
     _normalize_options_devices,
-    _parse_threshold_input,
     _sensor_entity_id,
-    _threshold_field,
 )
+from power_orchestrator.flow_thresholds import _parse_threshold_input, _threshold_field
 from power_orchestrator.const import (
     CONF_ADD_THRESHOLD,
     CONF_DEVICE_ACTUATORS,

@@ -21,6 +21,7 @@ import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.setup import async_setup_component
 from power_orchestrator.const import (
+    CONF_ADD_THRESHOLD,
     CONF_AVERAGING_PERIOD,
     CONF_DEVICES,
     CONF_GRID_LOSS_MODE,
@@ -35,6 +36,8 @@ from power_orchestrator.const import (
     CONF_RESTORE_HYSTERESIS,
     CONF_RESTORE_THRESHOLD,
     CONF_SAFETY_RESERVE,
+    CONF_THRESHOLD_DURATION,
+    CONF_THRESHOLD_POWER,
     DOMAIN,
     GRID_LOSS_MODE_SENSOR,
 )
@@ -224,6 +227,74 @@ async def test_request_restore_enforces_headroom(hass):
     )
     await hass.async_block_till_done()
     assert hass.states.get(ACTUATOR).state == "on"
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_restore_configurable_via_options_flow(hass):
+    """Guarded restore can be enabled and tuned through the real Options flow."""
+    _install_integration(hass)
+    await _prepare_entities(hass)
+    # A device-free entry keeps this test focused on the restore options wiring
+    # (no priority-order field to satisfy).
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Power Orchestrator options",
+        data={
+            CONF_LOAD_SENSOR: LOAD_SENSOR,
+            CONF_MAX_LOAD: 5000,
+            CONF_AVERAGING_PERIOD: 30,
+            CONF_SAFETY_RESERVE: 200,
+            CONF_HYSTERESIS: 100,
+            CONF_DEVICES: [],
+            CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
+            CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.runtime_data.coordinator._restore_config.enabled is False
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["step_id"] == "init"
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={
+            CONF_LOAD_SENSOR: LOAD_SENSOR,
+            CONF_DEVICES: [],
+            CONF_MAX_LOAD: 5000,
+            CONF_AVERAGING_PERIOD: 30,
+            CONF_SAFETY_RESERVE: 200,
+            CONF_HYSTERESIS: 100,
+            CONF_PAUSE_PERIOD: 0,
+            CONF_RESTORE_ENABLED: True,
+            CONF_RESTORE_THRESHOLD: 4000,
+            CONF_RESTORE_HYSTERESIS: 200,
+            CONF_RESTORE_DWELL: 300,
+            CONF_RESTORE_COOLDOWN: 600,
+            CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
+            CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
+        },
+    )
+    assert result["step_id"] == "thresholds"
+    for power, duration, add_threshold in ((6500, 300, True), (8000, 5, False)):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_THRESHOLD_POWER: power,
+                CONF_THRESHOLD_DURATION: duration,
+                CONF_ADD_THRESHOLD: add_threshold,
+            },
+        )
+    assert result["type"] == "create_entry"
+    await hass.async_block_till_done()
+
+    assert entry.options[CONF_RESTORE_ENABLED] is True
+    assert entry.options[CONF_RESTORE_THRESHOLD] == 4000
+    # The options update reloads the entry; the new coordinator reflects restore.
+    reloaded = entry.runtime_data.coordinator
+    assert reloaded._restore_config.enabled is True
+    assert reloaded._restore_config.threshold_w == 4000
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")

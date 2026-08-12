@@ -63,7 +63,7 @@ from .const import (
     STORAGE_KEY,
     STORAGE_VERSION,
 )
-from .coordinator import PowerOrchestratorCoordinator
+from .coordinator import CoordinatorConfig, PowerOrchestratorCoordinator
 from .policy import PolicyConfig, RestoreConfig
 from .power_model import ManagedDevice, PowerModel
 from .runtime import PowerOrchestratorRuntimeData
@@ -149,9 +149,10 @@ def _repair_device_ids(hass: HomeAssistant, entry: ConfigEntry) -> set[str]:
                 values.update(item for item in raw if isinstance(item, str) and item)
         if values:
             return values
-    return set(getattr(coordinator, "_faulted", set())) | set(
-        getattr(coordinator, "_quarantined", set())
-    )
+    faults = getattr(coordinator, "_faults", None)
+    if faults is None:
+        return set()
+    return set(getattr(faults, "faulted", set())) | set(getattr(faults, "quarantined", set()))
 
 
 def _sync_repair_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -410,34 +411,41 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
         hass=hass,
         model=model,
         store=store,
-        load_sensor=str(data.get(CONF_LOAD_SENSOR, "")),
-        max_load=_safe_number(data.get(CONF_MAX_LOAD), default=5000, minimum=100, maximum=50000),
-        averaging_period=_safe_number(
-            data.get(CONF_AVERAGING_PERIOD),
-            default=DEFAULT_AVERAGING_PERIOD,
-            minimum=1,
-            maximum=300,
+        config=CoordinatorConfig(
+            load_sensor=str(data.get(CONF_LOAD_SENSOR, "")),
+            max_load=_safe_number(
+                data.get(CONF_MAX_LOAD), default=5000, minimum=100, maximum=50000
+            ),
+            averaging_period=_safe_number(
+                data.get(CONF_AVERAGING_PERIOD),
+                default=DEFAULT_AVERAGING_PERIOD,
+                minimum=1,
+                maximum=300,
+            ),
+            safety_reserve=_safe_number(
+                data.get(CONF_SAFETY_RESERVE),
+                default=DEFAULT_SAFETY_RESERVE,
+                minimum=0,
+                maximum=5000,
+            ),
+            hysteresis=_safe_number(
+                data.get(CONF_HYSTERESIS), default=DEFAULT_HYSTERESIS, minimum=0, maximum=5000
+            ),
+            pause_period=_safe_number(
+                data.get(CONF_PAUSE_PERIOD),
+                default=DEFAULT_PAUSE_PERIOD,
+                minimum=0,
+                maximum=MAX_RUNTIME_PAUSE_SECONDS,
+            ),
+            grid_loss_mode=data.get(CONF_GRID_LOSS_MODE, GRID_LOSS_MODE_SENSOR),
+            grid_loss_sensor=data.get(CONF_GRID_LOSS_SENSOR),
+            battery_threshold=data.get(CONF_BATTERY_THRESHOLD),
+            battery_soc_sensor=data.get(CONF_BATTERY_SOC),
+            entry_id=entry.entry_id,
+            policy=policy,
+            execution_mode=execution_mode,
+            restore_config=restore_config,
         ),
-        safety_reserve=_safe_number(
-            data.get(CONF_SAFETY_RESERVE), default=DEFAULT_SAFETY_RESERVE, minimum=0, maximum=5000
-        ),
-        hysteresis=_safe_number(
-            data.get(CONF_HYSTERESIS), default=DEFAULT_HYSTERESIS, minimum=0, maximum=5000
-        ),
-        pause_period=_safe_number(
-            data.get(CONF_PAUSE_PERIOD),
-            default=DEFAULT_PAUSE_PERIOD,
-            minimum=0,
-            maximum=MAX_RUNTIME_PAUSE_SECONDS,
-        ),
-        grid_loss_mode=data.get(CONF_GRID_LOSS_MODE, GRID_LOSS_MODE_SENSOR),
-        grid_loss_sensor=data.get(CONF_GRID_LOSS_SENSOR),
-        battery_threshold=data.get(CONF_BATTERY_THRESHOLD),
-        battery_soc_sensor=data.get(CONF_BATTERY_SOC),
-        entry_id=entry.entry_id,
-        policy=policy,
-        execution_mode=execution_mode,
-        restore_config=restore_config,
     )
     coordinator._safety_storage_invalid = store.safety_storage_invalid
     store.restore_pause_timestamps(model, MAX_RUNTIME_PAUSE_SECONDS)

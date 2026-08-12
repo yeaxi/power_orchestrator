@@ -7,13 +7,13 @@ import hashlib
 import logging
 import math
 import time
-import uuid
 from collections import deque
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
-from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -22,17 +22,12 @@ from .const import (
     EVALUATION_INTERVAL,
     EVENT_ACTION,
     EVENT_DECISION,
-    EVENT_SCHEMA_VERSION,
     EXECUTION_MODE_LIVE,
     EXECUTION_MODE_OBSERVE,
     EXTERNAL_OWNERSHIP_GRACE_SECONDS,
-    GRID_LOSS_MODE_SENSOR,
-    GRID_LOSS_MODE_THRESHOLD,
     MODE_AUTO,
     MODE_OFF,
     QUARANTINE_CLEAR_MAX_POWER_W,
-    RELAY_READBACK_POLL_INTERVAL_SECONDS,
-    RELAY_READBACK_TIMEOUT_SECONDS,
     STATUS_GRID_LOSS,
     STATUS_LOAD_RESTORING,
     STATUS_LOAD_SHEDDING,
@@ -40,6 +35,8 @@ from .const import (
     STATUS_OBSERVE,
     STATUS_SAFETY_BLOCKED,
 )
+from .fault_registry import FaultRegistry
+from .journal import emit_event, new_action_id, record_action
 from .policy import (
     Ownership,
     PolicyConfig,
@@ -50,11 +47,45 @@ from .policy import (
     RestoreConfig,
 )
 from .power_model import ManagedDevice, PowerModel
+from .readback import confirm_device_state
+from .selection import restore_candidates, shed_candidates, shed_rejection_summary
+from .states import (
+    logical_device_confirmed_off,
+    logical_device_reported_at,
+    logical_device_state,
+    ordinary_shedding_power_eligible,
+    state_is_available,
+)
 from .storage import RuntimeStore
+from .telemetry import SafetySource, read_load_sensor
 
 _LOGGER = logging.getLogger(__name__)
-_MAX_SHED_REJECTION_DETAILS = 12
 _MAX_LAST_ACTION_LENGTH = 255
+
+
+@dataclass(frozen=True)
+class CoordinatorConfig:
+    """Bounded static configuration for the coordinator.
+
+    Groups the load/safety/policy settings so the coordinator takes a single
+    config object instead of a long positional parameter list. Runtime state
+    (mode, faults, restore arm, etc.) is not part of this record.
+    """
+
+    load_sensor: str
+    max_load: float
+    averaging_period: float
+    safety_reserve: float
+    hysteresis: float
+    pause_period: float
+    grid_loss_mode: str
+    grid_loss_sensor: str | None = None
+    battery_threshold: float | None = None
+    battery_soc_sensor: str | None = None
+    entry_id: str = DOMAIN
+    policy: PolicyConfig | None = None
+    execution_mode: str = EXECUTION_MODE_LIVE
+    restore_config: RestoreConfig | None = None
 
 
 class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # type: ignore[misc]
@@ -65,20 +96,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         hass: HomeAssistant,
         model: PowerModel,
         store: RuntimeStore,
-        load_sensor: str,
-        max_load: float,
-        averaging_period: float,
-        safety_reserve: float,
-        hysteresis: float,
-        pause_period: float,
-        grid_loss_mode: str,
-        grid_loss_sensor: str | None,
-        battery_threshold: float | None,
-        battery_soc_sensor: str | None,
-        entry_id: str = DOMAIN,
-        policy: PolicyConfig | None = None,
-        execution_mode: str = EXECUTION_MODE_LIVE,
-        restore_config: RestoreConfig | None = None,
+        config: CoordinatorConfig,
     ) -> None:
         super().__init__(
             hass,
@@ -88,23 +106,29 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         )
         self._model = model
         self._store = store
-        self._load_sensor = load_sensor
-        self._max_load = float(max_load)
-        self._averaging_period = max(1.0, float(averaging_period))
-        self._safety_reserve = max(0.0, float(safety_reserve))
-        self._hysteresis = max(0.0, float(hysteresis))
-        self._pause_period = max(0.0, float(pause_period))
-        self._grid_loss_mode = grid_loss_mode
-        self._grid_loss_sensor = grid_loss_sensor
-        self._battery_threshold = battery_threshold
-        self._battery_soc_sensor = battery_soc_sensor
-        self._entry_id = entry_id
+        self._load_sensor = config.load_sensor
+        self._max_load = float(config.max_load)
+        self._averaging_period = max(1.0, float(config.averaging_period))
+        self._safety_reserve = max(0.0, float(config.safety_reserve))
+        self._hysteresis = max(0.0, float(config.hysteresis))
+        self._pause_period = max(0.0, float(config.pause_period))
+        self._grid_loss_mode = config.grid_loss_mode
+        self._grid_loss_sensor = config.grid_loss_sensor
+        self._battery_threshold = config.battery_threshold
+        self._battery_soc_sensor = config.battery_soc_sensor
+        self._safety_source = SafetySource(
+            mode=config.grid_loss_mode,
+            grid_sensor=config.grid_loss_sensor,
+            battery_soc_sensor=config.battery_soc_sensor,
+            battery_threshold=config.battery_threshold,
+        )
+        self._entry_id = config.entry_id
         self._execution_mode = (
-            execution_mode
-            if execution_mode in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE)
+            config.execution_mode
+            if config.execution_mode in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE)
             else EXECUTION_MODE_OBSERVE
         )
-        self._policy = policy or PolicyConfig.from_mapping(
+        self._policy = config.policy or PolicyConfig.from_mapping(
             {
                 "safety_reserve": self._safety_reserve,
                 "hard_interlock": self._max_load,
@@ -117,13 +141,13 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             }
         )
         self._policy_engine = PolicyEngine(self._policy)
-        self._policy_enabled = policy is not None
+        self._policy_enabled = config.policy is not None
         self._last_policy_decision = self._policy_engine.last_decision
 
         # Guarded restore is fail-closed: disabled unless configured, and never
         # armed automatically. ``_planner_shed_devices`` tracks only loads this
         # planner shed via ordinary policy (never emergency/service/manual).
-        self._restore_config = restore_config or RestoreConfig()
+        self._restore_config = config.restore_config or RestoreConfig()
         self._restore_armed = False
         self._planner_shed_devices: set[str] = set()
         self._restore_cooldown_until: dict[str, float] = {}
@@ -153,10 +177,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         self._last_operation_result = "none"
         self._next_operation = 0
 
-        self._faulted: set[str] = set()
-        self._quarantined: set[str] = set()
-        self._fault_reasons: dict[str, str] = {}
-        self._fault_state_dirty = False
+        self._faults = FaultRegistry()
         self._action_journal_invalid = False
         self._journal_dirty = False
         self._journal_persistence_blocked = False
@@ -300,75 +321,17 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
     @property
     def grid_safety_source_configured(self) -> bool:
-        if self._grid_loss_mode == GRID_LOSS_MODE_SENSOR:
-            return bool(self._grid_loss_sensor)
-        if self._grid_loss_mode == GRID_LOSS_MODE_THRESHOLD:
-            return bool(self._battery_soc_sensor and self._battery_threshold is not None)
-        return False
+        return self._safety_source.configured
 
     @property
     def grid_safety_source_available(self) -> bool:
-        """Return whether the configured safety source reports a usable state.
-
-        Home Assistant's source entity owns semantic availability. Do
-        not infer unavailability from ``last_updated``: a valid numeric zero or
-        an unchanged binary state can be legitimately reported. The source
-        must publish ``unavailable``/``unknown`` when it cannot vouch for its
-        value.
-        """
-        if not self.grid_safety_source_configured:
-            return False
-        sensor_id = (
-            self._grid_loss_sensor
-            if self._grid_loss_mode == GRID_LOSS_MODE_SENSOR
-            else self._battery_soc_sensor
-        )
-        if not isinstance(sensor_id, str):
-            return False
-        state = self.hass.states.get(sensor_id)
-        if not self._state_is_available(state):
-            return False
-        if self._grid_loss_mode == GRID_LOSS_MODE_SENSOR:
-            return getattr(state, "state", None) in {STATE_ON, STATE_OFF}
-        unit = getattr(state, "attributes", {}).get("unit_of_measurement")
-        if str(unit).strip() not in {"%", "percent"}:
-            return False
-        try:
-            soc = float(getattr(state, "state", ""))
-        except (TypeError, ValueError):
-            return False
-        return math.isfinite(soc) and 0 <= soc <= 100
+        """Return whether the configured safety source reports a usable state."""
+        return self._safety_source.available(self.hass)
 
     @property
     def grid_ok(self) -> bool:
         """Return true only for a configured, available, valid safety source."""
-        if not self.grid_safety_source_configured:
-            return False
-        if self._grid_loss_mode == GRID_LOSS_MODE_SENSOR:
-            sensor_id = self._grid_loss_sensor
-            if not isinstance(sensor_id, str):
-                return False
-            state = self.hass.states.get(sensor_id)
-            if not self.grid_safety_source_available:
-                return False
-            return getattr(state, "state", None) == STATE_ON
-        sensor_id = self._battery_soc_sensor
-        if not isinstance(sensor_id, str):
-            return False
-        state = self.hass.states.get(sensor_id)
-        if not self.grid_safety_source_available:
-            return False
-        unit = getattr(state, "attributes", {}).get("unit_of_measurement")
-        if str(unit).strip() not in {"%", "percent"}:
-            return False
-        try:
-            soc = float(getattr(state, "state", ""))
-        except (TypeError, ValueError):
-            return False
-        threshold = self._battery_threshold
-        if threshold is None:
-            return False
-        return math.isfinite(soc) and 0 <= soc <= 100 and soc > float(threshold)
+        return self._safety_source.ok(self.hass)
 
     async def _async_update_data(self) -> dict[str, Any]:
         await self._evaluate_safely()
@@ -555,8 +518,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         """Reconcile logical actuator states and preserve external ownership briefly."""
         for device in self._model.all_devices():
             previous = self._last_observed_state.get(device.device_id, device.is_on)
-            logical_state = self._logical_device_state(device)
-            if device.device_id in self._quarantined:
+            logical_state = logical_device_state(self.hass, device)
+            if device.device_id in self._faults.quarantined:
                 device.is_on = None
                 # A quarantined load is no longer a guarded-restore candidate.
                 self._planner_shed_devices.discard(device.device_id)
@@ -597,7 +560,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         if not device.power_sensor_id:
             return
         state = self.hass.states.get(device.power_sensor_id)
-        if state is None or not self._state_is_available(state):
+        if state is None or not state_is_available(state):
             device.measured_power_reason = "unavailable"
             return
         unit = getattr(state, "attributes", {}).get("unit_of_measurement")
@@ -620,122 +583,13 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         device.measured_power_valid = True
         device.measured_power_reason = "ok"
 
-    @staticmethod
-    def _ordinary_shedding_power_eligible(device: ManagedDevice) -> bool:
-        """Require positive measured draw before ordinary shedding.
-
-        A configured power sensor reporting a valid zero (or only the bounded
-        near-zero clear threshold) describes an already-heated/idle load. It
-        must not be switched off merely because another load caused overload.
-        Emergency interlocks use their separate all-stop path.
-        """
-        if device.power_sensor_id is None:
-            return True
-        return device.measured_power_valid and device.measured_power > QUARANTINE_CLEAR_MAX_POWER_W
-
     def _read_load_sensor(self) -> float:
-        """Read an available, non-negative power value and retain its failure reason."""
-        state = self.hass.states.get(self._load_sensor)
-        if state is None:
-            self._load_sensor_valid = False
-            self._load_sensor_reason = "unavailable"
-            self._load_reported_at = None
-            return 0.0
-        if not self._state_is_available(state):
-            self._load_sensor_valid = False
-            self._load_sensor_reason = "unavailable"
-            self._load_reported_at = None
-            return 0.0
-        unit = getattr(state, "attributes", {}).get("unit_of_measurement")
-        normalized_unit = str(unit).strip().lower()
-        try:
-            value = float(getattr(state, "state", ""))
-        except (TypeError, ValueError):
-            value = math.nan
-        if normalized_unit in {"kw", "kilowatt", "kilowatts"}:
-            value *= 1000
-        elif normalized_unit not in {"w", "watt", "watts"}:
-            self._load_sensor_valid = False
-            self._load_sensor_reason = "unsupported_unit"
-            self._load_reported_at = None
-            return 0.0
-        if not math.isfinite(value) or value < 0:
-            self._load_sensor_valid = False
-            self._load_sensor_reason = "invalid_value"
-            self._load_reported_at = None
-            return 0.0
-        self._load_sensor_valid = True
-        self._load_sensor_reason = "ok"
-        self._load_reported_at = self._state_reported_timestamp(state)
-        return value
-
-    def _state_reported_timestamp(self, state: Any) -> float | None:
-        raw = getattr(state, "last_reported", None) if state is not None else None
-        if isinstance(raw, datetime):
-            if raw.tzinfo is None:
-                raw = raw.replace(tzinfo=timezone.utc)
-            value = raw.timestamp()
-            if math.isfinite(value):
-                return value
-        elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
-            value = float(raw)
-            if math.isfinite(value):
-                return value
-        return None
-
-    @staticmethod
-    def _state_is_available(state: Any) -> bool:
-        """Return whether Home Assistant reports a semantically usable state."""
-        if state is None:
-            return False
-        return getattr(state, "state", None) not in {
-            None,
-            STATE_UNKNOWN,
-            STATE_UNAVAILABLE,
-        }
-
-    def _actuator_state_on(self, entity_id: str, state: Any) -> bool | None:
-        raw = getattr(state, "state", None) if state is not None else None
-        if raw in {STATE_UNAVAILABLE, STATE_UNKNOWN, None}:
-            return None
-        domain = entity_id.split(".", 1)[0]
-        if domain in {"switch", "light", "input_boolean"}:
-            if raw == STATE_ON:
-                return True
-            if raw == STATE_OFF:
-                return False
-            return None
-        if domain == "climate":
-            return (
-                False
-                if raw == STATE_OFF
-                else (None if raw in {STATE_UNKNOWN, STATE_UNAVAILABLE} else True)
-            )
-        return None
-
-    def _logical_device_state(self, device: ManagedDevice) -> bool | None:
-        states = [
-            self._actuator_state_on(entity_id, self.hass.states.get(entity_id))
-            for entity_id in device.control_entity_ids
-        ]
-        if not states or any(value is None for value in states):
-            return None
-        if all(states):
-            return True
-        if not any(states):
-            return False
-        return None
-
-    def _logical_device_reported_at(self, device: ManagedDevice) -> float | None:
-        timestamps = [
-            self._state_reported_timestamp(self.hass.states.get(entity_id))
-            for entity_id in device.control_entity_ids
-        ]
-        valid = [timestamp for timestamp in timestamps if timestamp is not None]
-        return max(valid) if valid else None
-
-    def _logical_device_confirmed_off(self, device: ManagedDevice) -> bool:
-        return self._logical_device_state(device) is False
+        """Read the aggregate load, retaining validity and failure reason."""
+        reading = read_load_sensor(self.hass, self._load_sensor)
+        self._load_sensor_valid = reading.valid
+        self._load_sensor_reason = reading.reason
+        self._load_reported_at = reading.reported_at
+        return reading.value
 
     async def _handle_grid_loss(
         self,
@@ -755,19 +609,17 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return
         failed: list[str] = []
         for device in self._model.get_sorted_devices_reversed():
-            if self._logical_device_confirmed_off(device):
+            if logical_device_confirmed_off(self.hass, device):
                 continue
             if await self._command_off(device, emergency=True, source="grid_loss"):
                 self._grid_loss_expected_off.add(device.device_id)
                 self._pause_device(device)
             else:
                 failed.append(device.name)
-                self._quarantined.add(device.device_id)
-                self._faulted.add(device.device_id)
-                self._fault_reasons[device.device_id] = (
-                    self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value
+                self._faults.latch(
+                    device.device_id,
+                    self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value,
                 )
-                self._fault_state_dirty = True
         if failed:
             self._status = STATUS_SAFETY_BLOCKED
             self._last_action = f"{action_label} — OFF failed for: " + ", ".join(failed)
@@ -778,86 +630,30 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
     async def _perform_emergency_all_stop(self) -> None:
         """Best-effort emergency stop of every logical load."""
         for device in self._model.get_sorted_devices_reversed():
-            if self._logical_device_confirmed_off(device):
+            if logical_device_confirmed_off(self.hass, device):
                 continue
             if await self._command_off(device, emergency=True, source="emergency"):
                 self._pause_device(device)
             else:
-                self._quarantined.add(device.device_id)
-                self._faulted.add(device.device_id)
-                self._fault_reasons[device.device_id] = (
-                    self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value
+                self._faults.latch(
+                    device.device_id,
+                    self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value,
                 )
-                self._fault_state_dirty = True
         await self._persist_runtime_if_dirty()
 
     def _shed_candidate_snapshot(
         self,
     ) -> tuple[list[ManagedDevice], dict[str, int]]:
         """Evaluate candidates and rejection reasons from one telemetry snapshot."""
-        now = time.time()
-        candidates: list[ManagedDevice] = []
-        counts: dict[str, int] = {}
-        details: list[dict[str, Any]] = []
-        for device in self._model.get_shed_devices():
-            reason: str | None = None
-            if device.is_on is False:
-                reason = "off"
-            elif device.is_on is not True:
-                reason = "state_unavailable"
-            elif device.device_id in self._quarantined:
-                reason = "quarantined"
-            elif device.power_sensor_id is not None and not device.measured_power_valid:
-                reason = f"power_{device.measured_power_reason}"
-            elif (
-                device.power_sensor_id is not None
-                and device.measured_power <= QUARANTINE_CLEAR_MAX_POWER_W
-            ):
-                reason = "inactive_power"
-            elif (
-                device.ownership is Ownership.EXTERNAL
-                and device.ownership_until is not None
-                and now < device.ownership_until
-            ):
-                reason = "external_ownership_grace"
-
-            if reason is None:
-                candidates.append(device)
-                continue
-            counts[reason] = counts.get(reason, 0) + 1
-            if len(details) < _MAX_SHED_REJECTION_DETAILS:
-                details.append(
-                    {
-                        "device_id": device.device_id,
-                        "name": device.name[:80],
-                        "reason": reason,
-                        "measured_power_w": (
-                            device.measured_power if device.measured_power_valid else None
-                        ),
-                    }
-                )
-
-        total = sum(counts.values())
-        self._shed_rejection_evaluated_at = now
-        if candidates:
-            self._shed_rejection_counts = {}
-            self._shed_rejection_devices = []
-            self._shed_rejection_total = 0
-            self._shed_rejection_truncated = 0
-        else:
-            self._shed_rejection_counts = dict(sorted(counts.items()))
-            self._shed_rejection_devices = details
-            self._shed_rejection_total = total
-            self._shed_rejection_truncated = max(0, total - len(details))
-        return candidates, counts
-
-    @staticmethod
-    def _shed_rejection_summary(counts: Mapping[str, int]) -> str:
-        """Return a bounded state-safe summary of candidate rejection reasons."""
-        if not counts:
-            return "no configured devices"
-        summary = ", ".join(f"{reason}={count}" for reason, count in counts.items())
-        return summary[:180]
+        candidates, rejections = shed_candidates(
+            self._model, self._faults.quarantined, now=time.time()
+        )
+        self._shed_rejection_counts = rejections.counts
+        self._shed_rejection_devices = rejections.devices
+        self._shed_rejection_total = rejections.total
+        self._shed_rejection_truncated = rejections.truncated
+        self._shed_rejection_evaluated_at = rejections.evaluated_at
+        return candidates, rejections.counts
 
     async def _perform_shedding(
         self,
@@ -868,7 +664,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         """Switch off exactly one eligible active logical load."""
         candidates, rejection_counts = self._shed_candidate_snapshot()
         if not candidates:
-            summary = self._shed_rejection_summary(rejection_counts)
+            summary = shed_rejection_summary(rejection_counts)
             self._last_action = (
                 f"Load shedding required at {load_w:.0f} W; no eligible load ({summary})"
             )[:_MAX_LAST_ACTION_LENGTH]
@@ -888,12 +684,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return
         if not await self._command_off(device, source="policy"):
             self._status = STATUS_SAFETY_BLOCKED
-            self._quarantined.add(device.device_id)
-            self._faulted.add(device.device_id)
-            self._fault_reasons[device.device_id] = (
-                self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value
+            self._faults.latch(
+                device.device_id,
+                self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value,
             )
-            self._fault_state_dirty = True
             self._last_action = f"Load shedding OFF failed for {device.name}"
             await self._persist_runtime_if_dirty()
             return
@@ -948,30 +742,24 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         command_issued_at: float,
         pre_reported_at: float | None,
     ) -> bool:
-        """Wait within a fixed bound for a causal logical OFF report."""
+        """Wait within a fixed bound for a causal logical state report."""
         del operation_id
-        deadline = time.monotonic() + RELAY_READBACK_TIMEOUT_SECONDS
-        expected_on = expected_state != STATE_OFF
-        while time.monotonic() <= deadline:
-            logical = self._logical_device_state(device)
-            reported_at = self._logical_device_reported_at(device)
-            if logical is expected_on and reported_at is not None:
-                if pre_reported_at is None or reported_at > pre_reported_at:
-                    self._last_confirmed_reported_at[device.device_id] = reported_at
-                    return True
-                if reported_at >= command_issued_at:
-                    self._last_confirmed_reported_at[device.device_id] = reported_at
-                    return True
-            await asyncio.sleep(RELAY_READBACK_POLL_INTERVAL_SECONDS)
-        return False
+        confirmed_at = await confirm_device_state(
+            self.hass,
+            device,
+            expected_state,
+            command_issued_at=command_issued_at,
+            pre_reported_at=pre_reported_at,
+        )
+        if confirmed_at is None:
+            return False
+        self._last_confirmed_reported_at[device.device_id] = confirmed_at
+        return True
 
     def _latch_device_fault(self, device: ManagedDevice, reason: str) -> None:
         """Make an unconfirmed physical stop durable and safety-blocked."""
         device.is_on = None
-        self._quarantined.add(device.device_id)
-        self._faulted.add(device.device_id)
-        self._fault_reasons[device.device_id] = str(reason)[:160]
-        self._fault_state_dirty = True
+        self._faults.latch(device.device_id, reason)
         self._status = STATUS_SAFETY_BLOCKED
 
     async def _command_off(
@@ -1018,7 +806,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         await self._persist_runtime_if_dirty()
         self._record_action({**base, "phase": "dispatched", "result": "dispatched"})
         try:
-            pre_reported_at = self._logical_device_reported_at(device)
+            pre_reported_at = logical_device_reported_at(self.hass, device)
             command_issued_at = time.time()
             for entity_id in device.control_entity_ids:
                 domain = entity_id.split(".", 1)[0]
@@ -1081,43 +869,19 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return False
 
     def _restore_candidate_snapshot(self, current_load: float) -> list[ManagedDevice]:
-        """Return planner-shed loads eligible for one guarded restore, in order.
-
-        Eligibility is deliberately strict and fail-closed: the load must have
-        been shed by the planner itself, be opted in, be confirmed OFF and
-        planner-owned, not faulted/quarantined/paused/in cooldown, be a simple
-        switchable actuator (climate is out of scope), and still fit under the
-        restore threshold with the safety reserve once its expected power
-        returns.
-        """
-        now = time.time()
-        candidates: list[ManagedDevice] = []
-        for device in self._model.get_shed_devices():
-            if device.device_id not in self._planner_shed_devices:
-                continue
-            if not device.restore_enabled:
-                continue
-            if device.device_id in self._faulted or device.device_id in self._quarantined:
-                continue
-            if self._logical_device_state(device) is not False:
-                continue
-            if device.ownership is not Ownership.PLANNER:
-                continue
-            if device.pause_active:
-                continue
-            cooldown_until = self._restore_cooldown_until.get(device.device_id)
-            if cooldown_until is not None and now < cooldown_until:
-                continue
-            if any(
-                entity_id.split(".", 1)[0] == "climate"
-                for entity_id in device.control_entity_ids
-            ):
-                continue
-            projected = current_load + max(0.0, float(device.expected_power)) + self._safety_reserve
-            if projected > self._restore_config.threshold_w:
-                continue
-            candidates.append(device)
-        return candidates
+        """Return planner-shed loads eligible for one guarded restore, in order."""
+        return restore_candidates(
+            self.hass,
+            self._model,
+            planner_shed=self._planner_shed_devices,
+            faulted=self._faults.faulted,
+            quarantined=self._faults.quarantined,
+            cooldown_until=self._restore_cooldown_until,
+            restore_threshold_w=self._restore_config.threshold_w,
+            safety_reserve=self._safety_reserve,
+            current_load=current_load,
+            now=time.time(),
+        )
 
     async def _perform_restore(self, current_load: float) -> bool:
         """Attempt at most one guarded restore of a planner-shed load.
@@ -1225,7 +989,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         await self._persist_runtime_if_dirty()
         self._record_action({**base, "phase": "dispatched", "result": "dispatched"})
         try:
-            pre_reported_at = self._logical_device_reported_at(device)
+            pre_reported_at = logical_device_reported_at(self.hass, device)
             command_issued_at = time.time()
             for entity_id in device.control_entity_ids:
                 domain = entity_id.split(".", 1)[0]
@@ -1290,7 +1054,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             setter(device.device_id, device.pause_until)
 
     def _new_action_id(self, prefix: str) -> str:
-        return f"{prefix}_{uuid.uuid4().hex}"
+        return new_action_id(prefix)
 
     def _next_operation_id(self, device: ManagedDevice) -> int:
         del device
@@ -1298,15 +1062,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         return self._next_operation
 
     def _record_action(self, event: dict[str, Any]) -> None:
-        action_id = event.get("action_id")
-        if not isinstance(action_id, str) or not action_id:
-            return
-        record = dict(event)
-        record.setdefault("event_schema", EVENT_SCHEMA_VERSION)
-        record.setdefault("timestamp", time.time())
-        writer = getattr(self._store, "record_action", None)
-        if callable(writer):
-            writer(record)
+        if record_action(self._store, event):
             self._journal_dirty = True
 
     async def _record_observe_only_action(
@@ -1336,21 +1092,14 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         await self._persist_runtime_if_dirty()
 
     def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
-        bus = getattr(self.hass, "bus", None)
-        emitter = getattr(bus, "async_fire", None)
-        event = {
-            **data,
-            "schema_version": EVENT_SCHEMA_VERSION,
-            "event_type": event_type,
-            "entry_id": self._entry_id,
-            "execution_mode": self._execution_mode,
-            "mode": self._mode,
-        }
-        if callable(emitter):
-            try:
-                emitter(event_type, event)
-            except Exception:  # pragma: no cover - event delivery is non-safety-critical
-                _LOGGER.debug("Power Orchestrator event delivery failed", exc_info=True)
+        emit_event(
+            self.hass,
+            event_type,
+            data,
+            entry_id=self._entry_id,
+            execution_mode=self._execution_mode,
+            mode=self._mode,
+        )
 
     async def async_authorize_shedding(
         self,
@@ -1385,11 +1134,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                     device = self._model.get_device(device_id)
                     if device is None:
                         raise ValueError(f"unknown device_id: {device_id}")
-                    if device_id in self._faulted or device_id in self._quarantined:
+                    if device_id in self._faults.faulted or device_id in self._faults.quarantined:
                         raise ValueError(f"device is faulted or quarantined: {device_id}")
                     if device.is_on is not True:
                         raise ValueError(f"device is not confirmed on: {device_id}")
-                    if not self._ordinary_shedding_power_eligible(device):
+                    if not ordinary_shedding_power_eligible(device):
                         raise ValueError(
                             f"device power telemetry is not positive and valid: {device_id}"
                         )
@@ -1457,9 +1206,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             device = self._model.get_device(device_id)
             if device is None:
                 raise ValueError("unknown device_id")
-            if device_id not in self._quarantined and device_id not in self._faulted:
+            if device_id not in self._faults.quarantined and device_id not in self._faults.faulted:
                 return False
-            if self._logical_device_state(device) is not False:
+            if logical_device_state(self.hass, device) is not False:
                 return False
             load = self._read_load_sensor()
             if not self._load_sensor_valid or load > self._max_load:
@@ -1470,10 +1219,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                     or device.measured_power > QUARANTINE_CLEAR_MAX_POWER_W
                 ):
                     return False
-            self._quarantined.discard(device_id)
-            self._faulted.discard(device_id)
-            self._fault_reasons.pop(device_id, None)
-            self._fault_state_dirty = True
+            self._faults.clear(device_id)
             self._record_action(
                 {
                     "action_id": self._new_action_id("clear"),
@@ -1490,9 +1236,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             try:
                 await self._store.async_save()
             except Exception:
-                self._quarantined.add(device_id)
-                self._faulted.add(device_id)
-                self._fault_state_dirty = True
+                self._faults.quarantined.add(device_id)
+                self._faults.faulted.add(device_id)
+                self._faults.dirty = True
                 raise
             return True
 
@@ -1554,9 +1300,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                         for device in self._model.all_devices():
                             if (
                                 device.is_on is True
-                                and device.device_id not in self._faulted
-                                and device.device_id not in self._quarantined
-                                and self._ordinary_shedding_power_eligible(device)
+                                and device.device_id not in self._faults.faulted
+                                and device.device_id not in self._faults.quarantined
+                                and ordinary_shedding_power_eligible(device)
                             ):
                                 device.ownership = Ownership.PLANNER
                                 device.ownership_until = None
@@ -1690,9 +1436,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 continue
             device_id = record.get("device_id")
             if isinstance(device_id, str) and self._model.get_device(device_id) is not None:
-                self._quarantined.add(device_id)
-                self._faulted.add(device_id)
-                self._fault_reasons[device_id] = ReasonCode.PERSISTED_RUNTIME_INVALID.value
+                self._faults.quarantined.add(device_id)
+                self._faults.faulted.add(device_id)
+                self._faults.reasons[device_id] = ReasonCode.PERSISTED_RUNTIME_INVALID.value
         self._action_journal_invalid = bool(unresolved)
 
     def restore_device_runtime(
@@ -1706,16 +1452,16 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         """Restore validated persisted fault/quarantine sets."""
         configured = {device.device_id for device in self._model.all_devices()}
         self._safety_storage_invalid = bool(storage_invalid)
-        self._faulted.update(device_id for device_id in faulted_devices if device_id in configured)
-        self._quarantined.update(
+        self._faults.faulted.update(device_id for device_id in faulted_devices if device_id in configured)
+        self._faults.quarantined.update(
             device_id for device_id in quarantined_devices if device_id in configured
         )
-        self._fault_reasons = {
+        self._faults.reasons = {
             device_id: reason[:160]
             for device_id, reason in (fault_reasons or {}).items()
             if device_id in configured and isinstance(reason, str) and reason.strip()
         }
-        for device_id in self._faulted | self._quarantined:
+        for device_id in self._faults.faulted | self._faults.quarantined:
             device = self._model.get_device(device_id)
             if device is not None:
                 device.is_on = None
@@ -1733,9 +1479,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         if callable(saver):
             saver(
                 self._model,
-                faulted_devices=self._faulted,
-                quarantined_devices=self._quarantined,
-                fault_reasons=self._fault_reasons,
+                faulted_devices=self._faults.faulted,
+                quarantined_devices=self._faults.quarantined,
+                fault_reasons=self._faults.reasons,
             )
         notification_saver = getattr(self._store, "save_fault_notification_state", None)
         if callable(notification_saver):
@@ -1746,7 +1492,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
     async def _persist_runtime_if_dirty(self) -> bool:
         if not (
-            self._fault_state_dirty
+            self._faults.dirty
             or self._journal_dirty
             or self._action_journal_invalid
             or self._journal_persistence_blocked
@@ -1760,7 +1506,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._journal_persistence_blocked = True
             self._status = STATUS_SAFETY_BLOCKED
             return False
-        self._fault_state_dirty = False
+        self._faults.dirty = False
         self._journal_dirty = False
         self._fault_notification_dirty = False
         self._journal_persistence_blocked = False
@@ -1768,10 +1514,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
     async def _notify_faults(self) -> None:
         """Keep fault notification bookkeeping bounded and retryable."""
-        if not self._faulted:
+        if not self._faults.faulted:
             return
-        for device_id in sorted(self._faulted):
-            reason = self._fault_reasons.get(device_id, ReasonCode.FAULT.value)
+        for device_id in sorted(self._faults.faulted):
+            reason = self._faults.reasons.get(device_id, ReasonCode.FAULT.value)
             fingerprint = hashlib.sha256(f"{device_id}:{reason}".encode()).hexdigest()[:32]
             if self._fault_notification_fingerprints.get(device_id) != fingerprint:
                 self._fault_notification_fingerprints[device_id] = fingerprint
@@ -1826,9 +1572,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             "journal_unresolved_count": len(unresolved),
             "action_journal_invalid": self._action_journal_invalid,
             "journal_persistence_blocked": self._journal_persistence_blocked,
-            "faulted_devices": sorted(self._faulted),
-            "quarantined_devices": sorted(self._quarantined),
-            "fault_reasons": dict(sorted(self._fault_reasons.items())),
+            "faulted_devices": sorted(self._faults.faulted),
+            "quarantined_devices": sorted(self._faults.quarantined),
+            "fault_reasons": dict(sorted(self._faults.reasons.items())),
             "safety_fault_reason": self._safety_fault_reason,
             "shed_rejection_counts": dict(self._shed_rejection_counts),
             "shed_rejection_devices": list(self._shed_rejection_devices),

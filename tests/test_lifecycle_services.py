@@ -229,7 +229,9 @@ def test_service_source_and_translated_errors_fail_closed() -> None:
 
 def test_repair_helpers_and_unregister_are_bounded() -> None:
     entry = SimpleNamespace(
-        runtime_data=SimpleNamespace(coordinator=SimpleNamespace(_quarantined={"d1"}))
+        runtime_data=SimpleNamespace(
+            coordinator=SimpleNamespace(_faults=SimpleNamespace(faulted=set(), quarantined={"d1"}))
+        )
     )
     assert integration._repair_device_ids(SimpleNamespace(), entry) == {"d1"}
     hass = _hass_with_services()

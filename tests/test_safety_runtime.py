@@ -13,7 +13,7 @@ from power_orchestrator.const import (
     MODE_OFF,
     STATUS_SAFETY_BLOCKED,
 )
-from power_orchestrator.coordinator import PowerOrchestratorCoordinator
+from power_orchestrator.coordinator import CoordinatorConfig, PowerOrchestratorCoordinator
 from power_orchestrator.policy import PolicyConfig
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 
@@ -47,18 +47,20 @@ def _coordinator(
         hass=hass,
         model=model,
         store=store,
-        load_sensor="sensor.load",
-        max_load=5000,
-        averaging_period=10,
-        safety_reserve=200,
-        hysteresis=100,
-        pause_period=60,
-        grid_loss_mode="grid_loss_sensor",
-        grid_loss_sensor="binary_sensor.grid",
-        battery_threshold=None,
-        battery_soc_sensor=None,
-        policy=policy,
-        execution_mode=execution_mode,
+        config=CoordinatorConfig(
+            load_sensor="sensor.load",
+            max_load=5000,
+            averaging_period=10,
+            safety_reserve=200,
+            hysteresis=100,
+            pause_period=60,
+            grid_loss_mode="grid_loss_sensor",
+            grid_loss_sensor="binary_sensor.grid",
+            battery_threshold=None,
+            battery_soc_sensor=None,
+            policy=policy,
+            execution_mode=execution_mode,
+        ),
     )
     coordinator.mode = MODE_AUTO
     return coordinator
@@ -154,7 +156,7 @@ async def test_unconfirmed_stop_latches_fault_and_never_claims_success() -> None
 
     assert await coordinator.async_request_stop("d1", source="test") is False
     assert device.is_on is None
-    assert "d1" in coordinator._faulted
+    assert "d1" in coordinator._faults.faulted
     assert coordinator.hass.services.async_call.await_args.args[1] == "turn_off"
     assert all(call.args[1] != "turn_on" for call in coordinator.hass.services.async_call.await_args_list)
 

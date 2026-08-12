@@ -51,11 +51,11 @@ The config flow contains these steps:
 
 1. **Auto-Discovery** — load and safety candidates from the Energy Dashboard, if available.
 2. **Load Monitoring** — aggregate load sensor, maximum load, averaging period, reserve, hysteresis, and optional overload threshold pairs.
-3. **Optional Devices** — choose existing controllable entities, expected power, optional measured-power sensors, and actuator groups.
+3. **Optional Devices** — choose existing controllable entities, expected power, optional measured-power sensors, actuator groups, and a per-load **guarded-restore opt-in** (off by default).
 4. **Priority & Pause** — define the deterministic shedding order and pause period.
 5. **Grid Loss Behavior** — choose a grid sensor or battery-SoC threshold.
 
-The Options and Reconfigure flows expose the same safety-relevant settings. Every field has an inline description explaining its meaning and runtime effect. Invalid, unknown, unavailable, non-finite, negative, or unsupported-unit input is rejected or fails closed.
+The Options and Reconfigure flows expose the same safety-relevant settings. The **Options** flow additionally exposes the global guarded-restore controls (enable, restore threshold, hysteresis, dwell, and per-load cooldown); restore stays disabled until it is enabled globally, opted in per load, and explicitly armed under `live` execution. Every field has an inline description explaining its meaning and runtime effect. Invalid, unknown, unavailable, non-finite, negative, or unsupported-unit input is rejected or fails closed.
 
 ## Runtime contract
 

@@ -18,7 +18,7 @@ from power_orchestrator.const import (
     STATUS_LOAD_SHEDDING,
     STATUS_SAFETY_BLOCKED,
 )
-from power_orchestrator.coordinator import PowerOrchestratorCoordinator
+from power_orchestrator.coordinator import CoordinatorConfig, PowerOrchestratorCoordinator
 from power_orchestrator.policy import Ownership, PolicyConfig
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 from power_orchestrator.storage import RuntimeStore
@@ -97,18 +97,20 @@ def coordinator(
         hass=hass,
         model=model(),
         store=store,
-        load_sensor="sensor.load",
-        max_load=5000,
-        averaging_period=10,
-        safety_reserve=200,
-        hysteresis=100,
-        pause_period=60,
-        grid_loss_mode=grid_mode,
-        grid_loss_sensor=grid_sensor,
-        battery_threshold=battery_threshold,
-        battery_soc_sensor=battery_soc,
-        policy=policy,
-        execution_mode=execution_mode,
+        config=CoordinatorConfig(
+            load_sensor="sensor.load",
+            max_load=5000,
+            averaging_period=10,
+            safety_reserve=200,
+            hysteresis=100,
+            pause_period=60,
+            grid_loss_mode=grid_mode,
+            grid_loss_sensor=grid_sensor,
+            battery_threshold=battery_threshold,
+            battery_soc_sensor=battery_soc,
+            policy=policy,
+            execution_mode=execution_mode,
+        ),
     )
     result.mode = MODE_AUTO
     return result
@@ -339,8 +341,8 @@ async def test_zero_power_on_device_is_not_ordinary_shed_candidate() -> None:
     assert device.measured_power_valid is True
     assert device.measured_power == 0
     assert coordinator_instance.hass.services.async_call.await_count == 0
-    assert coordinator_instance._faulted == set()
-    assert coordinator_instance._quarantined == set()
+    assert coordinator_instance._faults.faulted == set()
+    assert coordinator_instance._faults.quarantined == set()
 
 
 @pytest.mark.asyncio
@@ -482,8 +484,8 @@ async def test_planner_off_does_not_quarantine_normal_overload_candidate() -> No
     await coordinator_instance._evaluate()
 
     assert coordinator_instance.hass.services.async_call.await_count == 0
-    assert coordinator_instance._faulted == set()
-    assert coordinator_instance._quarantined == set()
+    assert coordinator_instance._faults.faulted == set()
+    assert coordinator_instance._faults.quarantined == set()
     assert "planner mode off" in coordinator_instance.last_action.lower()
 
 
