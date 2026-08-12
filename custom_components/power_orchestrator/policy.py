@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from .const import (
     DEFAULT_HARD_INTERLOCK,
+    DEFAULT_HYSTERESIS,
     DEFAULT_POLICY_VERSION,
     DEFAULT_RESTORE_COOLDOWN,
     DEFAULT_RESTORE_DWELL,
@@ -117,6 +118,10 @@ class PolicyConfig:
     policy_version: str = DEFAULT_POLICY_VERSION
     safety_reserve_w: float = DEFAULT_SAFETY_RESERVE
     hard_interlock_w: float | None = DEFAULT_HARD_INTERLOCK
+    # Anti-flap band: an exceeded tier stays armed until load drops to or below
+    # ``limit_w - hysteresis_w``. The canonical default matches the config-flow
+    # default; setting 0 reproduces the historical exact-limit arming.
+    hysteresis_w: float = DEFAULT_HYSTERESIS
     thresholds: tuple[ThresholdTier, ...] = (
         ThresholdTier(
             "sustained",
@@ -141,6 +146,8 @@ class PolicyConfig:
     def __post_init__(self) -> None:
         if not math.isfinite(self.safety_reserve_w) or self.safety_reserve_w < 0:
             raise ValueError("safety reserve must be finite and non-negative")
+        if not math.isfinite(self.hysteresis_w) or self.hysteresis_w < 0:
+            raise ValueError("hysteresis must be finite and non-negative")
         previous = -1.0
         for tier in self.thresholds:
             if tier.limit_w <= previous:
@@ -239,6 +246,7 @@ class PolicyConfig:
                 policy_version=version.strip(),
                 safety_reserve_w=number("safety_reserve", DEFAULT_SAFETY_RESERVE, maximum=5000.0),
                 hard_interlock_w=hard_interlock,
+                hysteresis_w=number("hysteresis", DEFAULT_HYSTERESIS, maximum=5000.0),
                 thresholds=thresholds,
             )
         except ValueError:
@@ -361,11 +369,17 @@ class PolicyEngine:
             return self.observe_invalid_load(ReasonCode.TELEMETRY_INVALID, now=now)
 
         self.runtime.last_telemetry_validity = TelemetryValidity.VALID
+        band = max(0.0, self.policy.hysteresis_w)
         exceeded: list[ThresholdTier] = []
         for tier in self.policy.thresholds:
+            latched = tier.tier_id in self.runtime.tier_since
             if load_w > tier.limit_w:
                 exceeded.append(tier)
                 self.runtime.tier_since.setdefault(tier.tier_id, now)
+            elif latched and load_w > tier.limit_w - band:
+                # Within the hysteresis band: stay armed and keep the dwell start
+                # so a brief dip does not de-arm or reset the tier.
+                exceeded.append(tier)
             else:
                 self.runtime.tier_since.pop(tier.tier_id, None)
 

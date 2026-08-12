@@ -46,7 +46,7 @@ Each evaluation is serialized and follows this order:
 2. Read and validate aggregate load and safety telemetry.
 3. On grid loss or another emergency interlock, select known-on managed loads for stopping. In `observe`, record the decision without calling a physical service.
 4. If required telemetry is invalid, publish `safety_blocked` and perform no normal action.
-5. If a configured overload threshold has remained active for its dwell time, shed at most one logical device at a time.
+5. If a configured overload threshold has remained active for its dwell time, shed at most one logical device at a time. An exceeded threshold stays armed (its dwell is not reset) until the aggregate load falls to or below `limit - hysteresis`; this anti-flap band only affects when a tier arms/disarms and never enables a load.
 6. Confirm the stop with causal relay/actuator readback and wait for a newer aggregate-load report before another normal shed.
 7. If — and only if — guarded restore is enabled and armed, no shed fired, and the aggregate load has stayed at or below the restore ceiling for the restore dwell, restore at most one planner-shed load, confirmed by causal ON readback.
 8. Otherwise remain in monitoring/observe state.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from power_orchestrator.const import MAX_CUSTOM_THRESHOLDS
+from power_orchestrator.const import DEFAULT_HYSTERESIS, MAX_CUSTOM_THRESHOLDS
 from power_orchestrator.policy import DEFAULT_POLICY, PolicyConfig
 
 
@@ -31,3 +31,14 @@ def test_policy_mapping_accepts_bounded_custom_thresholds() -> None:
 def test_policy_mapping_fails_closed_for_invalid_values() -> None:
     assert PolicyConfig.from_mapping({"thresholds": []}) == DEFAULT_POLICY
     assert PolicyConfig.from_mapping({"hard_interlock": -1}) == DEFAULT_POLICY
+
+
+def test_policy_mapping_parses_and_clamps_hysteresis() -> None:
+    assert PolicyConfig.from_mapping({"hysteresis": 300}).hysteresis_w == 300.0
+    # Missing key uses the canonical default.
+    assert PolicyConfig.from_mapping({}).hysteresis_w == DEFAULT_HYSTERESIS
+    # Invalid / out-of-range values fall back to the default.
+    assert PolicyConfig.from_mapping({"hysteresis": -5}).hysteresis_w == DEFAULT_HYSTERESIS
+    assert PolicyConfig.from_mapping({"hysteresis": "x"}).hysteresis_w == DEFAULT_HYSTERESIS
+    assert PolicyConfig.from_mapping({"hysteresis": 999999}).hysteresis_w == DEFAULT_HYSTERESIS
+    assert PolicyConfig.from_mapping({"hysteresis": True}).hysteresis_w == DEFAULT_HYSTERESIS
