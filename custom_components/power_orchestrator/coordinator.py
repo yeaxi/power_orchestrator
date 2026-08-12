@@ -48,6 +48,7 @@ from .policy import (
     RestoreConfig,
 )
 from .power_model import ManagedDevice, PowerModel
+from .selection import restore_candidates, shed_candidates, shed_rejection_summary
 from .states import (
     logical_device_confirmed_off,
     logical_device_reported_at,
@@ -59,7 +60,6 @@ from .storage import RuntimeStore
 from .telemetry import SafetySource, read_load_sensor
 
 _LOGGER = logging.getLogger(__name__)
-_MAX_SHED_REJECTION_DETAILS = 12
 _MAX_LAST_ACTION_LENGTH = 255
 
 
@@ -652,69 +652,15 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         self,
     ) -> tuple[list[ManagedDevice], dict[str, int]]:
         """Evaluate candidates and rejection reasons from one telemetry snapshot."""
-        now = time.time()
-        candidates: list[ManagedDevice] = []
-        counts: dict[str, int] = {}
-        details: list[dict[str, Any]] = []
-        for device in self._model.get_shed_devices():
-            reason: str | None = None
-            if device.is_on is False:
-                reason = "off"
-            elif device.is_on is not True:
-                reason = "state_unavailable"
-            elif device.device_id in self._quarantined:
-                reason = "quarantined"
-            elif device.power_sensor_id is not None and not device.measured_power_valid:
-                reason = f"power_{device.measured_power_reason}"
-            elif (
-                device.power_sensor_id is not None
-                and device.measured_power <= QUARANTINE_CLEAR_MAX_POWER_W
-            ):
-                reason = "inactive_power"
-            elif (
-                device.ownership is Ownership.EXTERNAL
-                and device.ownership_until is not None
-                and now < device.ownership_until
-            ):
-                reason = "external_ownership_grace"
-
-            if reason is None:
-                candidates.append(device)
-                continue
-            counts[reason] = counts.get(reason, 0) + 1
-            if len(details) < _MAX_SHED_REJECTION_DETAILS:
-                details.append(
-                    {
-                        "device_id": device.device_id,
-                        "name": device.name[:80],
-                        "reason": reason,
-                        "measured_power_w": (
-                            device.measured_power if device.measured_power_valid else None
-                        ),
-                    }
-                )
-
-        total = sum(counts.values())
-        self._shed_rejection_evaluated_at = now
-        if candidates:
-            self._shed_rejection_counts = {}
-            self._shed_rejection_devices = []
-            self._shed_rejection_total = 0
-            self._shed_rejection_truncated = 0
-        else:
-            self._shed_rejection_counts = dict(sorted(counts.items()))
-            self._shed_rejection_devices = details
-            self._shed_rejection_total = total
-            self._shed_rejection_truncated = max(0, total - len(details))
-        return candidates, counts
-
-    @staticmethod
-    def _shed_rejection_summary(counts: Mapping[str, int]) -> str:
-        """Return a bounded state-safe summary of candidate rejection reasons."""
-        if not counts:
-            return "no configured devices"
-        summary = ", ".join(f"{reason}={count}" for reason, count in counts.items())
-        return summary[:180]
+        candidates, rejections = shed_candidates(
+            self._model, self._quarantined, now=time.time()
+        )
+        self._shed_rejection_counts = rejections.counts
+        self._shed_rejection_devices = rejections.devices
+        self._shed_rejection_total = rejections.total
+        self._shed_rejection_truncated = rejections.truncated
+        self._shed_rejection_evaluated_at = rejections.evaluated_at
+        return candidates, rejections.counts
 
     async def _perform_shedding(
         self,
@@ -725,7 +671,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         """Switch off exactly one eligible active logical load."""
         candidates, rejection_counts = self._shed_candidate_snapshot()
         if not candidates:
-            summary = self._shed_rejection_summary(rejection_counts)
+            summary = shed_rejection_summary(rejection_counts)
             self._last_action = (
                 f"Load shedding required at {load_w:.0f} W; no eligible load ({summary})"
             )[:_MAX_LAST_ACTION_LENGTH]
@@ -938,43 +884,19 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return False
 
     def _restore_candidate_snapshot(self, current_load: float) -> list[ManagedDevice]:
-        """Return planner-shed loads eligible for one guarded restore, in order.
-
-        Eligibility is deliberately strict and fail-closed: the load must have
-        been shed by the planner itself, be opted in, be confirmed OFF and
-        planner-owned, not faulted/quarantined/paused/in cooldown, be a simple
-        switchable actuator (climate is out of scope), and still fit under the
-        restore threshold with the safety reserve once its expected power
-        returns.
-        """
-        now = time.time()
-        candidates: list[ManagedDevice] = []
-        for device in self._model.get_shed_devices():
-            if device.device_id not in self._planner_shed_devices:
-                continue
-            if not device.restore_enabled:
-                continue
-            if device.device_id in self._faulted or device.device_id in self._quarantined:
-                continue
-            if logical_device_state(self.hass, device) is not False:
-                continue
-            if device.ownership is not Ownership.PLANNER:
-                continue
-            if device.pause_active:
-                continue
-            cooldown_until = self._restore_cooldown_until.get(device.device_id)
-            if cooldown_until is not None and now < cooldown_until:
-                continue
-            if any(
-                entity_id.split(".", 1)[0] == "climate"
-                for entity_id in device.control_entity_ids
-            ):
-                continue
-            projected = current_load + max(0.0, float(device.expected_power)) + self._safety_reserve
-            if projected > self._restore_config.threshold_w:
-                continue
-            candidates.append(device)
-        return candidates
+        """Return planner-shed loads eligible for one guarded restore, in order."""
+        return restore_candidates(
+            self.hass,
+            self._model,
+            planner_shed=self._planner_shed_devices,
+            faulted=self._faulted,
+            quarantined=self._quarantined,
+            cooldown_until=self._restore_cooldown_until,
+            restore_threshold_w=self._restore_config.threshold_w,
+            safety_reserve=self._safety_reserve,
+            current_load=current_load,
+            now=time.time(),
+        )
 
     async def _perform_restore(self, current_load: float) -> bool:
         """Attempt at most one guarded restore of a planner-shed load.
