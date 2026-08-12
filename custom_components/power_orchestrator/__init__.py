@@ -149,9 +149,10 @@ def _repair_device_ids(hass: HomeAssistant, entry: ConfigEntry) -> set[str]:
                 values.update(item for item in raw if isinstance(item, str) and item)
         if values:
             return values
-    return set(getattr(coordinator, "_faulted", set())) | set(
-        getattr(coordinator, "_quarantined", set())
-    )
+    faults = getattr(coordinator, "_faults", None)
+    if faults is None:
+        return set()
+    return set(getattr(faults, "faulted", set())) | set(getattr(faults, "quarantined", set()))
 
 
 def _sync_repair_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:

@@ -33,7 +33,7 @@ def test_lifecycle_registry_and_helpers_fail_closed() -> None:
 
 
 def test_loaded_runtime_and_quarantine_helpers_use_current_runtime() -> None:
-    coordinator = SimpleNamespace(_quarantined={"d1"})
+    coordinator = SimpleNamespace(_faults=SimpleNamespace(faulted=set(), quarantined={"d1"}))
     runtime = SimpleNamespace(coordinator=coordinator)
     entry = SimpleNamespace(entry_id="entry-1", runtime_data=runtime)
     hass = SimpleNamespace(data={"power_orchestrator": {"entry-1": runtime}})
