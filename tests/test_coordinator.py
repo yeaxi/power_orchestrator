@@ -341,8 +341,8 @@ async def test_zero_power_on_device_is_not_ordinary_shed_candidate() -> None:
     assert device.measured_power_valid is True
     assert device.measured_power == 0
     assert coordinator_instance.hass.services.async_call.await_count == 0
-    assert coordinator_instance._faulted == set()
-    assert coordinator_instance._quarantined == set()
+    assert coordinator_instance._faults.faulted == set()
+    assert coordinator_instance._faults.quarantined == set()
 
 
 @pytest.mark.asyncio
@@ -484,8 +484,8 @@ async def test_planner_off_does_not_quarantine_normal_overload_candidate() -> No
     await coordinator_instance._evaluate()
 
     assert coordinator_instance.hass.services.async_call.await_count == 0
-    assert coordinator_instance._faulted == set()
-    assert coordinator_instance._quarantined == set()
+    assert coordinator_instance._faults.faulted == set()
+    assert coordinator_instance._faults.quarantined == set()
     assert "planner mode off" in coordinator_instance.last_action.lower()
 
 

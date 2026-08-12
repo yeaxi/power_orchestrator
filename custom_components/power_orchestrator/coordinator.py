@@ -37,6 +37,7 @@ from .const import (
     STATUS_OBSERVE,
     STATUS_SAFETY_BLOCKED,
 )
+from .fault_registry import FaultRegistry
 from .journal import emit_event, new_action_id, record_action
 from .policy import (
     Ownership,
@@ -177,10 +178,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         self._last_operation_result = "none"
         self._next_operation = 0
 
-        self._faulted: set[str] = set()
-        self._quarantined: set[str] = set()
-        self._fault_reasons: dict[str, str] = {}
-        self._fault_state_dirty = False
+        self._faults = FaultRegistry()
         self._action_journal_invalid = False
         self._journal_dirty = False
         self._journal_persistence_blocked = False
@@ -522,7 +520,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         for device in self._model.all_devices():
             previous = self._last_observed_state.get(device.device_id, device.is_on)
             logical_state = logical_device_state(self.hass, device)
-            if device.device_id in self._quarantined:
+            if device.device_id in self._faults.quarantined:
                 device.is_on = None
                 # A quarantined load is no longer a guarded-restore candidate.
                 self._planner_shed_devices.discard(device.device_id)
@@ -619,12 +617,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 self._pause_device(device)
             else:
                 failed.append(device.name)
-                self._quarantined.add(device.device_id)
-                self._faulted.add(device.device_id)
-                self._fault_reasons[device.device_id] = (
-                    self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value
+                self._faults.latch(
+                    device.device_id,
+                    self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value,
                 )
-                self._fault_state_dirty = True
         if failed:
             self._status = STATUS_SAFETY_BLOCKED
             self._last_action = f"{action_label} — OFF failed for: " + ", ".join(failed)
@@ -640,12 +636,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             if await self._command_off(device, emergency=True, source="emergency"):
                 self._pause_device(device)
             else:
-                self._quarantined.add(device.device_id)
-                self._faulted.add(device.device_id)
-                self._fault_reasons[device.device_id] = (
-                    self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value
+                self._faults.latch(
+                    device.device_id,
+                    self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value,
                 )
-                self._fault_state_dirty = True
         await self._persist_runtime_if_dirty()
 
     def _shed_candidate_snapshot(
@@ -653,7 +647,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
     ) -> tuple[list[ManagedDevice], dict[str, int]]:
         """Evaluate candidates and rejection reasons from one telemetry snapshot."""
         candidates, rejections = shed_candidates(
-            self._model, self._quarantined, now=time.time()
+            self._model, self._faults.quarantined, now=time.time()
         )
         self._shed_rejection_counts = rejections.counts
         self._shed_rejection_devices = rejections.devices
@@ -691,12 +685,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return
         if not await self._command_off(device, source="policy"):
             self._status = STATUS_SAFETY_BLOCKED
-            self._quarantined.add(device.device_id)
-            self._faulted.add(device.device_id)
-            self._fault_reasons[device.device_id] = (
-                self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value
+            self._faults.latch(
+                device.device_id,
+                self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value,
             )
-            self._fault_state_dirty = True
             self._last_action = f"Load shedding OFF failed for {device.name}"
             await self._persist_runtime_if_dirty()
             return
@@ -771,10 +763,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
     def _latch_device_fault(self, device: ManagedDevice, reason: str) -> None:
         """Make an unconfirmed physical stop durable and safety-blocked."""
         device.is_on = None
-        self._quarantined.add(device.device_id)
-        self._faulted.add(device.device_id)
-        self._fault_reasons[device.device_id] = str(reason)[:160]
-        self._fault_state_dirty = True
+        self._faults.latch(device.device_id, reason)
         self._status = STATUS_SAFETY_BLOCKED
 
     async def _command_off(
@@ -889,8 +878,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self.hass,
             self._model,
             planner_shed=self._planner_shed_devices,
-            faulted=self._faulted,
-            quarantined=self._quarantined,
+            faulted=self._faults.faulted,
+            quarantined=self._faults.quarantined,
             cooldown_until=self._restore_cooldown_until,
             restore_threshold_w=self._restore_config.threshold_w,
             safety_reserve=self._safety_reserve,
@@ -1149,7 +1138,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                     device = self._model.get_device(device_id)
                     if device is None:
                         raise ValueError(f"unknown device_id: {device_id}")
-                    if device_id in self._faulted or device_id in self._quarantined:
+                    if device_id in self._faults.faulted or device_id in self._faults.quarantined:
                         raise ValueError(f"device is faulted or quarantined: {device_id}")
                     if device.is_on is not True:
                         raise ValueError(f"device is not confirmed on: {device_id}")
@@ -1221,7 +1210,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             device = self._model.get_device(device_id)
             if device is None:
                 raise ValueError("unknown device_id")
-            if device_id not in self._quarantined and device_id not in self._faulted:
+            if device_id not in self._faults.quarantined and device_id not in self._faults.faulted:
                 return False
             if logical_device_state(self.hass, device) is not False:
                 return False
@@ -1234,10 +1223,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                     or device.measured_power > QUARANTINE_CLEAR_MAX_POWER_W
                 ):
                     return False
-            self._quarantined.discard(device_id)
-            self._faulted.discard(device_id)
-            self._fault_reasons.pop(device_id, None)
-            self._fault_state_dirty = True
+            self._faults.clear(device_id)
             self._record_action(
                 {
                     "action_id": self._new_action_id("clear"),
@@ -1254,9 +1240,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             try:
                 await self._store.async_save()
             except Exception:
-                self._quarantined.add(device_id)
-                self._faulted.add(device_id)
-                self._fault_state_dirty = True
+                self._faults.quarantined.add(device_id)
+                self._faults.faulted.add(device_id)
+                self._faults.dirty = True
                 raise
             return True
 
@@ -1318,8 +1304,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                         for device in self._model.all_devices():
                             if (
                                 device.is_on is True
-                                and device.device_id not in self._faulted
-                                and device.device_id not in self._quarantined
+                                and device.device_id not in self._faults.faulted
+                                and device.device_id not in self._faults.quarantined
                                 and ordinary_shedding_power_eligible(device)
                             ):
                                 device.ownership = Ownership.PLANNER
@@ -1454,9 +1440,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 continue
             device_id = record.get("device_id")
             if isinstance(device_id, str) and self._model.get_device(device_id) is not None:
-                self._quarantined.add(device_id)
-                self._faulted.add(device_id)
-                self._fault_reasons[device_id] = ReasonCode.PERSISTED_RUNTIME_INVALID.value
+                self._faults.quarantined.add(device_id)
+                self._faults.faulted.add(device_id)
+                self._faults.reasons[device_id] = ReasonCode.PERSISTED_RUNTIME_INVALID.value
         self._action_journal_invalid = bool(unresolved)
 
     def restore_device_runtime(
@@ -1470,16 +1456,16 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         """Restore validated persisted fault/quarantine sets."""
         configured = {device.device_id for device in self._model.all_devices()}
         self._safety_storage_invalid = bool(storage_invalid)
-        self._faulted.update(device_id for device_id in faulted_devices if device_id in configured)
-        self._quarantined.update(
+        self._faults.faulted.update(device_id for device_id in faulted_devices if device_id in configured)
+        self._faults.quarantined.update(
             device_id for device_id in quarantined_devices if device_id in configured
         )
-        self._fault_reasons = {
+        self._faults.reasons = {
             device_id: reason[:160]
             for device_id, reason in (fault_reasons or {}).items()
             if device_id in configured and isinstance(reason, str) and reason.strip()
         }
-        for device_id in self._faulted | self._quarantined:
+        for device_id in self._faults.faulted | self._faults.quarantined:
             device = self._model.get_device(device_id)
             if device is not None:
                 device.is_on = None
@@ -1497,9 +1483,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         if callable(saver):
             saver(
                 self._model,
-                faulted_devices=self._faulted,
-                quarantined_devices=self._quarantined,
-                fault_reasons=self._fault_reasons,
+                faulted_devices=self._faults.faulted,
+                quarantined_devices=self._faults.quarantined,
+                fault_reasons=self._faults.reasons,
             )
         notification_saver = getattr(self._store, "save_fault_notification_state", None)
         if callable(notification_saver):
@@ -1510,7 +1496,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
     async def _persist_runtime_if_dirty(self) -> bool:
         if not (
-            self._fault_state_dirty
+            self._faults.dirty
             or self._journal_dirty
             or self._action_journal_invalid
             or self._journal_persistence_blocked
@@ -1524,7 +1510,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._journal_persistence_blocked = True
             self._status = STATUS_SAFETY_BLOCKED
             return False
-        self._fault_state_dirty = False
+        self._faults.dirty = False
         self._journal_dirty = False
         self._fault_notification_dirty = False
         self._journal_persistence_blocked = False
@@ -1532,10 +1518,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
     async def _notify_faults(self) -> None:
         """Keep fault notification bookkeeping bounded and retryable."""
-        if not self._faulted:
+        if not self._faults.faulted:
             return
-        for device_id in sorted(self._faulted):
-            reason = self._fault_reasons.get(device_id, ReasonCode.FAULT.value)
+        for device_id in sorted(self._faults.faulted):
+            reason = self._faults.reasons.get(device_id, ReasonCode.FAULT.value)
             fingerprint = hashlib.sha256(f"{device_id}:{reason}".encode()).hexdigest()[:32]
             if self._fault_notification_fingerprints.get(device_id) != fingerprint:
                 self._fault_notification_fingerprints[device_id] = fingerprint
@@ -1590,9 +1576,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             "journal_unresolved_count": len(unresolved),
             "action_journal_invalid": self._action_journal_invalid,
             "journal_persistence_blocked": self._journal_persistence_blocked,
-            "faulted_devices": sorted(self._faulted),
-            "quarantined_devices": sorted(self._quarantined),
-            "fault_reasons": dict(sorted(self._fault_reasons.items())),
+            "faulted_devices": sorted(self._faults.faulted),
+            "quarantined_devices": sorted(self._faults.quarantined),
+            "fault_reasons": dict(sorted(self._faults.reasons.items())),
             "safety_fault_reason": self._safety_fault_reason,
             "shed_rejection_counts": dict(self._shed_rejection_counts),
             "shed_rejection_devices": list(self._shed_rejection_devices),

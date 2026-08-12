@@ -156,7 +156,7 @@ async def test_unconfirmed_stop_latches_fault_and_never_claims_success() -> None
 
     assert await coordinator.async_request_stop("d1", source="test") is False
     assert device.is_on is None
-    assert "d1" in coordinator._faulted
+    assert "d1" in coordinator._faults.faulted
     assert coordinator.hass.services.async_call.await_args.args[1] == "turn_off"
     assert all(call.args[1] != "turn_on" for call in coordinator.hass.services.async_call.await_args_list)
 
