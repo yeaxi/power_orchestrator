@@ -11,10 +11,10 @@ import uuid
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any
 
-from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -51,6 +51,14 @@ from .policy import (
     RestoreConfig,
 )
 from .power_model import ManagedDevice, PowerModel
+from .states import (
+    logical_device_confirmed_off,
+    logical_device_reported_at,
+    logical_device_state,
+    ordinary_shedding_power_eligible,
+    state_is_available,
+    state_reported_timestamp,
+)
 from .storage import RuntimeStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -339,7 +347,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         if not isinstance(sensor_id, str):
             return False
         state = self.hass.states.get(sensor_id)
-        if not self._state_is_available(state):
+        if not state_is_available(state):
             return False
         if self._grid_loss_mode == GRID_LOSS_MODE_SENSOR:
             return getattr(state, "state", None) in {STATE_ON, STATE_OFF}
@@ -568,7 +576,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         """Reconcile logical actuator states and preserve external ownership briefly."""
         for device in self._model.all_devices():
             previous = self._last_observed_state.get(device.device_id, device.is_on)
-            logical_state = self._logical_device_state(device)
+            logical_state = logical_device_state(self.hass, device)
             if device.device_id in self._quarantined:
                 device.is_on = None
                 # A quarantined load is no longer a guarded-restore candidate.
@@ -610,7 +618,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         if not device.power_sensor_id:
             return
         state = self.hass.states.get(device.power_sensor_id)
-        if state is None or not self._state_is_available(state):
+        if state is None or not state_is_available(state):
             device.measured_power_reason = "unavailable"
             return
         unit = getattr(state, "attributes", {}).get("unit_of_measurement")
@@ -633,19 +641,6 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         device.measured_power_valid = True
         device.measured_power_reason = "ok"
 
-    @staticmethod
-    def _ordinary_shedding_power_eligible(device: ManagedDevice) -> bool:
-        """Require positive measured draw before ordinary shedding.
-
-        A configured power sensor reporting a valid zero (or only the bounded
-        near-zero clear threshold) describes an already-heated/idle load. It
-        must not be switched off merely because another load caused overload.
-        Emergency interlocks use their separate all-stop path.
-        """
-        if device.power_sensor_id is None:
-            return True
-        return device.measured_power_valid and device.measured_power > QUARANTINE_CLEAR_MAX_POWER_W
-
     def _read_load_sensor(self) -> float:
         """Read an available, non-negative power value and retain its failure reason."""
         state = self.hass.states.get(self._load_sensor)
@@ -654,7 +649,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._load_sensor_reason = "unavailable"
             self._load_reported_at = None
             return 0.0
-        if not self._state_is_available(state):
+        if not state_is_available(state):
             self._load_sensor_valid = False
             self._load_sensor_reason = "unavailable"
             self._load_reported_at = None
@@ -679,76 +674,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return 0.0
         self._load_sensor_valid = True
         self._load_sensor_reason = "ok"
-        self._load_reported_at = self._state_reported_timestamp(state)
+        self._load_reported_at = state_reported_timestamp(state)
         return value
-
-    def _state_reported_timestamp(self, state: Any) -> float | None:
-        raw = getattr(state, "last_reported", None) if state is not None else None
-        if isinstance(raw, datetime):
-            if raw.tzinfo is None:
-                raw = raw.replace(tzinfo=timezone.utc)
-            value = raw.timestamp()
-            if math.isfinite(value):
-                return value
-        elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
-            value = float(raw)
-            if math.isfinite(value):
-                return value
-        return None
-
-    @staticmethod
-    def _state_is_available(state: Any) -> bool:
-        """Return whether Home Assistant reports a semantically usable state."""
-        if state is None:
-            return False
-        return getattr(state, "state", None) not in {
-            None,
-            STATE_UNKNOWN,
-            STATE_UNAVAILABLE,
-        }
-
-    def _actuator_state_on(self, entity_id: str, state: Any) -> bool | None:
-        raw = getattr(state, "state", None) if state is not None else None
-        if raw in {STATE_UNAVAILABLE, STATE_UNKNOWN, None}:
-            return None
-        domain = entity_id.split(".", 1)[0]
-        if domain in {"switch", "light", "input_boolean"}:
-            if raw == STATE_ON:
-                return True
-            if raw == STATE_OFF:
-                return False
-            return None
-        if domain == "climate":
-            return (
-                False
-                if raw == STATE_OFF
-                else (None if raw in {STATE_UNKNOWN, STATE_UNAVAILABLE} else True)
-            )
-        return None
-
-    def _logical_device_state(self, device: ManagedDevice) -> bool | None:
-        states = [
-            self._actuator_state_on(entity_id, self.hass.states.get(entity_id))
-            for entity_id in device.control_entity_ids
-        ]
-        if not states or any(value is None for value in states):
-            return None
-        if all(states):
-            return True
-        if not any(states):
-            return False
-        return None
-
-    def _logical_device_reported_at(self, device: ManagedDevice) -> float | None:
-        timestamps = [
-            self._state_reported_timestamp(self.hass.states.get(entity_id))
-            for entity_id in device.control_entity_ids
-        ]
-        valid = [timestamp for timestamp in timestamps if timestamp is not None]
-        return max(valid) if valid else None
-
-    def _logical_device_confirmed_off(self, device: ManagedDevice) -> bool:
-        return self._logical_device_state(device) is False
 
     async def _handle_grid_loss(
         self,
@@ -768,7 +695,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return
         failed: list[str] = []
         for device in self._model.get_sorted_devices_reversed():
-            if self._logical_device_confirmed_off(device):
+            if logical_device_confirmed_off(self.hass, device):
                 continue
             if await self._command_off(device, emergency=True, source="grid_loss"):
                 self._grid_loss_expected_off.add(device.device_id)
@@ -791,7 +718,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
     async def _perform_emergency_all_stop(self) -> None:
         """Best-effort emergency stop of every logical load."""
         for device in self._model.get_sorted_devices_reversed():
-            if self._logical_device_confirmed_off(device):
+            if logical_device_confirmed_off(self.hass, device):
                 continue
             if await self._command_off(device, emergency=True, source="emergency"):
                 self._pause_device(device)
@@ -966,8 +893,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         deadline = time.monotonic() + RELAY_READBACK_TIMEOUT_SECONDS
         expected_on = expected_state != STATE_OFF
         while time.monotonic() <= deadline:
-            logical = self._logical_device_state(device)
-            reported_at = self._logical_device_reported_at(device)
+            logical = logical_device_state(self.hass, device)
+            reported_at = logical_device_reported_at(self.hass, device)
             if logical is expected_on and reported_at is not None:
                 if pre_reported_at is None or reported_at > pre_reported_at:
                     self._last_confirmed_reported_at[device.device_id] = reported_at
@@ -1031,7 +958,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         await self._persist_runtime_if_dirty()
         self._record_action({**base, "phase": "dispatched", "result": "dispatched"})
         try:
-            pre_reported_at = self._logical_device_reported_at(device)
+            pre_reported_at = logical_device_reported_at(self.hass, device)
             command_issued_at = time.time()
             for entity_id in device.control_entity_ids:
                 domain = entity_id.split(".", 1)[0]
@@ -1112,7 +1039,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 continue
             if device.device_id in self._faulted or device.device_id in self._quarantined:
                 continue
-            if self._logical_device_state(device) is not False:
+            if logical_device_state(self.hass, device) is not False:
                 continue
             if device.ownership is not Ownership.PLANNER:
                 continue
@@ -1238,7 +1165,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         await self._persist_runtime_if_dirty()
         self._record_action({**base, "phase": "dispatched", "result": "dispatched"})
         try:
-            pre_reported_at = self._logical_device_reported_at(device)
+            pre_reported_at = logical_device_reported_at(self.hass, device)
             command_issued_at = time.time()
             for entity_id in device.control_entity_ids:
                 domain = entity_id.split(".", 1)[0]
@@ -1402,7 +1329,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                         raise ValueError(f"device is faulted or quarantined: {device_id}")
                     if device.is_on is not True:
                         raise ValueError(f"device is not confirmed on: {device_id}")
-                    if not self._ordinary_shedding_power_eligible(device):
+                    if not ordinary_shedding_power_eligible(device):
                         raise ValueError(
                             f"device power telemetry is not positive and valid: {device_id}"
                         )
@@ -1472,7 +1399,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 raise ValueError("unknown device_id")
             if device_id not in self._quarantined and device_id not in self._faulted:
                 return False
-            if self._logical_device_state(device) is not False:
+            if logical_device_state(self.hass, device) is not False:
                 return False
             load = self._read_load_sensor()
             if not self._load_sensor_valid or load > self._max_load:
@@ -1569,7 +1496,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                                 device.is_on is True
                                 and device.device_id not in self._faulted
                                 and device.device_id not in self._quarantined
-                                and self._ordinary_shedding_power_eligible(device)
+                                and ordinary_shedding_power_eligible(device)
                             ):
                                 device.ownership = Ownership.PLANNER
                                 device.ownership_until = None
