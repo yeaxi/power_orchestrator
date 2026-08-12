@@ -28,8 +28,6 @@ from .const import (
     MODE_AUTO,
     MODE_OFF,
     QUARANTINE_CLEAR_MAX_POWER_W,
-    RELAY_READBACK_POLL_INTERVAL_SECONDS,
-    RELAY_READBACK_TIMEOUT_SECONDS,
     STATUS_GRID_LOSS,
     STATUS_LOAD_RESTORING,
     STATUS_LOAD_SHEDDING,
@@ -49,6 +47,7 @@ from .policy import (
     RestoreConfig,
 )
 from .power_model import ManagedDevice, PowerModel
+from .readback import confirm_device_state
 from .selection import restore_candidates, shed_candidates, shed_rejection_summary
 from .states import (
     logical_device_confirmed_off,
@@ -743,22 +742,19 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         command_issued_at: float,
         pre_reported_at: float | None,
     ) -> bool:
-        """Wait within a fixed bound for a causal logical OFF report."""
+        """Wait within a fixed bound for a causal logical state report."""
         del operation_id
-        deadline = time.monotonic() + RELAY_READBACK_TIMEOUT_SECONDS
-        expected_on = expected_state != STATE_OFF
-        while time.monotonic() <= deadline:
-            logical = logical_device_state(self.hass, device)
-            reported_at = logical_device_reported_at(self.hass, device)
-            if logical is expected_on and reported_at is not None:
-                if pre_reported_at is None or reported_at > pre_reported_at:
-                    self._last_confirmed_reported_at[device.device_id] = reported_at
-                    return True
-                if reported_at >= command_issued_at:
-                    self._last_confirmed_reported_at[device.device_id] = reported_at
-                    return True
-            await asyncio.sleep(RELAY_READBACK_POLL_INTERVAL_SECONDS)
-        return False
+        confirmed_at = await confirm_device_state(
+            self.hass,
+            device,
+            expected_state,
+            command_issued_at=command_issued_at,
+            pre_reported_at=pre_reported_at,
+        )
+        if confirmed_at is None:
+            return False
+        self._last_confirmed_reported_at[device.device_id] = confirmed_at
+        return True
 
     def _latch_device_fault(self, device: ManagedDevice, reason: str) -> None:
         """Make an unconfirmed physical stop durable and safety-blocked."""
