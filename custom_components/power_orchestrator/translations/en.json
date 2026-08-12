@@ -506,6 +506,15 @@
     "shedding_authorization_failed": {
       "message": "The exact shedding-ownership authorization failed: {reason}."
     },
+    "restore_authorization_failed": {
+      "message": "Arming guarded restore failed: {reason}."
+    },
+    "restore_request_failed": {
+      "message": "The guarded restore request failed: {reason}."
+    },
+    "restore_requires_confirmation": {
+      "message": "Guarded restore requires explicit confirmation."
+    },
     "request_rejected": {
       "message": "The request was rejected: {reason}."
     },

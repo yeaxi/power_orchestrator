@@ -34,6 +34,7 @@ from .const import (
     RELAY_READBACK_POLL_INTERVAL_SECONDS,
     RELAY_READBACK_TIMEOUT_SECONDS,
     STATUS_GRID_LOSS,
+    STATUS_LOAD_RESTORING,
     STATUS_LOAD_SHEDDING,
     STATUS_MONITORING,
     STATUS_OBSERVE,
@@ -46,6 +47,7 @@ from .policy import (
     PolicyEngine,
     PolicyPhase,
     ReasonCode,
+    RestoreConfig,
 )
 from .power_model import ManagedDevice, PowerModel
 from .storage import RuntimeStore
@@ -76,6 +78,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         entry_id: str = DOMAIN,
         policy: PolicyConfig | None = None,
         execution_mode: str = EXECUTION_MODE_LIVE,
+        restore_config: RestoreConfig | None = None,
     ) -> None:
         super().__init__(
             hass,
@@ -116,6 +119,14 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         self._policy_engine = PolicyEngine(self._policy)
         self._policy_enabled = policy is not None
         self._last_policy_decision = self._policy_engine.last_decision
+
+        # Guarded restore is fail-closed: disabled unless configured, and never
+        # armed automatically. ``_planner_shed_devices`` tracks only loads this
+        # planner shed via ordinary policy (never emergency/service/manual).
+        self._restore_config = restore_config or RestoreConfig()
+        self._restore_armed = False
+        self._planner_shed_devices: set[str] = set()
+        self._restore_cooldown_until: dict[str, float] = {}
 
         self._mode = MODE_OFF
         # There is no normal physical activation path. This compatibility
@@ -188,6 +199,24 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
     def emergency_commands_allowed(self) -> bool:
         """Emergency OFF may bypass planner mode, but never observe mode/storage gates."""
         return self._execution_mode == EXECUTION_MODE_LIVE and not self._safety_storage_invalid
+
+    @property
+    def restore_commands_allowed(self) -> bool:
+        """Guarded ON is a strict superset of the ordinary stop gates.
+
+        Restore additionally requires the feature to be configured, explicitly
+        armed, and no pending post-shed reconciliation. It never fires during
+        an active shed barrier or in observe mode.
+        """
+        return (
+            self.physical_commands_allowed
+            and self._restore_config.enabled
+            and self._restore_armed
+            and self._policy_engine.runtime.pending_post_shed_generation is None
+            # The post-restore barrier must be fully reconciled (not merely a
+            # newer generation) before another guarded ON is permitted.
+            and self._policy_engine.runtime.pending_post_restore_generation is None
+        )
 
     @property
     def policy_phase(self) -> str:
@@ -306,7 +335,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return False
         try:
             soc = float(getattr(state, "state", ""))
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return False
         return math.isfinite(soc) and 0 <= soc <= 100
 
@@ -334,7 +363,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return False
         try:
             soc = float(getattr(state, "state", ""))
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return False
         threshold = self._battery_threshold
         if threshold is None:
@@ -383,14 +412,22 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                     self._load_generation,
                     reported_at=self._load_reported_at,
                 )
+            if self._policy_engine.runtime.pending_post_restore_generation is not None:
+                self._policy_engine.reconcile_restore(
+                    self._load_generation,
+                    reported_at=self._load_reported_at,
+                )
         else:
             self._load_samples.clear()
             self._load_sample_times.clear()
+            # Invalid load breaks continuous below-ceiling proof; restart dwell.
+            self._policy_engine.runtime.restore_since = None
 
         if not self.grid_safety_source_available:
             self._status = STATUS_SAFETY_BLOCKED
             self._policy_engine.runtime.phase = PolicyPhase.FAULT
             self._policy_engine.runtime.last_reason_code = ReasonCode.TELEMETRY_INVALID
+            self._policy_engine.runtime.restore_since = None
             await self._handle_grid_loss(
                 reason_code=ReasonCode.TELEMETRY_INVALID,
                 action_label="Safety telemetry unavailable",
@@ -400,6 +437,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._status = STATUS_GRID_LOSS
             self._policy_engine.runtime.phase = PolicyPhase.GRID_LOSS
             self._policy_engine.runtime.last_reason_code = ReasonCode.GRID_LOSS
+            self._policy_engine.runtime.restore_since = None
             await self._handle_grid_loss()
             return
 
@@ -410,11 +448,18 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._status = STATUS_SAFETY_BLOCKED
             self._policy_engine.runtime.phase = PolicyPhase.FAULT
             self._policy_engine.runtime.last_reason_code = ReasonCode.TELEMETRY_INVALID
+            self._policy_engine.runtime.restore_since = None
             self._last_action = f"Safety blocked — load sensor {self._load_sensor_reason}"
             return
 
         current = self.current_load
         average = self.average_load
+        # Any load above the restore ceiling breaks the continuous below-ceiling
+        # proof, even on cycles that shed or otherwise return before the restore
+        # lane runs. Reset the dwell here so a restore always requires a fresh
+        # observation period after load recovers.
+        if current > self._restore_config.ceiling_w:
+            self._policy_engine.runtime.restore_since = None
         hard_interlock = self._policy.hard_interlock_w
         if hard_interlock is not None and current >= hard_interlock:
             decision = PolicyDecision(True, "hard_interlock", ReasonCode.HARD_INTERLOCK)
@@ -465,6 +510,14 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             await self._perform_shedding(max(current, average), decision=decision)
             return
 
+        # Guarded restore lane. Reached only when no shed/emergency fired and
+        # telemetry is valid. Bounded to at most one restore per cycle.
+        if self.restore_commands_allowed and self._policy_engine.can_restore_again(
+            self._load_generation
+        ):
+            if await self._perform_restore(current):
+                return
+
         self._status = STATUS_OBSERVE if self.execution_mode_is_observe else STATUS_MONITORING
         if planner_disabled:
             self._last_action = "Planner mode off; normal load shedding disabled"
@@ -505,6 +558,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             logical_state = self._logical_device_state(device)
             if device.device_id in self._quarantined:
                 device.is_on = None
+                # A quarantined load is no longer a guarded-restore candidate.
+                self._planner_shed_devices.discard(device.device_id)
                 if logical_state is True:
                     await self._command_off(device, emergency=True, source="quarantine")
             else:
@@ -521,6 +576,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                     device.ownership = Ownership.EXTERNAL
                     device.ownership_until = time.time() + self._external_ownership_grace
                     self._last_action = f"Preserving external ownership for {device.name}"
+                    # The user re-enabled this load; the planner relinquishes any
+                    # restore claim on it.
+                    self._planner_shed_devices.discard(device.device_id)
                 if (
                     device.ownership is Ownership.EXTERNAL
                     and device.ownership_until is not None
@@ -552,7 +610,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return
         try:
             measured = float(raw)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             device.measured_power_reason = "non_numeric"
             return
         if not math.isfinite(measured) or measured < 0:
@@ -592,7 +650,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         normalized_unit = str(unit).strip().lower()
         try:
             value = float(getattr(state, "state", ""))
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             value = math.nan
         if normalized_unit in {"kw", "kilowatt", "kilowatts"}:
             value *= 1000
@@ -841,6 +899,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return
 
         self._pause_device(device)
+        # Record that the planner itself shed this load; only such loads are
+        # ever eligible for a later guarded restore (never emergency/manual).
+        self._planner_shed_devices.add(device.device_id)
         operation_id = self._last_operation_id or "unknown"
         if self._policy_enabled:
             self._policy_engine.append_shed(
@@ -1017,6 +1078,208 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 {**base, "phase": "failed", "result": "failed", "reason": str(exc)[:160]}
             )
             _LOGGER.error("Failed to switch off %s: %s", device.name, exc)
+            return False
+
+    def _restore_candidate_snapshot(self, current_load: float) -> list[ManagedDevice]:
+        """Return planner-shed loads eligible for one guarded restore, in order.
+
+        Eligibility is deliberately strict and fail-closed: the load must have
+        been shed by the planner itself, be opted in, be confirmed OFF and
+        planner-owned, not faulted/quarantined/paused/in cooldown, be a simple
+        switchable actuator (climate is out of scope), and still fit under the
+        restore threshold with the safety reserve once its expected power
+        returns.
+        """
+        now = time.time()
+        candidates: list[ManagedDevice] = []
+        for device in self._model.get_shed_devices():
+            if device.device_id not in self._planner_shed_devices:
+                continue
+            if not device.restore_enabled:
+                continue
+            if device.device_id in self._faulted or device.device_id in self._quarantined:
+                continue
+            if self._logical_device_state(device) is not False:
+                continue
+            if device.ownership is not Ownership.PLANNER:
+                continue
+            if device.pause_active:
+                continue
+            cooldown_until = self._restore_cooldown_until.get(device.device_id)
+            if cooldown_until is not None and now < cooldown_until:
+                continue
+            if any(
+                entity_id.split(".", 1)[0] == "climate"
+                for entity_id in device.control_entity_ids
+            ):
+                continue
+            projected = current_load + max(0.0, float(device.expected_power)) + self._safety_reserve
+            if projected > self._restore_config.threshold_w:
+                continue
+            candidates.append(device)
+        return candidates
+
+    async def _perform_restore(self, current_load: float) -> bool:
+        """Attempt at most one guarded restore of a planner-shed load.
+
+        Returns whether the restore lane acted this cycle (so evaluation stops).
+        """
+        decision = self._policy_engine.observe_restore_headroom(
+            current_load, now=time.monotonic(), config=self._restore_config
+        )
+        if not decision.triggered:
+            return False
+        candidates = self._restore_candidate_snapshot(current_load)
+        if not candidates:
+            self._policy_engine.runtime.last_reason_code = ReasonCode.RESTORE_BLOCKED_NO_CANDIDATES
+            return False
+        device = candidates[0]
+        self._status = STATUS_LOAD_RESTORING
+        self._policy_engine.runtime.phase = PolicyPhase.RESTORING
+        self._policy_engine.runtime.last_reason_code = ReasonCode.RESTORE_HEADROOM_AVAILABLE
+        if not await self._command_on(device, source="policy"):
+            self._last_action = f"Guarded restore ON failed for {device.name}"
+            await self._persist_runtime_if_dirty()
+            return True
+        operation_id = self._last_operation_id or "unknown"
+        self._planner_shed_devices.discard(device.device_id)
+        self._restore_cooldown_until[device.device_id] = (
+            time.time() + self._restore_config.cooldown_s
+        )
+        self._policy_engine.append_restore(
+            operation_id=operation_id, load_generation=self._load_generation
+        )
+        self._policy_engine.set_post_restore_fence(
+            self._last_confirmed_reported_at.get(device.device_id)
+        )
+        self._last_action = (
+            f"Guarded restore: switched on {device.name} at {current_load:.0f} W"
+        )
+        self._record_action(
+            {
+                "action_id": self._last_action_id,
+                "operation_id": operation_id,
+                "device_id": device.device_id,
+                "action": "turn_on",
+                "result": "confirmed",
+                "reason": ReasonCode.RESTORE_HEADROOM_AVAILABLE.value,
+                "load_generation": self._load_generation,
+            }
+        )
+        self._emit_event(
+            EVENT_ACTION,
+            {
+                "action_id": self._last_action_id,
+                "operation_id": operation_id,
+                "device_id": device.device_id,
+                "action": "turn_on",
+                "result": "confirmed",
+                "reason_code": ReasonCode.RESTORE_HEADROOM_AVAILABLE.value,
+            },
+        )
+        await self._persist_runtime_if_dirty()
+        return True
+
+    async def _command_on(
+        self,
+        device: ManagedDevice,
+        *,
+        action_id: str | None = None,
+        source: str = "planner",
+        actor_id: str | None = None,
+        context_id: str | None = None,
+    ) -> bool:
+        """Issue a bounded, guarded ON command and require causal readback.
+
+        Restore is never an emergency action; it is permitted only when the full
+        restore gate stack is satisfied. A failed or ambiguous readback latches a
+        durable fault, exactly like the stop path.
+        """
+        action_id = action_id or self._new_action_id("restore")
+        self._last_action_id = action_id
+        if not self.restore_commands_allowed:
+            self._status = STATUS_OBSERVE
+            await self._record_observe_only_action(
+                action="turn_on",
+                reason=ReasonCode.RESTORE_OBSERVE_MODE.value,
+                action_id=action_id,
+                device_id=device.device_id,
+                source=source,
+                actor_id=actor_id,
+                context_id=context_id,
+            )
+            return False
+        operation_id = self._next_operation_id(device)
+        self._last_operation_id = str(operation_id)
+        base = {
+            "action_id": action_id,
+            "operation_id": str(operation_id),
+            "device_id": device.device_id,
+            "action": "turn_on",
+            "source": source,
+            "actor_id": actor_id,
+            "context_id": context_id,
+            "emergency": False,
+        }
+        self._record_action({**base, "phase": "prepared", "result": "prepared"})
+        await self._persist_runtime_if_dirty()
+        self._record_action({**base, "phase": "dispatched", "result": "dispatched"})
+        try:
+            pre_reported_at = self._logical_device_reported_at(device)
+            command_issued_at = time.time()
+            for entity_id in device.control_entity_ids:
+                domain = entity_id.split(".", 1)[0]
+                await self.hass.services.async_call(
+                    domain,
+                    "turn_on",
+                    {"entity_id": entity_id},
+                    blocking=True,
+                )
+            confirmed = await self._confirm_device_state(
+                device,
+                STATE_ON,
+                operation_id=operation_id,
+                command_issued_at=command_issued_at,
+                pre_reported_at=pre_reported_at,
+            )
+            if not confirmed:
+                self._latch_device_fault(device, ReasonCode.RELAY_READBACK_TIMEOUT.value)
+                self._last_operation_result = "failed"
+                self._safety_fault_reason = ReasonCode.RELAY_READBACK_TIMEOUT.value
+                self._record_action(
+                    {
+                        **base,
+                        "phase": "failed",
+                        "result": "failed",
+                        "reason": ReasonCode.RELAY_READBACK_TIMEOUT.value,
+                    }
+                )
+                return False
+            device.is_on = True
+            device.ownership = Ownership.PLANNER
+            device.ownership_until = None
+            # Record the planner-driven ON transition so the next device
+            # reconciliation does not misread it as a manual external enable.
+            self._last_observed_state[device.device_id] = True
+            self._last_operation_result = "confirmed"
+            self._record_action(
+                {
+                    **base,
+                    "phase": "confirmed",
+                    "result": "confirmed",
+                    "reason": ReasonCode.RESTORE_HEADROOM_AVAILABLE.value,
+                }
+            )
+            return True
+        except Exception as exc:  # pragma: no cover - defensive command boundary
+            reason = str(exc)[:160]
+            self._latch_device_fault(device, reason)
+            self._last_operation_result = "failed"
+            self._safety_fault_reason = reason
+            self._record_action(
+                {**base, "phase": "failed", "result": "failed", "reason": reason}
+            )
+            _LOGGER.error("Failed to switch on %s: %s", device.name, exc)
             return False
 
     def _pause_device(self, device: ManagedDevice) -> None:
@@ -1244,6 +1507,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 raise ValueError("auto mode requires live execution")
             previous = self._execution_mode
             self._execution_mode = value
+            if value == EXECUTION_MODE_OBSERVE:
+                # Observe can never hold a physical restore arm; a later re-arm
+                # must observe a fresh continuous below-ceiling dwell.
+                self._restore_armed = False
+                self._policy_engine.runtime.restore_since = None
             setter = getattr(self._store, "set_execution_mode", None)
             if callable(setter):
                 setter(value)
@@ -1271,6 +1539,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             }
             try:
                 self.mode = value
+                if value == MODE_OFF:
+                    # Disarming normal shedding also disarms guarded restore and
+                    # resets its dwell so a re-arm cannot inherit stale headroom.
+                    self._restore_armed = False
+                    self._policy_engine.runtime.restore_since = None
                 if value == MODE_AUTO:
                     self._execution_mode = EXECUTION_MODE_LIVE
                     setter = getattr(self._store, "set_execution_mode", None)
@@ -1311,6 +1584,84 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         """Run one serialized evaluation immediately."""
         await self._evaluate_safely()
         self.async_set_updated_data(self._build_data())
+
+    async def async_authorize_restore(self, *, confirm_restore: bool = False) -> None:
+        """Arm the guarded restore lane after explicit confirmation.
+
+        Arming performs no physical action; it only permits the planner to
+        later re-enable loads it shed, and only while live+auto and configured.
+        """
+        if not confirm_restore:
+            raise ValueError("restore arming requires explicit confirmation")
+        async with self._evaluation_lock:
+            if not self._restore_config.enabled:
+                raise ValueError("restore is not enabled in configuration")
+            if self._execution_mode != EXECUTION_MODE_LIVE or self._mode != MODE_AUTO:
+                raise ValueError("restore requires live execution and auto mode")
+            if self._safety_storage_invalid:
+                raise ValueError("safety storage is invalid; resolve persisted state first")
+            self._restore_armed = True
+            # Arming starts a fresh dwell: require a continuous below-ceiling
+            # observation period after arming before any restore may fire.
+            self._policy_engine.runtime.restore_since = None
+        await self._evaluate_safely()
+        self.async_set_updated_data(self._build_data())
+
+    async def async_request_restore(
+        self,
+        device_id: str,
+        *,
+        source: str = "service",
+        actor_id: str | None = None,
+        context_id: str | None = None,
+    ) -> bool:
+        """Guarded single-load restore intent for an operator-selected device.
+
+        An explicit operator request may skip the *time-based* headroom dwell,
+        but it enforces every other restore gate exactly like policy restore:
+        the device must be a current restore candidate (planner-shed, opted-in,
+        confirmed OFF, planner-owned, not faulted/quarantined/paused/in cooldown,
+        non-climate, and fitting under the restore threshold with reserve), the
+        post-restore fence must be clear, and a successful restore installs the
+        fence so loads cannot be re-enabled back-to-back.
+        """
+        async with self._evaluation_lock:
+            if not self.restore_commands_allowed:
+                raise ValueError("restore is not permitted in the current mode")
+            device = self._model.get_device(device_id)
+            if device is None:
+                raise ValueError("unknown device_id")
+            if not self._policy_engine.can_restore_again(self._load_generation):
+                return False
+            # Re-read live telemetry so eligibility reflects the current load.
+            await self._refresh_device_states()
+            current = self._read_load_sensor()
+            if not self._load_sensor_valid:
+                return False
+            if device not in self._restore_candidate_snapshot(current):
+                return False
+            restored = await self._command_on(
+                device,
+                action_id=self._new_action_id("restore_intent"),
+                source=source,
+                actor_id=actor_id,
+                context_id=context_id,
+            )
+            if restored:
+                operation_id = self._last_operation_id or "unknown"
+                self._planner_shed_devices.discard(device_id)
+                self._restore_cooldown_until[device_id] = (
+                    time.time() + self._restore_config.cooldown_s
+                )
+                self._policy_engine.append_restore(
+                    operation_id=operation_id, load_generation=self._load_generation
+                )
+                self._policy_engine.set_post_restore_fence(
+                    self._last_confirmed_reported_at.get(device_id)
+                )
+            if not await self._persist_runtime_if_dirty() and not restored:
+                raise RuntimeError("restore intent could not be persisted")
+            return restored
 
     def restore_fault_notification_state(
         self,
@@ -1463,6 +1814,12 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             ],
             "shed_barrier_pending": self._policy_engine.runtime.pending_post_shed_generation
             is not None,
+            "restore_enabled": self._restore_config.enabled,
+            "restore_armed": self._restore_armed,
+            "restore_commands_allowed": self.restore_commands_allowed,
+            "restore_barrier_pending": self._policy_engine.runtime.pending_post_restore_generation
+            is not None,
+            "planner_shed_devices": sorted(self._planner_shed_devices),
             "last_operation_id": self._last_operation_id,
             "last_operation_result": self._last_operation_result,
             "last_action_id": self._last_action_id,

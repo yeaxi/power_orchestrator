@@ -14,9 +14,10 @@
 - аварійний grid/battery стан виконує all-stop path;
 - invalid aggregate/device input не authorizes ordinary physical action; unavailable/off grid source дозволяє лише emergency stop path для відомих ON loads;
 - після restart валідний persisted mode відновлюється без безумовного скидання;
-- немає PV/forecast admission, normal enable або automatic re-enable surface.
+- немає PV/forecast admission та normal enable never-shed loads;
+- guarded restore (якщо enabled+armed) re-enable лише planner-shed loads з causal ON readback.
 
-В integration немає **no normal automatic enabling**: її фізична action surface stop-only.
+В integration немає **no normal automatic enabling** never-shed навантажень: її фізична action surface — stop плюс fail-closed guarded restore (off by default, per-load opt-in, лише при `live` + explicit arming, planner-shed only, без climate). Verify окремо: (1) restore не спрацьовує поки не armed; (2) armed restore re-enable лише load, який shed сам planner, і лише коли load ≤ restore ceiling протягом restore dwell; (3) manual re-enable знімає restore claim; (4) restore ніколи не конфліктує з shed/emergency.
 
 Успіх означає, що всі обов'язкові перевірки нижче пройдені, кожна дозволена фізична дія має очікуваний readback, а жоден небезпечний або невизначений input не призводить до normal action.
 

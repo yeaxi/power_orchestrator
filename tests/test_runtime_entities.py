@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from homeassistant.exceptions import ServiceValidationError
 
 from power_orchestrator import (
     _lifecycle_state,
@@ -163,7 +164,7 @@ async def test_mode_select_delegates_only_auto_or_off() -> None:
     coordinator.async_set_mode = AsyncMock()
     entity = PowerOrchestratorModeSelect(coordinator, SimpleNamespace(entry_id="entry"))
     entity.async_write_ha_state = MagicMock()
-    with pytest.raises(ValueError):
+    with pytest.raises(ServiceValidationError):
         await entity.async_select_option("invalid")
     await entity.async_select_option("off")
     coordinator.async_set_mode.assert_awaited_once_with("off")

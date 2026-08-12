@@ -109,7 +109,7 @@ def _threshold_defaults(value: Any) -> list[dict[str, float]]:
             try:
                 limit = float(raw.get("power_limit", raw.get("limit_w")))
                 duration = float(raw.get("duration_s", raw.get("time_s")))
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 continue
             if math.isfinite(limit) and math.isfinite(duration) and limit > 0 and duration >= 0:
                 result.append({"power_limit": limit, "duration_s": duration})
@@ -131,7 +131,7 @@ def _parse_threshold_input(
         return None, "invalid_thresholds"
     try:
         count = int(raw_count)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None, "invalid_thresholds"
     if count != raw_count or not 1 <= count <= MAX_CUSTOM_THRESHOLDS:
         return None, "invalid_thresholds"
@@ -149,7 +149,7 @@ def _parse_threshold_input(
             return None, "invalid_thresholds"
         try:
             limit, dwell = validate_threshold_pair(float(power), float(duration), previous)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return None, "invalid_thresholds"
         if limit > DEFAULT_HARD_INTERLOCK:
             return None, "invalid_thresholds"
@@ -221,7 +221,7 @@ def _parse_threshold_step(
             float(raw_duration),
             previous,
         )
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None, "invalid_thresholds"
     if limit > DEFAULT_HARD_INTERLOCK:
         return None, "invalid_thresholds"
@@ -338,7 +338,7 @@ def _normalize_options_devices(value: Any) -> list[dict[str, Any]]:
             raise ValueError("expected power must be finite")
         try:
             expected = float(expected_raw)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             raise ValueError("expected power must be finite") from None
         if not math.isfinite(expected) or not 1 <= expected <= 50000:
             raise ValueError("expected power is outside the allowed range")
@@ -357,7 +357,7 @@ def _normalize_options_devices(value: Any) -> list[dict[str, Any]]:
                 raise ValueError(f"{label} must be an integer")
             try:
                 converted = float(raw_value)
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 raise ValueError(f"{label} must be an integer") from None
             if not math.isfinite(converted) or converted < 1 or converted != int(converted):
                 raise ValueError(f"{label} must be a positive integer")
@@ -502,7 +502,7 @@ def _validate_threshold_collection(value: Any) -> list[dict[str, float]]:
                 float(raw.get("duration_s", raw.get("time_s"))),
                 previous,
             )
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             raise ValueError("invalid thresholds") from None
         if limit > DEFAULT_HARD_INTERLOCK:
             raise ValueError("invalid thresholds")
@@ -594,7 +594,7 @@ def _prepare_options_submission(
             continue
         try:
             converted = float(raw)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             errors.setdefault("base", "invalid_numeric_setting")
             continue
         if not math.isfinite(converted) or not minimum <= converted <= maximum:
@@ -634,7 +634,7 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
     """Five-step onboarding flow for load shedding and safety sources."""
 
     VERSION = 2
-    MINOR_VERSION = 1
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         self._discovered: dict[str, Any] = {}

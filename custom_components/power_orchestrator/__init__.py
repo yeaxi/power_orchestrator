@@ -12,19 +12,13 @@ from typing import Any, cast
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers.event import (
+    EventStateChangedData,
+    async_track_state_change_event,
+)
 from homeassistant.helpers.storage import Store
-
-try:
-    from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-except ImportError:  # pragma: no cover - local test doubles
-
-    class HomeAssistantError(Exception):  # type: ignore[no-redef]
-        """Fallback Home Assistant error."""
-
-    class ServiceValidationError(HomeAssistantError):  # type: ignore[no-redef]
-        """Fallback service validation error."""
-
 
 from .const import (
     CONF_AVERAGING_PERIOD,
@@ -36,6 +30,7 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
     CONF_DEVICE_POWER_SENSOR,
+    CONF_DEVICE_RESTORE_ENABLED,
     CONF_DEVICES,
     CONF_EXECUTION_MODE,
     CONF_GRID_LOSS_MODE,
@@ -45,6 +40,11 @@ from .const import (
     CONF_MAX_LOAD,
     CONF_PAUSE_PERIOD,
     CONF_PRIORITY,
+    CONF_RESTORE_COOLDOWN,
+    CONF_RESTORE_DWELL,
+    CONF_RESTORE_ENABLED,
+    CONF_RESTORE_HYSTERESIS,
+    CONF_RESTORE_THRESHOLD,
     CONF_SAFETY_RESERVE,
     CONF_SHED_PRIORITY,
     CONF_THRESHOLDS,
@@ -64,7 +64,7 @@ from .const import (
     STORAGE_VERSION,
 )
 from .coordinator import PowerOrchestratorCoordinator
-from .policy import PolicyConfig
+from .policy import PolicyConfig, RestoreConfig
 from .power_model import ManagedDevice, PowerModel
 from .runtime import PowerOrchestratorRuntimeData
 from .storage import RuntimeStore
@@ -78,6 +78,8 @@ _REGISTERED_SERVICES = (
     "clear_quarantine",
     "set_execution_mode",
     "authorize_shedding",
+    "authorize_restore",
+    "request_restore",
 )
 _REPAIR_ISSUE_IDS_KEY = f"{DOMAIN}_repair_issue_ids"
 _ALLOWED_CONTROL_DOMAINS = frozenset({"switch", "light", "input_boolean"})
@@ -90,16 +92,13 @@ def _translated_error(
     *,
     reason: str | None = None,
 ) -> Exception:
-    """Construct a translated HA exception with local-test compatibility."""
+    """Construct a translated Home Assistant exception."""
     placeholders = {"reason": reason} if reason else None
-    try:
-        return cast(Any, exception_type)(
-            translation_domain=DOMAIN,
-            translation_key=translation_key,
-            translation_placeholders=placeholders,
-        )
-    except TypeError:
-        return exception_type(reason or translation_key)
+    return cast(Any, exception_type)(
+        translation_domain=DOMAIN,
+        translation_key=translation_key,
+        translation_placeholders=placeholders,
+    )
 
 
 def _loaded_runtimes(hass: HomeAssistant) -> list[PowerOrchestratorRuntimeData]:
@@ -157,15 +156,13 @@ def _repair_device_ids(hass: HomeAssistant, entry: ConfigEntry) -> set[str]:
 
 def _sync_repair_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Mirror durable quarantine into persistent Home Assistant issues."""
-    try:
-        from homeassistant.helpers.issue_registry import (
-            IssueSeverity,
-            async_create_issue,
-            async_delete_issue,
-            async_get,
-        )
-    except ImportError:  # pragma: no cover - local Home Assistant test doubles
-        return
+    from homeassistant.helpers.issue_registry import (
+        IssueSeverity,
+        async_create_issue,
+        async_delete_issue,
+        async_get,
+    )
+
     active_ids = _repair_device_ids(hass, entry)
     desired_ids = {_repair_issue_id(entry.entry_id, device_id) for device_id in active_ids}
     hass_data = getattr(hass, "data", None)
@@ -259,7 +256,7 @@ def _safe_number(value: Any, *, default: float, minimum: float, maximum: float) 
         return default
     try:
         converted = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return default
     if not math.isfinite(converted) or not minimum <= converted <= maximum:
         return default
@@ -327,6 +324,7 @@ def _normalize_devices(raw_devices: Any) -> list[dict[str, Any]]:
                 CONF_PRIORITY: priority,
                 CONF_SHED_PRIORITY: shed_priority,
                 CONF_DEVICE_ACTUATORS: actuators,
+                CONF_DEVICE_RESTORE_ENABLED: bool(raw.get(CONF_DEVICE_RESTORE_ENABLED, False)),
             }
         )
         seen_ids.add(device_id)
@@ -402,6 +400,7 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     store = RuntimeStore(Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{entry.entry_id}"))
     await store.async_load()
     policy = PolicyConfig.from_mapping(data)
+    restore_config = RestoreConfig.from_mapping(data)
     execution_mode = store.restore_execution_mode() or data.get(
         CONF_EXECUTION_MODE, DEFAULT_EXECUTION_MODE
     )
@@ -438,6 +437,7 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
         entry_id=entry.entry_id,
         policy=policy,
         execution_mode=execution_mode,
+        restore_config=restore_config,
     )
     coordinator._safety_storage_invalid = store.safety_storage_invalid
     store.restore_pause_timestamps(model, MAX_RUNTIME_PAUSE_SECONDS)
@@ -481,24 +481,20 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
         tracked_entities.update(device.control_entity_ids)
         if device.power_sensor_id:
             tracked_entities.add(device.power_sensor_id)
-    tracked_entities.discard(None)
+    tracked_entity_ids = sorted(e for e in tracked_entities if isinstance(e, str) and e)
 
-    async def _state_changed(event: Any) -> None:
-        entity_id = getattr(event, "data", {}).get("entity_id") if event is not None else None
-        if entity_id in tracked_entities:
-            await coordinator.async_force_evaluate()
-            _sync_repair_issues(hass, entry)
+    async def _state_changed(event: Event[EventStateChangedData]) -> None:
+        # Only the tracked entities are subscribed, so any delivered event is
+        # relevant and triggers one guarded re-evaluation.
+        await coordinator.async_force_evaluate()
+        _sync_repair_issues(hass, entry)
 
-    bus = getattr(hass, "bus", None)
-    listen = getattr(bus, "async_listen", None)
-    if callable(listen):
-        raw_remove_listener = listen("state_changed", _state_changed)
-        if callable(raw_remove_listener):
-            remove_listener = _idempotent_remover(raw_remove_listener)
-            runtime.repair_listener_remove = remove_listener
-            on_unload = getattr(entry, "async_on_unload", None)
-            if callable(on_unload):
-                on_unload(remove_listener)
+    if tracked_entity_ids:
+        remove_listener = _idempotent_remover(
+            async_track_state_change_event(hass, tracked_entity_ids, _state_changed)
+        )
+        runtime.repair_listener_remove = remove_listener
+        entry.async_on_unload(remove_listener)
 
     try:
         await coordinator.async_config_entry_first_refresh()
@@ -560,6 +556,11 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_PAUSE_PERIOD,
         CONF_SAFETY_RESERVE,
         CONF_THRESHOLDS,
+        CONF_RESTORE_ENABLED,
+        CONF_RESTORE_THRESHOLD,
+        CONF_RESTORE_HYSTERESIS,
+        CONF_RESTORE_DWELL,
+        CONF_RESTORE_COOLDOWN,
     }
     clean_data = {key: value for key, value in data.items() if key in allowed_keys}
     if clean_data != data:
@@ -578,6 +579,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_DEVICE_ACTUATORS,
         CONF_PRIORITY,
         CONF_SHED_PRIORITY,
+        CONF_DEVICE_RESTORE_ENABLED,
     }
     for payload in (data, options):
         raw_devices = payload.get(CONF_DEVICES)
@@ -593,7 +595,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             changed = True
     current_version = getattr(entry, "version", None)
     current_minor_version = getattr(entry, "minor_version", None)
-    if current_version != 2 or current_minor_version != 1:
+    if current_version != 2 or current_minor_version != 2:
         changed = True
     if changed:
         updater = getattr(hass.config_entries, "async_update_entry", None)
@@ -603,7 +605,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 data=data,
                 options=options,
                 version=2,
-                minor_version=1,
+                minor_version=2,
             )
     return True
 
@@ -717,6 +719,36 @@ async def _register_services(hass: HomeAssistant) -> None:
                 HomeAssistantError, "shedding_authorization_failed", reason=str(exc)
             ) from exc
 
+    async def authorize_restore(call: Any) -> None:
+        data = getattr(call, "data", {})
+        try:
+            await _service_runtime(hass).coordinator.async_authorize_restore(
+                confirm_restore=bool(data.get("confirm_restore", False)),
+            )
+        except Exception as exc:
+            raise _translated_error(
+                HomeAssistantError, "restore_authorization_failed", reason=str(exc)
+            ) from exc
+
+    async def request_restore(call: Any) -> None:
+        data = getattr(call, "data", {})
+        device_id = data.get("device_id")
+        if not isinstance(device_id, str) or not device_id.strip():
+            raise _translated_error(ServiceValidationError, "missing_device_id")
+        if not bool(data.get("confirm_restore", False)):
+            raise _translated_error(ServiceValidationError, "restore_requires_confirmation")
+        source, actor_id, context_id = _service_source(call)
+        try:
+            runtime = _service_runtime(hass)
+            await runtime.coordinator.async_request_restore(
+                device_id.strip(), source=source, actor_id=actor_id, context_id=context_id
+            )
+            _sync_repair_issues_for_runtime(hass, runtime)
+        except Exception as exc:
+            raise _translated_error(
+                HomeAssistantError, "restore_request_failed", reason=str(exc)
+            ) from exc
+
     service_schema = {
         "force_evaluate": vol.Schema({}),
         "set_mode": vol.Schema({vol.Required("mode"): vol.In([MODE_AUTO, MODE_OFF])}),
@@ -740,6 +772,14 @@ async def _register_services(hass: HomeAssistant) -> None:
                 vol.Required("confirm_takeover"): bool,
             }
         ),
+        "authorize_restore": vol.Schema({vol.Required("confirm_restore"): bool}),
+        "request_restore": vol.Schema(
+            {
+                vol.Required("device_id"): str,
+                vol.Required("confirm_restore"): bool,
+                vol.Optional("source", default="service"): str,
+            }
+        ),
     }
     handlers = {
         "force_evaluate": force_evaluate,
@@ -748,6 +788,8 @@ async def _register_services(hass: HomeAssistant) -> None:
         "clear_quarantine": clear_quarantine,
         "set_execution_mode": set_execution_mode,
         "authorize_shedding": authorize_shedding,
+        "authorize_restore": authorize_restore,
+        "request_restore": request_restore,
     }
     for name in _REGISTERED_SERVICES:
         services.async_register(DOMAIN, name, handlers[name], schema=service_schema[name])

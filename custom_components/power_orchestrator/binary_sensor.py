@@ -14,6 +14,10 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import PowerOrchestratorCoordinator
 
+# Entities are pushed from a single coordinator and perform no per-entity I/O,
+# so Home Assistant does not need to serialize their updates.
+PARALLEL_UPDATES = 0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,

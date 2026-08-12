@@ -506,6 +506,15 @@
     "shedding_authorization_failed": {
       "message": "Не вдалося дозволити ownership для вибраних shedding-навантажень: {reason}."
     },
+    "restore_authorization_failed": {
+      "message": "Не вдалося озброїти кероване відновлення: {reason}."
+    },
+    "restore_request_failed": {
+      "message": "Запит на кероване відновлення не виконано: {reason}."
+    },
+    "restore_requires_confirmation": {
+      "message": "Кероване відновлення потребує явного підтвердження."
+    },
     "request_rejected": {
       "message": "Запит відхилено: {reason}."
     },

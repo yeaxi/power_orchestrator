@@ -262,9 +262,13 @@ def test_priority_form_uses_native_reorderable_entity_selector() -> None:
     schema_keys = list(form["data_schema"].schema)
     assert CONF_PRIORITY_ORDER in schema_keys
     selector_config = form["data_schema"].schema[CONF_PRIORITY_ORDER].config
-    assert selector_config.multiple is True
-    assert selector_config.reorder is True
-    assert selector_config.include_entities == ["switch.load", "switch.other"]
+
+    def _cfg(key: str):
+        return selector_config[key] if isinstance(selector_config, dict) else getattr(selector_config, key)
+
+    assert _cfg("multiple") is True
+    assert _cfg("reorder") is True
+    assert _cfg("include_entities") == ["switch.load", "switch.other"]
 
 
 @pytest.mark.asyncio
