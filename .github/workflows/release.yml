@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gates:
+    name: Quality and behavior gates
+    uses: ./.github/workflows/ci.yml
+
+  validation:
+    name: Ecosystem validation
+    uses: ./.github/workflows/validate.yml
+
+  publish:
+    name: Publish release asset
+    needs: [gates, validation]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.2"
+      - name: Require the tag to point at a commit on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::${GITHUB_REF_NAME} is not an ancestor of main; release only reviewed commits"
+            exit 1
+          fi
+      - name: Build the release asset
+        id: build
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python scripts/build_release_zip.py --expect-version "${version}" | tee build.log
+          echo "version=${version}" >>"${GITHUB_OUTPUT}"
+      - name: Checksum the release asset
+        working-directory: dist
+        run: sha256sum power_orchestrator.zip | tee power_orchestrator.zip.sha256
+      - name: Record the asset in the run summary
+        run: |
+          {
+            echo "## ${GITHUB_REF_NAME}"
+            echo
+            echo '```'
+            cat build.log
+            cat dist/power_orchestrator.zip.sha256
+            echo '```'
+            echo
+            echo 'Zip entries:'
+            echo '```'
+            python -c "import zipfile; print('\n'.join(sorted(zipfile.ZipFile('dist/power_orchestrator.zip').namelist())))"
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
+      - name: Upload the asset as a run artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: power-orchestrator-${{ steps.build.outputs.version }}
+          path: dist/
+          retention-days: 90
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/power_orchestrator.zip \
+            dist/power_orchestrator.zip.sha256 \
+            --title "${GITHUB_REF_NAME}" \
+            --verify-tag \
+            --generate-notes

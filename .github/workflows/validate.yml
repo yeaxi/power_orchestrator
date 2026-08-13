@@ -1,0 +1,48 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # HACS validation reads live GitHub state (releases, topics, brands), so it
+    # can start failing without a commit.
+    - cron: "17 5 * * 1"
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  hassfest:
+    name: hassfest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Run hassfest
+        # Pinned to the Home Assistant version this integration targets, so the
+        # manifest rules validated here are the ones users run against.
+        run: |
+          docker run --rm \
+            --volume "${{ github.workspace }}:/github/workspace" \
+            ghcr.io/home-assistant/hassfest:2026.7.4
+
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Run HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration
+          comment: false

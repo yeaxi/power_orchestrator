@@ -20,7 +20,7 @@ Energy Dashboard discovery is optional. It never authorizes a physical action.
 ### HACS
 
 1. Add `https://github.com/yeaxi/power_orchestrator` as a custom repository (type: Integration).
-2. Install Power Orchestrator.
+2. Install Power Orchestrator. HACS installs and updates from published releases.
 3. Restart Home Assistant.
 4. Add it from **Settings → Devices & Services**.
 

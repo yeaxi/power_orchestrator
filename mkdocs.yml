@@ -33,6 +33,7 @@ nav:
   - Development:
       - Contributing: development/contributing.md
       - Git workflow: development/git-workflow.md
+      - Release: development/release.md
       - Verification: development/verification.md
 
 markdown_extensions:
