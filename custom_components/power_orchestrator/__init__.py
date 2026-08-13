@@ -464,6 +464,7 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     coordinator.restore_fault_notification_state(active_notifications, pending_notifications)
     coordinator.restore_action_journal(store.unresolved_actions())
     store.restore_policy_runtime(coordinator._policy_engine, model)
+    coordinator.restore_pending_restore(store.restore_pending_restore(model))
     restored_mode = MODE_OFF if store.safety_storage_invalid else store.restore_mode()
     coordinator.mode = restored_mode if restored_mode in (MODE_AUTO, MODE_OFF) else MODE_OFF
     if coordinator.mode == MODE_AUTO and coordinator.execution_mode == EXECUTION_MODE_OBSERVE:

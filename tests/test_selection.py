@@ -69,7 +69,7 @@ def test_restore_candidates_eligibility() -> None:
     device.ownership = Ownership.PLANNER
     hass = _Hass({"switch.d1": _state("off")})
     common = dict(
-        planner_shed={"d1"},
+        planner_shed=["d1"],
         faulted=set(),
         quarantined=set(),
         cooldown_until={},
@@ -81,7 +81,7 @@ def test_restore_candidates_eligibility() -> None:
     assert [d.device_id for d in restore_candidates(hass, _model(device), **common)] == ["d1"]
 
     # Not planner-shed -> not eligible.
-    assert restore_candidates(hass, _model(device), **{**common, "planner_shed": set()}) == []
+    assert restore_candidates(hass, _model(device), **{**common, "planner_shed": []}) == []
     # Insufficient headroom (3000 + 500 + 200 > threshold 3500) -> not eligible.
     assert restore_candidates(hass, _model(device), **{**common, "restore_threshold_w": 3500}) == []
     # Cooldown active -> not eligible.
@@ -100,8 +100,35 @@ def test_restore_candidates_excludes_climate() -> None:
     device.ownership = Ownership.PLANNER
     hass = _Hass({"switch.d1": _state("off"), "climate.d1": _state("off")})
     result = restore_candidates(
-        hass, _model(device), planner_shed={"d1"}, faulted=set(), quarantined=set(),
+        hass, _model(device), planner_shed=["d1"], faulted=set(), quarantined=set(),
         cooldown_until={}, restore_threshold_w=9000, safety_reserve=200,
         current_load=1000, now=time.time(),
     )
     assert result == []
+
+
+def test_restore_candidates_reverse_actual_shed_order() -> None:
+    first = ManagedDevice(
+        "d1", "First", "switch.d1", expected_power=500, restore_enabled=True
+    )
+    second = ManagedDevice(
+        "d2", "Second", "switch.d2", expected_power=500, restore_enabled=True
+    )
+    first.ownership = Ownership.PLANNER
+    second.ownership = Ownership.PLANNER
+    hass = _Hass({"switch.d1": _state("off"), "switch.d2": _state("off")})
+
+    result = restore_candidates(
+        hass,
+        _model(first, second),
+        planner_shed=["d1", "d2"],
+        faulted=set(),
+        quarantined=set(),
+        cooldown_until={},
+        restore_threshold_w=9000,
+        safety_reserve=200,
+        current_load=1000,
+        now=time.time(),
+    )
+
+    assert [device.device_id for device in result] == ["d2", "d1"]

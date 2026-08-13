@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 from homeassistant.core import HomeAssistant
 
@@ -104,7 +104,7 @@ def restore_candidates(
     hass: HomeAssistant,
     model: PowerModel,
     *,
-    planner_shed: set[str],
+    planner_shed: Sequence[str],
     faulted: set[str],
     quarantined: set[str],
     cooldown_until: Mapping[str, float],
@@ -122,8 +122,9 @@ def restore_candidates(
     expected power returns.
     """
     candidates: list[ManagedDevice] = []
-    for device in model.get_shed_devices():
-        if device.device_id not in planner_shed:
+    for device_id in reversed(planner_shed):
+        device = model.get_device(device_id)
+        if device is None:
             continue
         if not device.restore_enabled:
             continue

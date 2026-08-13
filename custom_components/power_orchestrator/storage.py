@@ -89,6 +89,36 @@ class RuntimeStore:
     def clear_execution_mode(self) -> None:
         self._data.pop("execution_mode", None)
 
+    def save_pending_restore(self, device_ids: list[str]) -> None:
+        """Persist the ordered, unique restore queue."""
+        seen: set[str] = set()
+        pending: list[str] = []
+        for device_id in device_ids:
+            if not isinstance(device_id, str) or not device_id or device_id in seen:
+                continue
+            seen.add(device_id)
+            pending.append(device_id)
+        self._data["pending_restore"] = pending
+
+    def restore_pending_restore(self, model: PowerModel) -> list[str]:
+        """Return configured restore candidates in their durable shed order."""
+        raw = self._data.get("pending_restore", [])
+        if not isinstance(raw, list):
+            return []
+        configured = {device.device_id for device in model.all_devices()}
+        seen: set[str] = set()
+        pending: list[str] = []
+        for device_id in raw:
+            if (
+                not isinstance(device_id, str)
+                or device_id not in configured
+                or device_id in seen
+            ):
+                continue
+            seen.add(device_id)
+            pending.append(device_id)
+        return pending
+
     def update_pause_timestamp(self, device_id: str, pause_until: float | None) -> None:
         pauses = self._data.setdefault("pause_timestamps", {})
         if not isinstance(pauses, dict):
