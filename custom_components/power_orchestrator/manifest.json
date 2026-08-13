@@ -3,7 +3,7 @@
   "name": "Power Orchestrator",
   "codeowners": ["@yeaxi"],
   "config_flow": true,
-  "documentation": "https://github.com/yeaxi/power_orchestrator",
+  "documentation": "https://yeaxi.github.io/power_orchestrator/",
   "issue_tracker": "https://github.com/yeaxi/power_orchestrator/issues",
   "integration_type": "service",
   "quality_scale": "platinum",

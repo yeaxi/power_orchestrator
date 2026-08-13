@@ -1,0 +1,75 @@
+name: Bug report
+description: Something is wrong
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Include versions, status, and reason code. Strip tokens, passwords, and connection strings from logs.
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      placeholder: "2026.7.4"
+    validations:
+      required: true
+  - type: input
+    id: integration_version
+    attributes:
+      label: Integration version
+      placeholder: "0.5.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Install method
+      options:
+        - HACS
+        - Manual
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: status
+    attributes:
+      label: Status
+      description: Value of the Status sensor, if present.
+      placeholder: safety_blocked
+    validations:
+      required: false
+  - type: input
+    id: reason_code
+    attributes:
+      label: Reason code
+      description: Value of the Reason code sensor, if present.
+    validations:
+      required: false
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps
+      description: What you did.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant Home Assistant logs. Strip secrets.
+      render: text
+    validations:
+      required: false

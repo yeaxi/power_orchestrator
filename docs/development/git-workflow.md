@@ -1,31 +1,29 @@
-# Local Git change workflow
+# Git workflow
 
-This project uses Git as a **local safety checkpoint and rollback mechanism**. It intentionally has no GitHub repository or other remote requirement.
+Git is the safety checkpoint and rollback path. Changes land through GitHub pull requests. A commit is not permission to deploy, restart Home Assistant, or call a physical service.
 
 ## Before editing
 
 ```bash
 git status --short --branch
 git log -3 --oneline --decorate
-git remote -v
 ```
 
-A clean working tree is preferred before a new logical change. If existing work is present, first identify the intended scope and do not mix unrelated edits into the checkpoint.
+Prefer a clean tree. Do not mix unrelated edits into one checkpoint.
 
 ## Before committing
 
-Run the narrowest relevant tests first, then inspect the candidate tree:
+Run the narrowest relevant tests, then inspect the tree:
 
 ```bash
-# Example focused test command
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-quality/bin/python -m pytest tests/test_coordinator.py -q
+python -m pytest tests/test_package_quality.py -q
 
 git diff --check
 git diff --stat
-git diff -- custom_components tests docs README.md HA_VERIFICATION.md
+git diff -- custom_components tests docs README.md CONTRIBUTING.md
 ```
 
-Stage only the intended files and inspect the staged result:
+Stage only the intended files:
 
 ```bash
 git add <intended-files>
@@ -36,38 +34,36 @@ git diff --cached --check
 
 Do not stage:
 
-- `.venv*`, caches, coverage databases, build artifacts, or editor files;
-- Home Assistant `/config` state, backups, registries, databases, or runtime credentials;
-- passwords, API keys, tokens, private keys, or connection strings;
-- generic Hermes skills or profile-wide memory. If a project-local skill or memory file is added later, classify it first and track only project-specific, secret-free content.
+- `.venv*`, caches, coverage databases, `site/`, or editor files
+- Home Assistant `/config` state, backups, registries, databases, or runtime credentials
+- passwords, API keys, tokens, private keys, or connection strings
 
-Track the project-specific `AGENTS.md` after reviewing it for secrets and unrelated user/profile policy; it is part of the repository's source-of-truth context.
-
-Create one descriptive commit for one coherent change:
+Track `AGENTS.md` after a secret scan. It is project policy, not generic profile memory.
 
 ```bash
 git commit -m "<short description of the logical change>"
 git status --short --branch
 git show --stat --summary HEAD
-git diff HEAD --check
 ```
 
-A Git commit is only a source checkpoint. It is not permission to deploy, restart Home Assistant, or call a physical service.
+## Pull requests
+
+Push a feature branch and open a PR against `main`. CI must pass. Review the diff before merge.
+
+A merge is still only a source checkpoint. Live activation is a separate, explicitly approved step.
 
 ## Deployment boundary
 
-Deploy only a verified commit. Before a live replacement, create and hash a remote backup of the current component and record the source commit:
+Deploy only a verified commit. Record the commit, a backup of the installed component, `ha core check`, readiness, and live readback as separate evidence. A clean Git tree does not replace Home Assistant runtime verification.
 
 ```bash
 git rev-parse --short HEAD
 git show --format=fuller --stat HEAD
 ```
 
-Keep the deployed commit, local archive hash, remote backup path/hash, `ha core check`, readiness, and live readback as separate evidence. A clean Git tree does not replace Home Assistant runtime verification.
-
 ## Rollback
 
-For an accepted but unsafe or incorrect source change, preserve history with a revert:
+For an accepted but wrong source change, revert. Do not `git reset --hard` or force-push for routine rollback.
 
 ```bash
 git log --oneline --decorate -5
@@ -75,14 +71,4 @@ git show --stat <commit>
 git revert <commit>
 ```
 
-Then rerun the relevant local gates and make a new controlled deployment from the resulting commit. Do not use `git reset --hard`, force-push, or history deletion for routine rollback. Live Home Assistant rollback also requires restoring the separately recorded remote component backup, running `ha core check`, and performing the explicitly approved activation step.
-
-## Repository boundary
-
-The repository is local-only by design. Do not create a GitHub repository or add a remote unless the user explicitly asks for that separate operation:
-
-```bash
-git remote -v
-```
-
-An empty output is expected.
+Rerun local gates. Live Home Assistant rollback also needs the recorded component backup, `ha core check`, and an approved activation step.

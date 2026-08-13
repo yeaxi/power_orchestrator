@@ -37,7 +37,12 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import yaml
-          for path in (Path("custom_components/power_orchestrator/services.yaml"), Path(".github/workflows/ci.yml")):
+          for path in (
+              Path("custom_components/power_orchestrator/services.yaml"),
+              Path(".github/workflows/ci.yml"),
+              Path(".github/workflows/docs.yml"),
+              Path("mkdocs.yml"),
+          ):
               yaml.safe_load(path.read_text())
               print(f"YAML OK: {path}")
           PY
