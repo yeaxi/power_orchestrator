@@ -4,10 +4,10 @@
   "codeowners": ["@yeaxi"],
   "config_flow": true,
   "documentation": "https://yeaxi.github.io/power_orchestrator/",
-  "issue_tracker": "https://github.com/yeaxi/power_orchestrator/issues",
   "integration_type": "service",
-  "quality_scale": "platinum",
   "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/yeaxi/power_orchestrator/issues",
+  "quality_scale": "platinum",
   "requirements": [],
   "single_config_entry": true,
   "version": "0.5.0"
