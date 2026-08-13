@@ -4,7 +4,6 @@ from __future__ import annotations
 from power_orchestrator.const import DEFAULT_HARD_INTERLOCK
 from power_orchestrator.policy import (
     DEFAULT_POLICY,
-    Ownership,
     PolicyConfig,
     PolicyEngine,
     PolicyPhase,
@@ -114,7 +113,3 @@ def test_hysteresis_does_not_affect_hard_interlock() -> None:
     decision = engine.observe_load(9000, now=0)
     assert decision.triggered
     assert decision.reason_code is ReasonCode.HARD_INTERLOCK
-
-
-def test_ownership_enum_has_no_admission_contract() -> None:
-    assert {item.value for item in Ownership} == {"unknown", "planner", "manual", "external"}

@@ -42,7 +42,6 @@ async def async_setup_entry(
             PowerOrchestratorAverageLoadSensor(coordinator, entry),
             PowerOrchestratorAvailableCapacitySensor(coordinator, entry),
             PowerOrchestratorLastActionSensor(coordinator, entry),
-            PowerOrchestratorExecutionModeSensor(coordinator, entry),
             PowerOrchestratorReasonCodeSensor(coordinator, entry),
             PowerOrchestratorLastOperationSensor(coordinator, entry),
         ]
@@ -193,30 +192,6 @@ class PowerOrchestratorLastActionSensor(PowerOrchestratorSensorBase):
     @property
     def native_value(self) -> str:
         return cast(str, self._coordinator.last_action)
-
-
-class PowerOrchestratorExecutionModeSensor(PowerOrchestratorSensorBase):
-    """Physical execution boundary: observe or live."""
-
-    _attr_translation_key = "execution_mode"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator: Any, entry: ConfigEntry) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{entry.entry_id}_sensor_execution_mode"
-
-    @property
-    def native_value(self) -> str:
-        return cast(str, self._coordinator.execution_mode)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        data = self._coordinator.data or {}
-        return {
-            "planner_mode": self._coordinator.mode,
-            "physical_commands_allowed": data.get("physical_commands_allowed", False),
-            "journal_persistence_blocked": data.get("journal_persistence_blocked", False),
-        }
 
 
 class PowerOrchestratorReasonCodeSensor(PowerOrchestratorSensorBase):

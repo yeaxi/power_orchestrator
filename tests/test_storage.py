@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from power_orchestrator.policy import DEFAULT_POLICY, Ownership, PolicyEngine, ReasonCode
+from power_orchestrator.policy import DEFAULT_POLICY, PolicyEngine, ReasonCode
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 from power_orchestrator.storage import RuntimeStore
 
@@ -93,13 +93,30 @@ def test_pause_and_device_runtime_are_bounded() -> None:
     store.set_pause("d1", time.time() + 30)
     store.restore_pause_timestamps(model)
     assert model.get_device("d1").pause_until is not None
-    model.get_device("d1").ownership = Ownership.EXTERNAL
-    model.get_device("d1").ownership_until = time.time() + 30
     store.save_device_runtime(model, faulted_devices={"d2"}, quarantined_devices={"d1"}, fault_reasons={"d2": "readback"})
     faulted, quarantined = store.restore_device_runtime(model)
     assert faulted == {"d2"}
     assert quarantined == {"d1"}
     assert store.restore_fault_reasons(model) == {"d2": "readback"}
+    devices = store.snapshot()["device_runtime"]["devices"]
+    assert devices["d1"] == {}
+    assert "ownership" not in devices["d1"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_unified_mode_maps_legacy_observe_and_defaults() -> None:
+    store = RuntimeStore(FakeStore({"mode": "auto", "execution_mode": "observe"}))
+    await store.async_load()
+    assert store.resolve_unified_mode() == "observe"
+    assert "execution_mode" not in store.snapshot()
+
+    live_store = RuntimeStore(FakeStore({"mode": "auto", "execution_mode": "live"}))
+    await live_store.async_load()
+    assert live_store.resolve_unified_mode() == "auto"
+
+    empty = RuntimeStore(FakeStore())
+    await empty.async_load()
+    assert empty.resolve_unified_mode() == "observe"
 
 
 def test_malformed_device_runtime_fails_closed() -> None:

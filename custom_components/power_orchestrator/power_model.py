@@ -7,8 +7,6 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .policy import Ownership
-
 
 @dataclass
 class ManagedDevice:
@@ -33,8 +31,6 @@ class ManagedDevice:
     measured_power_reason: str = "not_sampled"
     pause_until: float | None = None
     last_turn_off_time: float | None = None
-    ownership: Ownership = Ownership.UNKNOWN
-    ownership_until: float | None = None
 
     @property
     def control_entity_ids(self) -> tuple[str, ...]:
@@ -62,8 +58,6 @@ class ManagedDevice:
             "measured_power": self.measured_power if self.measured_power_valid else None,
             "measured_power_valid": self.measured_power_valid,
             "measured_power_reason": self.measured_power_reason,
-            "ownership": self.ownership.value,
-            "ownership_until": self.ownership_until,
             "pause_until": self.pause_until,
         }
 
@@ -82,11 +76,6 @@ class ManagedDevice:
         actuators = tuple(
             value for value in raw_actuators if isinstance(value, str) and value
         )
-        ownership_raw = data.get("ownership", Ownership.UNKNOWN)
-        try:
-            ownership = Ownership(ownership_raw)
-        except (TypeError, ValueError):
-            ownership = Ownership.UNKNOWN
 
         def finite_timestamp(value: Any) -> float | None:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -136,8 +125,6 @@ class ManagedDevice:
             shed_priority=shed_priority,
             actuator_entity_ids=actuators,
             restore_enabled=bool(data.get("restore_enabled", False)),
-            ownership=ownership,
-            ownership_until=finite_timestamp(data.get("ownership_until")),
             pause_until=finite_timestamp(data.get("pause_until")),
         )
 

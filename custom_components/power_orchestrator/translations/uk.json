@@ -6,12 +6,12 @@
       "description": "Негайно повторити оцінювання; safety gates та execution policy не обходяться."
     },
     "set_mode": {
-      "name": "Встановити режим planner",
-      "description": "Auto виконує обмежене shedding лише через stop-only при overload; off вимикає звичайне shedding, аварійний захист залишається активним.",
+      "name": "Встановити режим",
+      "description": "Авто дозволяє фізичне обмеження навантаження; Observe оцінює й записує намір без фізичних викликів; Off вимикає звичайне shedding. Off і Observe ніколи не викликають фізичні сервіси, зокрема аварійні шляхи.",
       "fields": {
         "mode": {
-          "name": "Режим planner",
-          "description": "Auto оцінює overload і може виконати контрольований фізичний OFF; off вимикає звичайні рішення політики. Auto не може залишатися в execution observe."
+          "name": "Режим",
+          "description": "Auto може видавати захищені фізичні OFF. Observe лише оцінює й аудитує. Off вимикає звичайні рішення політики."
         }
       }
     },
@@ -26,34 +26,6 @@
         "source": {
           "name": "Джерело запиту",
           "description": "Мітка для audit."
-        }
-      }
-    },
-    "set_execution_mode": {
-      "name": "Встановити physical execution policy",
-      "description": "Обрати сумісну execution policy. Live дозволяє контрольовані stop-only команди; observe є лише діагностичним у режимі planner off. Auto завжди потребує live.",
-      "fields": {
-        "execution_mode": {
-          "name": "Execution policy",
-          "description": "Observe лише оцінює та журналює, коли planner off; live дозволяє контрольовані stop-команди."
-        },
-        "confirm_live": {
-          "name": "Підтвердити live ownership",
-          "description": "Має бути true для переходу в live."
-        }
-      }
-    },
-    "authorize_shedding": {
-      "name": "Дозволити shedding для вибраних навантажень",
-      "description": "У режимі observe явно передати ownership лише перелічених уже увімкнених навантажень для подальшого stop-only тесту в live. Physical service не викликається.",
-      "fields": {
-        "device_ids": {
-          "name": "ID logical devices",
-          "description": "Точні стабільні device_id з конфігурації. Wildcard і пропущені пристрої не маються на увазі."
-        },
-        "confirm_takeover": {
-          "name": "Підтвердити передачу ownership",
-          "description": "Має бути true, щоб перелічені увімкнені навантаження перейшли з external до planner ownership."
         }
       }
     },
@@ -432,9 +404,6 @@
       "last_action": {
         "name": "Остання дія"
       },
-      "execution_mode": {
-        "name": "Режим виконання"
-      },
       "reason_code": {
         "name": "Код причини"
       },
@@ -458,6 +427,7 @@
         "name": "Режим",
         "state": {
           "auto": "Авто",
+          "observe": "Спостереження",
           "off": "Вимкнено"
         }
       }
@@ -468,10 +438,7 @@
       "message": "Джерело запиту має бути непорожнім рядком."
     },
     "invalid_service_mode": {
-      "message": "Режим planner має бути auto або off."
-    },
-    "invalid_execution_mode": {
-      "message": "Execution mode має бути observe або live."
+      "message": "Режим має бути auto, observe або off."
     },
     "entry_not_loaded": {
       "message": "Power Orchestrator не завантажений."
@@ -488,23 +455,14 @@
     "quarantine_clear_failed": {
       "message": "Запит очищення quarantine завершився помилкою."
     },
-    "execution_mode_change_failed": {
-      "message": "Зміна execution mode завершилася помилкою."
-    },
     "evaluation_failed": {
       "message": "Оцінювання Power Orchestrator завершилося помилкою."
     },
     "mode_change_failed": {
-      "message": "Зміна planner mode завершилася помилкою."
+      "message": "Не вдалося змінити режим."
     },
     "missing_device_id": {
       "message": "Потрібен ID logical device."
-    },
-    "missing_device_ids": {
-      "message": "Потрібен щонайменше один точний ID logical device."
-    },
-    "shedding_authorization_failed": {
-      "message": "Не вдалося дозволити ownership для вибраних shedding-навантажень: {reason}."
     },
     "restore_authorization_failed": {
       "message": "Не вдалося озброїти кероване відновлення: {reason}."
@@ -519,13 +477,13 @@
       "message": "Запит відхилено: {reason}."
     },
     "invalid_select_option": {
-      "message": "Непідтримуваний режим planner: {option}."
+      "message": "Непідтримуваний режим: {option}."
     }
   },
   "issues": {
     "quarantine_requires_reconciliation": {
       "title": "Power Orchestrator потребує reconciliation пристрою",
-      "description": "Пристрій {device_id} у quarantine, бо після restart або failed readback не вдалося довести безпечний стан останньої дії чи ownership."
+      "description": "Пристрій {device_id} у quarantine, бо після restart або failed readback не вдалося довести безпечний стан останньої дії."
     }
   }
 }

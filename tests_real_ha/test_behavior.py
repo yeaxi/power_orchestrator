@@ -347,14 +347,14 @@ async def test_restore_does_not_fire_until_armed(hass):
 
 @pytest.mark.usefixtures("enable_custom_integrations")
 async def test_overload_hard_interlock_sheds_one_load(hass):
-    """A load above the hard interlock is physically switched off in auto+live."""
+    """A load above the hard interlock is physically switched off in Auto."""
     entry = await _setup_loaded(hass)
     coordinator = entry.runtime_data.coordinator
 
     await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
     await hass.async_block_till_done()
     assert coordinator.mode == "auto"
-    assert coordinator.execution_mode == "live"
+    assert coordinator.physical_commands_allowed is True
 
     hass.states.async_set(LOAD_SENSOR, "9500", {"unit_of_measurement": "W"})
     await hass.async_block_till_done()
@@ -389,17 +389,8 @@ async def test_observe_mode_records_but_does_not_switch(hass):
     """Observe mode records an intended shed but never calls a physical service."""
     entry = await _setup_loaded(hass)
     coordinator = entry.runtime_data.coordinator
-    assert coordinator.execution_mode == "observe"
-
-    # Claim planner ownership of the already-on load (observe-only, no physical
-    # call) so the load is an eligible shed candidate under observe execution.
-    await hass.services.async_call(
-        DOMAIN,
-        "authorize_shedding",
-        {"device_ids": ["boiler"], "confirm_takeover": True},
-        blocking=True,
-    )
-    await hass.async_block_till_done()
+    assert coordinator.mode == "observe"
+    assert coordinator.physical_commands_allowed is False
 
     hass.states.async_set(LOAD_SENSOR, "9500", {"unit_of_measurement": "W"})
     await hass.async_block_till_done()

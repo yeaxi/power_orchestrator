@@ -9,7 +9,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, MODE_AUTO, MODE_OFF
+from .const import DOMAIN, MODE_AUTO, MODE_OBSERVE, MODE_OFF
 from .coordinator import PowerOrchestratorCoordinator
 
 # The single mode select drives actions through the coordinator, not direct
@@ -35,7 +35,7 @@ async def async_setup_entry(
 
 
 class PowerOrchestratorModeSelect(CoordinatorEntity, SelectEntity):  # type: ignore[misc]
-    """Mode selector: auto / off."""
+    """Mode selector: auto / observe / off."""
 
     _attr_has_entity_name = True
     _attr_translation_key = "mode"
@@ -44,7 +44,7 @@ class PowerOrchestratorModeSelect(CoordinatorEntity, SelectEntity):  # type: ign
         super().__init__(coordinator)
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_select_mode"
-        self._attr_options = [MODE_AUTO, MODE_OFF]
+        self._attr_options = [MODE_AUTO, MODE_OBSERVE, MODE_OFF]
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "Power Orchestrator",

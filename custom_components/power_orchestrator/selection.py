@@ -14,7 +14,6 @@ from typing import Any, Sequence
 from homeassistant.core import HomeAssistant
 
 from .const import QUARANTINE_CLEAR_MAX_POWER_W
-from .policy import Ownership
 from .power_model import ManagedDevice, PowerModel
 from .states import logical_device_state
 
@@ -57,12 +56,6 @@ def shed_candidates(
             and device.measured_power <= QUARANTINE_CLEAR_MAX_POWER_W
         ):
             reason = "inactive_power"
-        elif (
-            device.ownership is Ownership.EXTERNAL
-            and device.ownership_until is not None
-            and now < device.ownership_until
-        ):
-            reason = "external_ownership_grace"
 
         if reason is None:
             candidates.append(device)
@@ -116,10 +109,10 @@ def restore_candidates(
     """Return planner-shed loads eligible for one guarded restore, in order.
 
     Fail-closed: the load must have been shed by the planner itself, be opted
-    in, be confirmed OFF and planner-owned, not faulted/quarantined/paused/in
-    cooldown, be a simple switchable actuator (climate is out of scope), and
-    still fit under the restore threshold with the safety reserve once its
-    expected power returns.
+    in, be confirmed OFF, not faulted/quarantined/paused/in cooldown, be a
+    simple switchable actuator (climate is out of scope), and still fit under
+    the restore threshold with the safety reserve once its expected power
+    returns.
     """
     candidates: list[ManagedDevice] = []
     for device_id in reversed(planner_shed):
@@ -131,8 +124,6 @@ def restore_candidates(
         if device.device_id in faulted or device.device_id in quarantined:
             continue
         if logical_device_state(hass, device) is not False:
-            continue
-        if device.ownership is not Ownership.PLANNER:
             continue
         if device.pause_active:
             continue

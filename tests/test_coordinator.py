@@ -13,13 +13,14 @@ import pytest
 from power_orchestrator.const import (
     GRID_LOSS_MODE_SENSOR,
     MODE_AUTO,
+    MODE_OBSERVE,
     MODE_OFF,
     STATUS_GRID_LOSS,
     STATUS_LOAD_SHEDDING,
     STATUS_SAFETY_BLOCKED,
 )
 from power_orchestrator.coordinator import CoordinatorConfig, PowerOrchestratorCoordinator
-from power_orchestrator.policy import Ownership, PolicyConfig
+from power_orchestrator.policy import PolicyConfig
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 from power_orchestrator.storage import RuntimeStore
 
@@ -78,7 +79,7 @@ def coordinator(
     *,
     hass=None,
     policy=None,
-    execution_mode="live",
+    mode=MODE_AUTO,
     grid_mode=GRID_LOSS_MODE_SENSOR,
     grid_sensor="binary_sensor.grid",
     battery_soc=None,
@@ -109,10 +110,9 @@ def coordinator(
             battery_threshold=battery_threshold,
             battery_soc_sensor=battery_soc,
             policy=policy,
-            execution_mode=execution_mode,
         ),
     )
-    result.mode = MODE_AUTO
+    result.mode = mode
     return result
 
 
@@ -186,7 +186,6 @@ async def test_manual_stop_is_guarded_and_confirmed() -> None:
     device = coordinator_instance._model.get_device("d1")
     assert device is not None
     device.is_on = True
-    device.ownership = Ownership.PLANNER
     coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
         state("on") if entity_id == "switch.load_1" else state("on")
     )
@@ -261,7 +260,7 @@ async def test_journal_persistence_failure_is_retained_and_retried() -> None:
 async def test_observe_only_action_is_durable_without_physical_call() -> None:
     backend = CopyingStoreBackend()
     runtime_store = RuntimeStore(backend)
-    coordinator_instance = coordinator(store=runtime_store, execution_mode="observe")
+    coordinator_instance = coordinator(store=runtime_store, mode=MODE_OBSERVE)
     device = coordinator_instance._model.get_device("d1")
     assert device is not None
     device.is_on = True
@@ -279,7 +278,7 @@ async def test_observe_only_action_is_durable_without_physical_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_overload_sheds_one_planner_owned_load_and_never_reenables_it() -> None:
+async def test_overload_sheds_one_eligible_load_and_never_reenables_it() -> None:
     policy = PolicyConfig.from_mapping(
         {
             "thresholds": [{"power_limit": 1000, "duration_s": 0}],
@@ -291,7 +290,6 @@ async def test_overload_sheds_one_planner_owned_load_and_never_reenables_it() ->
     second = coordinator_instance._model.get_device("d2")
     assert first is not None and second is not None
     first.is_on = True
-    first.ownership = Ownership.PLANNER
     second.is_on = False
     coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
         state("on")
@@ -325,7 +323,6 @@ async def test_zero_power_on_device_is_not_ordinary_shed_candidate() -> None:
     device = coordinator_instance._model.get_device("d1")
     assert device is not None
     device.power_sensor_id = "sensor.load_1_power"
-    device.ownership = Ownership.PLANNER
     coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
         state("on")
         if entity_id in {"binary_sensor.grid", "switch.load_1"}
@@ -353,13 +350,11 @@ async def test_no_eligible_load_reports_per_device_reasons() -> None:
             "hard_interlock": 9000,
         }
     )
-    coordinator_instance = coordinator(policy=policy, execution_mode="observe")
+    coordinator_instance = coordinator(policy=policy, mode=MODE_OBSERVE)
     first = coordinator_instance._model.get_device("d1")
     second = coordinator_instance._model.get_device("d2")
     assert first is not None and second is not None
     first.power_sensor_id = "sensor.load_1_power"
-    first.ownership = Ownership.PLANNER
-    second.ownership = Ownership.PLANNER
     coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
         state("on")
         if entity_id in {"binary_sensor.grid", "switch.load_1"}
@@ -381,8 +376,8 @@ async def test_no_eligible_load_reports_per_device_reasons() -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_execution_mode_evaluates_after_releasing_evaluation_lock() -> None:
-    coordinator_instance = coordinator(execution_mode="observe")
+async def test_set_mode_evaluates_after_releasing_evaluation_lock() -> None:
+    coordinator_instance = coordinator(mode=MODE_OBSERVE)
     coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
         state("on")
         if entity_id == "binary_sensor.grid"
@@ -392,85 +387,26 @@ async def test_set_execution_mode_evaluates_after_releasing_evaluation_lock() ->
     )
 
     await asyncio.wait_for(
-        coordinator_instance.async_set_execution_mode("live", confirm_live=True),
+        coordinator_instance.async_set_mode(MODE_AUTO),
         timeout=1,
     )
 
-    assert coordinator_instance.execution_mode == "live"
+    assert coordinator_instance.mode == MODE_AUTO
+    assert coordinator_instance.physical_commands_allowed is True
     coordinator_instance.hass.services.async_call.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_authorize_shedding_claims_only_exact_live_loads() -> None:
-    coordinator_instance = coordinator(execution_mode="observe")
-    first = coordinator_instance._model.get_device("d1")
-    second = coordinator_instance._model.get_device("d2")
-    assert first is not None and second is not None
-    first.power_sensor_id = "sensor.load_1_power"
-    second.power_sensor_id = "sensor.load_2_power"
-
-    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
-        state("on")
-        if entity_id in {"binary_sensor.grid", "switch.load_1"}
-        else state("off")
-        if entity_id == "switch.load_2"
-        else state("3000")
-        if entity_id == "sensor.load_1_power"
-        else state("0")
-        if entity_id == "sensor.load_2_power"
-        else state("6000")
-    )
-
-    await coordinator_instance.async_authorize_shedding(
-        ["d1"], confirm_takeover=True
-    )
-
-    assert first.ownership is Ownership.PLANNER
-    assert first.ownership_until is None
-    assert second.ownership is Ownership.UNKNOWN
-    coordinator_instance.hass.services.async_call.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_authorize_shedding_rolls_back_on_persistence_failure() -> None:
-    backend = CopyingStoreBackend()
-    backend.fail_on = {1}
-    runtime_store = RuntimeStore(backend)
-    coordinator_instance = coordinator(store=runtime_store, execution_mode="observe")
-    device = coordinator_instance._model.get_device("d1")
-    assert device is not None
-    device.power_sensor_id = "sensor.load_1_power"
-    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
-        state("on")
-        if entity_id in {"binary_sensor.grid", "switch.load_1"}
-        else state("3000")
-        if entity_id == "sensor.load_1_power"
-        else state("6000")
-    )
-
-    with pytest.raises(RuntimeError, match="synthetic persistence failure"):
-        await coordinator_instance.async_authorize_shedding(
-            ["d1"], confirm_takeover=True
-        )
-
-    assert device.ownership is Ownership.UNKNOWN
-    assert device.ownership_until is None
-    coordinator_instance.hass.services.async_call.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_planner_off_does_not_quarantine_normal_overload_candidate() -> None:
+async def test_mode_off_does_not_quarantine_normal_overload_candidate() -> None:
     policy = PolicyConfig.from_mapping(
         {
             "thresholds": [{"power_limit": 1000, "duration_s": 0}],
             "hard_interlock": 9000,
         }
     )
-    coordinator_instance = coordinator(policy=policy, execution_mode="live")
-    coordinator_instance.mode = MODE_OFF
+    coordinator_instance = coordinator(policy=policy, mode=MODE_OFF)
     device = coordinator_instance._model.get_device("d1")
     assert device is not None
-    device.ownership = Ownership.PLANNER
     coordinator_instance._last_observed_state["d1"] = True
     coordinator_instance._initial_device_reconciliation_complete = True
     coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
@@ -486,7 +422,7 @@ async def test_planner_off_does_not_quarantine_normal_overload_candidate() -> No
     assert coordinator_instance.hass.services.async_call.await_count == 0
     assert coordinator_instance._faults.faulted == set()
     assert coordinator_instance._faults.quarantined == set()
-    assert "planner mode off" in coordinator_instance.last_action.lower()
+    assert "mode off" in coordinator_instance.last_action.lower()
 
 
 @pytest.mark.asyncio
@@ -508,8 +444,9 @@ async def test_grid_loss_sheds_active_loads() -> None:
     assert coordinator_instance.hass.services.async_call.await_count == 2
 
 
-def test_mode_setter_persists_auto_and_off_values() -> None:
+def test_mode_setter_persists_unified_mode_values() -> None:
     coordinator_instance = coordinator()
     coordinator_instance.mode = MODE_AUTO
+    coordinator_instance.mode = MODE_OBSERVE
     coordinator_instance.mode = MODE_OFF
     assert coordinator_instance._store.set_mode.call_args.args == (MODE_OFF,)

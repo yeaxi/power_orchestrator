@@ -45,15 +45,17 @@ async def test_persisted_mode_is_restored_only_when_safety_storage_is_valid(
     runtime_store = MagicMock()
     runtime_store.async_load = AsyncMock()
     runtime_store.safety_storage_invalid = storage_invalid
-    runtime_store.restore_mode.return_value = MODE_AUTO
-    runtime_store.restore_execution_mode.return_value = None
+    runtime_store.resolve_unified_mode.return_value = MODE_AUTO
     runtime_store.restore_device_runtime.return_value = (set(), set())
+    runtime_store.restore_pending_restore.return_value = []
     runtime_store.restore_fault_reasons.return_value = {}
     runtime_store.restore_fault_notification_state.return_value = ({}, {})
     runtime_store.unresolved_actions.return_value = []
     runtime_store.action_journal_invalid = False
     coordinator = MagicMock()
     coordinator.async_config_entry_first_refresh = AsyncMock()
+    coordinator._save_runtime_snapshot = MagicMock()
+    runtime_store.async_save = AsyncMock()
 
     with (
         patch("power_orchestrator.Store"),
@@ -67,16 +69,17 @@ async def test_persisted_mode_is_restored_only_when_safety_storage_is_valid(
 
 
 @pytest.mark.asyncio
-async def test_restored_auto_mode_cannot_remain_in_observe_execution() -> None:
+async def test_setup_resolves_unified_mode_from_legacy_observe_execution() -> None:
     hass = MagicMock()
     hass.data = {}
     hass.config_entries.async_forward_entry_setups = AsyncMock()
     hass.bus.async_listen = MagicMock(return_value="unsubscribe")
     entry = SimpleNamespace(
-        entry_id="entry-auto-live-boundary",
+        entry_id="entry-unified-mode",
         data={
             CONF_LOAD_SENSOR: "sensor.load",
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
+            "execution_mode": "observe",
         },
         options={},
         async_on_unload=MagicMock(),
@@ -86,18 +89,16 @@ async def test_restored_auto_mode_cannot_remain_in_observe_execution() -> None:
     runtime_store.async_load = AsyncMock()
     runtime_store.async_save = AsyncMock()
     runtime_store.safety_storage_invalid = False
-    runtime_store.restore_mode.return_value = MODE_AUTO
-    runtime_store.restore_execution_mode.return_value = "observe"
+    runtime_store.resolve_unified_mode.return_value = "observe"
     runtime_store.restore_device_runtime.return_value = (set(), set())
     runtime_store.restore_fault_reasons.return_value = {}
     runtime_store.restore_fault_notification_state.return_value = ({}, {})
     runtime_store.unresolved_actions.return_value = []
     runtime_store.action_journal_invalid = False
+    runtime_store.restore_pending_restore.return_value = []
     coordinator = MagicMock()
     coordinator.async_config_entry_first_refresh = AsyncMock()
     coordinator._save_runtime_snapshot = MagicMock()
-    coordinator.execution_mode = "observe"
-    coordinator.mode = MODE_AUTO
 
     with (
         patch("power_orchestrator.Store"),
@@ -107,7 +108,8 @@ async def test_restored_auto_mode_cannot_remain_in_observe_execution() -> None:
     ):
         assert await async_setup_entry(hass, entry) is True
 
-    runtime_store.set_execution_mode.assert_called_with("live")
+    runtime_store.resolve_unified_mode.assert_called_once_with("observe")
+    assert coordinator.mode == "observe"
     runtime_store.async_save.assert_awaited()
 
 

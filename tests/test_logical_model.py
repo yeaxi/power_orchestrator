@@ -1,20 +1,17 @@
 """Logical-model safety contracts."""
 from __future__ import annotations
 
-from power_orchestrator.policy import Ownership
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 
 
-def test_logical_device_exposes_all_actuators_and_ownership() -> None:
+def test_logical_device_exposes_all_actuators() -> None:
     device = ManagedDevice(
         "heater",
         "Heater",
         "switch.heater",
         actuator_entity_ids=("climate.heater",),
-        ownership=Ownership.EXTERNAL,
     )
     assert device.control_entity_ids == ("switch.heater", "climate.heater")
-    assert device.ownership is Ownership.EXTERNAL
 
 
 def test_shed_order_is_independent_from_legacy_priority() -> None:

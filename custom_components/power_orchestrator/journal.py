@@ -48,7 +48,6 @@ def emit_event(
     data: dict[str, Any],
     *,
     entry_id: str,
-    execution_mode: str,
     mode: str,
 ) -> None:
     """Fire a bounded structured event on the Home Assistant bus (best effort)."""
@@ -59,7 +58,6 @@ def emit_event(
         "schema_version": EVENT_SCHEMA_VERSION,
         "event_type": event_type,
         "entry_id": entry_id,
-        "execution_mode": execution_mode,
         "mode": mode,
     }
     if callable(emitter):
