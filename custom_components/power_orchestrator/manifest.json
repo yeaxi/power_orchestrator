@@ -1,6 +1,7 @@
 {
   "domain": "power_orchestrator",
   "name": "Power Orchestrator",
+  "after_dependencies": ["energy"],
   "codeowners": ["@yeaxi"],
   "config_flow": true,
   "documentation": "https://yeaxi.github.io/power_orchestrator/",

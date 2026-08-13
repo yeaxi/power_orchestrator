@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from pathlib import Path
 
@@ -44,6 +45,29 @@ def test_hacs_and_manifest_metadata_are_release_ready():
     assert hacs["filename"] == "power_orchestrator.zip"
     assert set(hacs) <= HACS_JSON_ALLOWED_KEYS
     assert "MIT License" in (ROOT / "LICENSE").read_text()
+
+
+def test_used_home_assistant_components_are_declared():
+    """hassfest rejects using a component the manifest does not depend on.
+
+    It makes an exception for a component this integration implements as a module
+    of its own, which is why importing from `diagnostics` or `sensor` is fine.
+    """
+    manifest = json.loads((INTEGRATION / "manifest.json").read_text())
+    allowed = {
+        manifest["domain"],
+        *manifest.get("dependencies", []),
+        *manifest.get("after_dependencies", []),
+        *(path.stem for path in INTEGRATION.glob("*.py")),
+    }
+
+    used = {
+        match.group(1)
+        for source in INTEGRATION.rglob("*.py")
+        for match in re.finditer(r"homeassistant\.components\.(\w+)", source.read_text())
+    }
+
+    assert used <= allowed, f"undeclared components: {sorted(used - allowed)}"
 
 
 def test_manifest_keys_are_sorted_the_way_hassfest_requires():

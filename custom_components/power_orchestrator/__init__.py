@@ -14,6 +14,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.event import (
     EventStateChangedData,
     async_track_state_change_event,
@@ -71,6 +72,9 @@ from .storage import RuntimeStore
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SELECT]
+# Configuration is a UI flow only; async_setup discards YAML, so reject it loudly
+# instead of ignoring it.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 _REGISTERED_SERVICES = (
     "force_evaluate",
     "set_mode",
