@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.storage import Store
 from power_orchestrator.const import (
     CONF_ADD_THRESHOLD,
     CONF_AVERAGING_PERIOD,
@@ -25,8 +26,23 @@ from power_orchestrator.const import (
     CONF_THRESHOLD_POWER,
     DOMAIN,
     GRID_LOSS_MODE_SENSOR,
+    STORAGE_VERSION,
 )
+from power_orchestrator.storage import RuntimeStore
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+
+@pytest.mark.usefixtures("hass")
+async def test_released_storage_envelope_remains_readable(hass):
+    """The redesign reads the released v3 Home Assistant Store envelope."""
+    key = "power_orchestrator_runtime_upgrade_test"
+    released = Store(hass, 3, key)
+    await released.async_save({"mode": "auto", "storage_version": 3})
+
+    runtime = RuntimeStore(Store(hass, STORAGE_VERSION, key))
+    await runtime.async_load()
+
+    assert runtime.restore_mode() == "auto"
 
 
 @pytest.mark.usefixtures("hass", "enable_custom_integrations")

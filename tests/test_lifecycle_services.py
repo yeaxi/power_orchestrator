@@ -95,14 +95,14 @@ async def test_setup_and_migration_initialize_registry_and_drop_unknown_fields()
     assert "solar_forecast_entry" not in updated["options"]
     assert "solar_power" not in updated["options"]
     assert "only_from_solar" not in updated["options"]["devices"][0]
-    assert updated["version"] == 3
-    assert updated["minor_version"] == 1
+    assert updated["version"] == 2
+    assert updated["minor_version"] == 3
     assert updated["data"].get("reconfiguration_required") is True
 
 
 @pytest.mark.asyncio
-async def test_migrate_entry_converts_legacy_limits_to_thresholds_v3_1() -> None:
-    """Old max_load and named-tier fields become an explicit thresholds list at v3.1."""
+async def test_migrate_entry_converts_legacy_limits_to_thresholds_v2_3() -> None:
+    """Old max_load and named-tier fields become an explicit thresholds list at v2.3."""
     updater = MagicMock()
     hass = SimpleNamespace(config_entries=SimpleNamespace(async_update_entry=updater))
     entry = SimpleNamespace(
@@ -137,8 +137,8 @@ async def test_migrate_entry_converts_legacy_limits_to_thresholds_v3_1() -> None
     )
     assert await integration.async_migrate_entry(hass, entry) is True
     updated = updater.call_args.kwargs
-    assert updated["version"] == 3
-    assert updated["minor_version"] == 1
+    assert updated["version"] == 2
+    assert updated["minor_version"] == 3
     assert updated["data"]["thresholds"] == [{"power_limit": 6000.0, "duration_s": 300.0}]
     for key in (
         "max_load",

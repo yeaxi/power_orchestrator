@@ -635,7 +635,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             changed = True
     current_version = getattr(entry, "version", None)
     current_minor_version = getattr(entry, "minor_version", None)
-    if current_version != 3 or current_minor_version != 1:
+    if current_version != 2 or current_minor_version != 3:
         changed = True
     if changed:
         updater = getattr(hass.config_entries, "async_update_entry", None)
@@ -644,8 +644,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry,
                 data=data,
                 options=options,
-                version=3,
-                minor_version=1,
+                version=2,
+                minor_version=3,
             )
     return True
 

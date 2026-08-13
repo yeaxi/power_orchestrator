@@ -92,7 +92,7 @@ Fault/quarantine state is persisted and blocks further unsafe actions for that d
 - Missing, malformed, or unsafe persisted mode data falls back to `observe`.
 - The runtime store persists the ordered pending-restore queue, faults, quarantine, and action-journal state.
 - Monotonic tier dwell and restore-window timers are never persisted.
-- Config-entry version `3.1` stores an explicit thresholds list and strips deleted limit and restore-control fields from both `data` and `options`.
+- Config-entry version `2.3` stores an explicit thresholds list and strips deleted limit and restore-control fields from both `data` and `options`.
 
 ## Public services
 
@@ -112,7 +112,7 @@ Before live activation:
 1. Run the full local test, type, lint, compile, coverage, resource, and native loader gates.
 2. Deploy only a hash-verified component archive and retain a timestamped rollback backup.
 3. Run `ha core check` before restart and poll HTTP readiness after restart.
-4. Confirm the config entry is version `3.1` and contains an explicit thresholds list with no legacy limit fields.
+4. Confirm the config entry is version `2.3` and contains an explicit thresholds list with no legacy limit fields.
 5. Confirm mode is `observe` or `off`, journal health is good, and no unresolved actions exist.
 6. Use only non-physical Observe evaluation for the first runtime smoke.
 7. Read every managed relay, coupled actuator, and power sensor before and after activation. Any unexpected state change is reported; it is never silently compensated.

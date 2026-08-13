@@ -80,7 +80,7 @@ MAX_RUNTIME_PAUSE_SECONDS: Final = 24 * 60 * 60
 
 # Persistence
 STORAGE_KEY: Final = "power_orchestrator_runtime"
-STORAGE_VERSION: Final = 4
+STORAGE_VERSION: Final = 3
 DEVICE_RUNTIME_SCHEMA_VERSION: Final = 2
 MAX_HISTORY_DAYS: Final = 365
 

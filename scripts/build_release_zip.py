@@ -9,7 +9,7 @@ inside itself on every user's install.
 
 Run it directly to produce ``dist/power_orchestrator.zip``:
 
-    python scripts/build_release_zip.py --expect-version 0.5.0
+    python scripts/build_release_zip.py --expect-version 0.6.0
 """
 
 from __future__ import annotations

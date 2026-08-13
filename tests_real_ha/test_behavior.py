@@ -96,8 +96,8 @@ def _entry() -> MockConfigEntry:
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
             CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
         },
-        version=3,
-        minor_version=1,
+        version=2,
+        minor_version=3,
     )
 
 
@@ -177,8 +177,8 @@ async def test_thresholds_configurable_via_options_flow(hass):
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
             CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
         },
-        version=3,
-        minor_version=1,
+        version=2,
+        minor_version=3,
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -375,8 +375,8 @@ async def test_battery_threshold_emergency_stops_active_load(hass):
             CONF_BATTERY_SOC: BATTERY_SENSOR,
             CONF_BATTERY_THRESHOLD: 20,
         },
-        version=3,
-        minor_version=1,
+        version=2,
+        minor_version=3,
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -452,8 +452,8 @@ async def test_nonzero_tier_dwell_waits_before_shed(hass):
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
             CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
         },
-        version=3,
-        minor_version=1,
+        version=2,
+        minor_version=3,
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -504,8 +504,8 @@ async def test_zero_dwell_top_tier_sheds_immediately(hass):
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
             CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
         },
-        version=3,
-        minor_version=1,
+        version=2,
+        minor_version=3,
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -668,8 +668,8 @@ async def test_grid_loss_queues_multiple_and_restores_reverse_order(hass, monkey
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
             CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
         },
-        version=3,
-        minor_version=1,
+        version=2,
+        minor_version=3,
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
