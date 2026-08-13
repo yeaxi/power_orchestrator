@@ -25,33 +25,20 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
     CONF_DEVICE_POWER_SENSOR,
-    CONF_DEVICE_RESTORE_ENABLED,
     CONF_DEVICES,
     CONF_DISCOVERED_DEVICES,
     CONF_GRID_LOSS_MODE,
     CONF_GRID_LOSS_SENSOR,
-    CONF_HYSTERESIS,
     CONF_LOAD_SENSOR,
-    CONF_MAX_LOAD,
     CONF_PAUSE_PERIOD,
     CONF_PRIORITY,
     CONF_PRIORITY_ORDER,
-    CONF_RESTORE_COOLDOWN,
-    CONF_RESTORE_DWELL,
-    CONF_RESTORE_ENABLED,
-    CONF_RESTORE_HYSTERESIS,
-    CONF_RESTORE_THRESHOLD,
-    CONF_SAFETY_RESERVE,
+    CONF_RECONFIGURATION_REQUIRED,
     CONF_SHED_PRIORITY,
     CONF_THRESHOLD_COUNT,
     CONF_THRESHOLDS,
     DEFAULT_AVERAGING_PERIOD,
-    DEFAULT_HYSTERESIS,
     DEFAULT_PAUSE_PERIOD,
-    DEFAULT_RESTORE_COOLDOWN,
-    DEFAULT_RESTORE_DWELL,
-    DEFAULT_RESTORE_HYSTERESIS,
-    DEFAULT_SAFETY_RESERVE,
     DOMAIN,
     GRID_LOSS_MODE_SENSOR,
     GRID_LOSS_MODE_THRESHOLD,
@@ -68,7 +55,6 @@ from .flow_helpers import (
     _sensor_entity_id,
 )
 from .flow_thresholds import (
-    _CANONICAL_THRESHOLD_INPUTS,
     _next_threshold_default,
     _parse_threshold_input,
     _parse_threshold_step,
@@ -139,13 +125,6 @@ def _options_schema_for_entry(entry: Any) -> vol.Schema:
         ): _entity_selector("sensor"),
         vol.Optional(CONF_DEVICES, default=raw_devices): selector.ObjectSelector(),
         vol.Required(
-            CONF_MAX_LOAD, default=_entry_current(entry, CONF_MAX_LOAD, 5000)
-        ): selector.NumberSelector(
-            cast(Any, selector.NumberSelectorConfig)(
-                min=100, max=50000, mode="box", unit_of_measurement="W"
-            )
-        ),
-        vol.Required(
             CONF_AVERAGING_PERIOD,
             default=_entry_current(entry, CONF_AVERAGING_PERIOD, DEFAULT_AVERAGING_PERIOD),
         ): selector.NumberSelector(
@@ -154,59 +133,8 @@ def _options_schema_for_entry(entry: Any) -> vol.Schema:
             )
         ),
         vol.Required(
-            CONF_SAFETY_RESERVE,
-            default=_entry_current(entry, CONF_SAFETY_RESERVE, DEFAULT_SAFETY_RESERVE),
-        ): selector.NumberSelector(
-            cast(Any, selector.NumberSelectorConfig)(
-                min=0, max=5000, mode="box", unit_of_measurement="W"
-            )
-        ),
-        vol.Required(
-            CONF_HYSTERESIS, default=_entry_current(entry, CONF_HYSTERESIS, DEFAULT_HYSTERESIS)
-        ): selector.NumberSelector(
-            cast(Any, selector.NumberSelectorConfig)(
-                min=0, max=5000, mode="box", unit_of_measurement="W"
-            )
-        ),
-        vol.Required(
             CONF_PAUSE_PERIOD,
             default=_entry_current(entry, CONF_PAUSE_PERIOD, DEFAULT_PAUSE_PERIOD),
-        ): selector.NumberSelector(
-            cast(Any, selector.NumberSelectorConfig)(
-                min=0, max=86400, mode="box", unit_of_measurement="s"
-            )
-        ),
-        vol.Optional(
-            CONF_RESTORE_ENABLED,
-            default=bool(_entry_current(entry, CONF_RESTORE_ENABLED, False)),
-        ): selector.BooleanSelector(),
-        vol.Optional(
-            CONF_RESTORE_THRESHOLD,
-            default=_entry_current(entry, CONF_RESTORE_THRESHOLD, 3000),
-        ): selector.NumberSelector(
-            cast(Any, selector.NumberSelectorConfig)(
-                min=0, max=50000, mode="box", unit_of_measurement="W"
-            )
-        ),
-        vol.Optional(
-            CONF_RESTORE_HYSTERESIS,
-            default=_entry_current(entry, CONF_RESTORE_HYSTERESIS, DEFAULT_RESTORE_HYSTERESIS),
-        ): selector.NumberSelector(
-            cast(Any, selector.NumberSelectorConfig)(
-                min=0, max=5000, mode="box", unit_of_measurement="W"
-            )
-        ),
-        vol.Optional(
-            CONF_RESTORE_DWELL,
-            default=_entry_current(entry, CONF_RESTORE_DWELL, DEFAULT_RESTORE_DWELL),
-        ): selector.NumberSelector(
-            cast(Any, selector.NumberSelectorConfig)(
-                min=0, max=86400, mode="box", unit_of_measurement="s"
-            )
-        ),
-        vol.Optional(
-            CONF_RESTORE_COOLDOWN,
-            default=_entry_current(entry, CONF_RESTORE_COOLDOWN, DEFAULT_RESTORE_COOLDOWN),
         ): selector.NumberSelector(
             cast(Any, selector.NumberSelectorConfig)(
                 min=0, max=86400, mode="box", unit_of_measurement="s"
@@ -252,6 +180,7 @@ def _options_schema_for_entry(entry: Any) -> vol.Schema:
             )
         )
     return vol.Schema(fields)
+
 
 
 def _apply_priority_order(
@@ -321,15 +250,8 @@ def _prepare_options_submission(
         errors["base"] = "missing_battery_soc_sensor"
 
     numeric_specs: dict[str, tuple[Any, float, float]] = {
-        CONF_MAX_LOAD: (5000, 100, 50000),
         CONF_AVERAGING_PERIOD: (DEFAULT_AVERAGING_PERIOD, 1, 300),
-        CONF_SAFETY_RESERVE: (DEFAULT_SAFETY_RESERVE, 0, 5000),
-        CONF_HYSTERESIS: (DEFAULT_HYSTERESIS, 0, 5000),
         CONF_PAUSE_PERIOD: (DEFAULT_PAUSE_PERIOD, 0, 86400),
-        CONF_RESTORE_THRESHOLD: (_entry_current(entry, CONF_RESTORE_THRESHOLD, 3000), 0, 50000),
-        CONF_RESTORE_HYSTERESIS: (DEFAULT_RESTORE_HYSTERESIS, 0, 5000),
-        CONF_RESTORE_DWELL: (DEFAULT_RESTORE_DWELL, 0, 86400),
-        CONF_RESTORE_COOLDOWN: (DEFAULT_RESTORE_COOLDOWN, 0, 86400),
     }
     if mode == GRID_LOSS_MODE_THRESHOLD:
         numeric_specs[CONF_BATTERY_THRESHOLD] = (20, 0, 100)
@@ -363,15 +285,10 @@ def _prepare_options_submission(
     if errors:
         return None, submitted_thresholds, errors
 
-    restore_enabled = bool(
-        user_input.get(CONF_RESTORE_ENABLED, _entry_current(entry, CONF_RESTORE_ENABLED, False))
-    )
-
     normalized: dict[str, Any] = {
         CONF_LOAD_SENSOR: load_sensor,
         CONF_DEVICES: devices,
         CONF_GRID_LOSS_MODE: mode,
-        CONF_RESTORE_ENABLED: restore_enabled,
     }
     normalized.update(values)
     if mode == GRID_LOSS_MODE_SENSOR:
@@ -385,8 +302,8 @@ def _prepare_options_submission(
 class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
     """Five-step onboarding flow for load shedding and safety sources."""
 
-    VERSION = 2
-    MINOR_VERSION = 2
+    VERSION = 3
+    MINOR_VERSION = 1
 
     def __init__(self) -> None:
         self._discovered: dict[str, Any] = {}
@@ -453,30 +370,11 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
                     vol.Required(
                         CONF_LOAD_SENSOR, default=self._discovered.get("grid_power") or ""
                     ): _entity_selector("sensor"),
-                    vol.Required(CONF_MAX_LOAD, default=5000): selector.NumberSelector(
-                        cast(Any, selector.NumberSelectorConfig)(
-                            min=100, max=50000, mode="box", unit_of_measurement="W"
-                        )
-                    ),
                     vol.Required(
                         CONF_AVERAGING_PERIOD, default=DEFAULT_AVERAGING_PERIOD
                     ): selector.NumberSelector(
                         cast(Any, selector.NumberSelectorConfig)(
                             min=1, max=300, mode="box", unit_of_measurement="s"
-                        )
-                    ),
-                    vol.Required(
-                        CONF_SAFETY_RESERVE, default=DEFAULT_SAFETY_RESERVE
-                    ): selector.NumberSelector(
-                        cast(Any, selector.NumberSelectorConfig)(
-                            min=0, max=5000, mode="box", unit_of_measurement="W"
-                        )
-                    ),
-                    vol.Required(
-                        CONF_HYSTERESIS, default=DEFAULT_HYSTERESIS
-                    ): selector.NumberSelector(
-                        cast(Any, selector.NumberSelectorConfig)(
-                            min=0, max=5000, mode="box", unit_of_measurement="W"
                         )
                     ),
                 }
@@ -493,12 +391,9 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
         self._discovered.update(
             {
                 "grid_power": user_input.get(CONF_LOAD_SENSOR),
-                CONF_MAX_LOAD: user_input.get(CONF_MAX_LOAD, 5000),
                 CONF_AVERAGING_PERIOD: user_input.get(
                     CONF_AVERAGING_PERIOD, DEFAULT_AVERAGING_PERIOD
                 ),
-                CONF_SAFETY_RESERVE: user_input.get(CONF_SAFETY_RESERVE, DEFAULT_SAFETY_RESERVE),
-                CONF_HYSTERESIS: user_input.get(CONF_HYSTERESIS, DEFAULT_HYSTERESIS),
             }
         )
         # Keep accepting the old numbered payload for callers that submit an
@@ -511,7 +406,7 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             self._discovered[CONF_THRESHOLDS] = thresholds
             return await self.async_step_devices()
         self._thresholds = []
-        self._threshold_seed = _threshold_defaults(None)
+        self._threshold_seed = []
         return await self.async_step_thresholds()
 
     def _threshold_form(self, errors: dict[str, str] | None = None) -> Any:
@@ -602,10 +497,6 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             vol.Optional(
                 CONF_DEVICE_ACTUATORS, default=list(candidate.get(CONF_DEVICE_ACTUATORS, ()) or ())
             ): _entity_selector(["switch", "light", "input_boolean", "climate"], multiple=True),
-            vol.Optional(
-                CONF_DEVICE_RESTORE_ENABLED,
-                default=bool(candidate.get(CONF_DEVICE_RESTORE_ENABLED, False)),
-            ): selector.BooleanSelector(),
         }
         if not candidate:
             fields[vol.Optional(CONF_ADD_ANOTHER, default=False)] = bool
@@ -650,12 +541,6 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             CONF_DEVICE_EXPECTED_POWER: user_input.get(CONF_DEVICE_EXPECTED_POWER, 2000),
             CONF_DEVICE_POWER_SENSOR: power_sensor,
             CONF_DEVICE_ACTUATORS: actuator_values,
-            CONF_DEVICE_RESTORE_ENABLED: bool(
-                user_input.get(
-                    CONF_DEVICE_RESTORE_ENABLED,
-                    candidate.get(CONF_DEVICE_RESTORE_ENABLED, False),
-                )
-            ),
         }
 
     async def async_step_devices(self, user_input: dict[str, Any] | None = None) -> Any:
@@ -864,17 +749,15 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             return self._grid_loss_source_form(mode, {"base": "missing_grid_loss_sensor"})
         if mode == GRID_LOSS_MODE_THRESHOLD and battery_soc is None:
             return self._grid_loss_source_form(mode, {"base": "missing_battery_soc_sensor"})
+        thresholds = self._discovered.get(CONF_THRESHOLDS)
+        if not isinstance(thresholds, list) or not thresholds:
+            return self._grid_loss_source_form(mode, {"base": "invalid_thresholds"})
         data = {
             CONF_LOAD_SENSOR: self._discovered.get("grid_power"),
-            CONF_MAX_LOAD: self._discovered.get(CONF_MAX_LOAD, 5000),
             CONF_AVERAGING_PERIOD: self._discovered.get(
                 CONF_AVERAGING_PERIOD, DEFAULT_AVERAGING_PERIOD
             ),
-            CONF_SAFETY_RESERVE: self._discovered.get(CONF_SAFETY_RESERVE, DEFAULT_SAFETY_RESERVE),
-            CONF_HYSTERESIS: self._discovered.get(CONF_HYSTERESIS, DEFAULT_HYSTERESIS),
-            CONF_THRESHOLDS: self._discovered.get(
-                CONF_THRESHOLDS, [dict(item) for item in _CANONICAL_THRESHOLD_INPUTS]
-            ),
+            CONF_THRESHOLDS: thresholds,
             CONF_DEVICES: self._devices,
             CONF_PAUSE_PERIOD: self._pause_period,
             CONF_GRID_LOSS_MODE: mode,
@@ -939,6 +822,7 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
         self._reconfigure_entry = entry
         if submitted_thresholds is not None:
             prepared[CONF_THRESHOLDS] = submitted_thresholds
+            prepared.pop(CONF_RECONFIGURATION_REQUIRED, None)
             return self.async_update_and_abort(
                 entry,
                 data=prepared,
@@ -969,6 +853,7 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
         if user_input.get(CONF_ADD_THRESHOLD, False):
             return self._reconfigure_threshold_form()
         self._reconfigure_pending[CONF_THRESHOLDS] = [dict(item) for item in self._thresholds]
+        self._reconfigure_pending.pop(CONF_RECONFIGURATION_REQUIRED, None)
         return self.async_update_and_abort(
             self._reconfigure_entry,
             data=self._reconfigure_pending,
@@ -1012,7 +897,10 @@ class PowerOrchestratorOptionsFlow(config_entries.OptionsFlow):
     def _finish(self) -> Any:
         if self._pending is None:
             return self.async_abort(reason="invalid_options_state")
+        if not self._thresholds:
+            return self._threshold_form({"base": "invalid_thresholds"})
         self._pending[CONF_THRESHOLDS] = [dict(item) for item in self._thresholds]
+        self._pending.pop(CONF_RECONFIGURATION_REQUIRED, None)
         return self.async_create_entry(title="", data=self._pending)
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> Any:
@@ -1029,6 +917,7 @@ class PowerOrchestratorOptionsFlow(config_entries.OptionsFlow):
             )
         if submitted_thresholds is not None:
             prepared[CONF_THRESHOLDS] = submitted_thresholds
+            prepared.pop(CONF_RECONFIGURATION_REQUIRED, None)
             return self.async_create_entry(title="", data=prepared)
         self._pending = prepared
         self._thresholds = []

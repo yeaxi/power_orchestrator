@@ -7,9 +7,9 @@ mutate coordinator state; the coordinator assigns the returned diagnostics.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any
 
 from homeassistant.core import HomeAssistant
 
@@ -100,26 +100,19 @@ def restore_candidates(
     planner_shed: Sequence[str],
     faulted: set[str],
     quarantined: set[str],
-    cooldown_until: Mapping[str, float],
-    restore_threshold_w: float,
-    safety_reserve: float,
+    lowest_limit_w: float,
     current_load: float,
-    now: float,
 ) -> list[ManagedDevice]:
-    """Return planner-shed loads eligible for one guarded restore, in order.
+    """Return pending-restore loads eligible for one automatic restore, reverse shed order.
 
-    Fail-closed: the load must have been shed by the planner itself, be opted
-    in, be confirmed OFF, not faulted/quarantined/paused/in cooldown, be a
-    simple switchable actuator (climate is out of scope), and still fit under
-    the restore threshold with the safety reserve once its expected power
-    returns.
+    Fail-closed: the load must be in the durable pending queue, confirmed OFF,
+    not faulted/quarantined/paused, non-climate, and
+    ``current_load + expected_power`` must be strictly below the lowest tier.
     """
     candidates: list[ManagedDevice] = []
     for device_id in reversed(planner_shed):
         device = model.get_device(device_id)
         if device is None:
-            continue
-        if not device.restore_enabled:
             continue
         if device.device_id in faulted or device.device_id in quarantined:
             continue
@@ -127,15 +120,12 @@ def restore_candidates(
             continue
         if device.pause_active:
             continue
-        cooldown = cooldown_until.get(device.device_id)
-        if cooldown is not None and now < cooldown:
-            continue
         if any(
             entity_id.split(".", 1)[0] == "climate" for entity_id in device.control_entity_ids
         ):
             continue
-        projected = current_load + max(0.0, float(device.expected_power)) + safety_reserve
-        if projected > restore_threshold_w:
+        projected = current_load + max(0.0, float(device.expected_power))
+        if projected >= lowest_limit_w:
             continue
         candidates.append(device)
     return candidates

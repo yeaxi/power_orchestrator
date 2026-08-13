@@ -153,7 +153,12 @@ class RuntimeStore:
             pauses[device_id] = value
 
     def set_pause(self, device_id: str, pause_until_or_duration: float) -> None:
-        """Persist an absolute pause timestamp, accepting legacy duration calls."""
+        """Persist an absolute pause timestamp, accepting legacy duration calls.
+
+        Durations are at most ``MAX_RUNTIME_PAUSE_SECONDS``. Larger values are
+        treated as absolute epoch timestamps so a zero-length pause (until=now)
+        is not reinterpreted as a multi-year duration.
+        """
         if isinstance(pause_until_or_duration, bool):
             return
         try:
@@ -163,7 +168,10 @@ class RuntimeStore:
         if not math.isfinite(value) or value < 0:
             return
         now = time.time()
-        absolute = value if value > now else now + value
+        if value <= MAX_RUNTIME_PAUSE_SECONDS:
+            absolute = now + value
+        else:
+            absolute = value
         self.update_pause_timestamp(device_id, min(absolute, now + MAX_RUNTIME_PAUSE_SECONDS))
 
     def clear_pause(self, device_id: str) -> None:
@@ -327,14 +335,10 @@ class RuntimeStore:
         runtime = engine.runtime
         self._data["policy_runtime"] = {
             "phase": runtime.phase.value,
-            "active_tier": runtime.active_tier,
-            "tier_started_at": runtime.tier_started_at,
-            "tier_since": dict(runtime.tier_since),
             "pending_post_shed_generation": runtime.pending_post_shed_generation,
             "pending_post_shed_after_reported_at": runtime.pending_post_shed_after_reported_at,
             "pending_operation_id": runtime.pending_operation_id,
             "last_shed_load_generation": runtime.last_shed_load_generation,
-            "restore_since": runtime.restore_since,
             "pending_post_restore_generation": runtime.pending_post_restore_generation,
             "pending_post_restore_after_reported_at": runtime.pending_post_restore_after_reported_at,
             "pending_restore_operation_id": runtime.pending_restore_operation_id,
@@ -354,17 +358,11 @@ class RuntimeStore:
             runtime.phase = PolicyPhase(raw.get("phase", PolicyPhase.STARTUP.value))
         except (TypeError, ValueError):
             runtime.phase = PolicyPhase.FAULT
-        runtime.active_tier = raw.get("active_tier") if isinstance(raw.get("active_tier"), str) else None
-        runtime.tier_started_at = self._finite_or_none(raw.get("tier_started_at"))
-        raw_tiers = raw.get("tier_since", {})
-        runtime.tier_since = {
-            key: float(value)
-            for key, value in raw_tiers.items()
-            if isinstance(key, str)
-            and isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(float(value))
-        } if isinstance(raw_tiers, dict) else {}
+        # Monotonic dwell timestamps are process-local. A host reboot changes
+        # their clock origin, so every dwell starts from fresh observations.
+        runtime.active_tier = None
+        runtime.tier_started_at = None
+        runtime.tier_since = {}
         pending = raw.get("pending_post_shed_generation")
         runtime.pending_post_shed_generation = (
             pending if isinstance(pending, int) and not isinstance(pending, bool) and pending >= 0 else None
@@ -391,7 +389,8 @@ class RuntimeStore:
             if isinstance(raw.get("pending_restore_operation_id"), str)
             else None
         )
-        runtime.restore_since = self._finite_or_none(raw.get("restore_since"))
+        # Monotonic restore windows are never restored across process restart.
+        runtime.restore_since = None
         last_restore_generation = raw.get("last_restore_load_generation")
         runtime.last_restore_load_generation = (
             last_restore_generation

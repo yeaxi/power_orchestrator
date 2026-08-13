@@ -53,7 +53,6 @@ def test_normalize_devices_rejects_duplicates_and_preserves_only_shedding_fields
             "priority": 2,
             "shed_priority": 1,
             "actuators": ["light.load_1"],
-            "restore_enabled": False,
         }
     ]
 
@@ -96,8 +95,9 @@ async def test_setup_and_migration_initialize_registry_and_drop_unknown_fields()
     assert "solar_forecast_entry" not in updated["options"]
     assert "solar_power" not in updated["options"]
     assert "only_from_solar" not in updated["options"]["devices"][0]
-    assert updated["version"] == 2
-    assert updated["minor_version"] == 2
+    assert updated["version"] == 3
+    assert updated["minor_version"] == 1
+    assert updated["data"].get("reconfiguration_required") is True
 
 
 @pytest.mark.asyncio
@@ -152,7 +152,7 @@ async def test_unload_persists_runtime_and_unregisters_services() -> None:
     config_entries.async_unload_platforms.assert_awaited_once()
     runtime.repair_listener_remove.assert_called_once()
     assert entry.runtime_data is None
-    assert hass.services.async_remove.call_count == 6
+    assert hass.services.async_remove.call_count == 4
 
 
 @pytest.mark.asyncio
@@ -162,8 +162,6 @@ async def test_service_registration_exposes_only_safe_handlers() -> None:
         async_set_mode=AsyncMock(),
         async_request_stop=AsyncMock(),
         async_clear_quarantine=AsyncMock(),
-        async_authorize_restore=AsyncMock(),
-        async_request_restore=AsyncMock(),
     )
     runtime = SimpleNamespace(coordinator=coordinator)
     hass = _hass_with_services(runtime=runtime)
@@ -176,8 +174,6 @@ async def test_service_registration_exposes_only_safe_handlers() -> None:
         "set_mode",
         "request_stop",
         "clear_quarantine",
-        "authorize_restore",
-        "request_restore",
     }
 
     await registered["force_evaluate"](SimpleNamespace(data={}))
@@ -187,9 +183,6 @@ async def test_service_registration_exposes_only_safe_handlers() -> None:
     )
     await registered["request_stop"](call)
     await registered["clear_quarantine"](call)
-    await registered["authorize_restore"](
-        SimpleNamespace(data={"confirm_restore": True})
-    )
     coordinator.async_force_evaluate.assert_awaited_once()
     coordinator.async_set_mode.assert_awaited_once_with(MODE_AUTO)
     coordinator.async_request_stop.assert_awaited_once_with(
@@ -198,7 +191,6 @@ async def test_service_registration_exposes_only_safe_handlers() -> None:
     coordinator.async_clear_quarantine.assert_awaited_once_with(
         "d1", source="test", actor_id="u", context_id="c"
     )
-    coordinator.async_authorize_restore.assert_awaited_once_with(confirm_restore=True)
 
 
 @pytest.mark.asyncio
@@ -225,7 +217,7 @@ def test_repair_helpers_and_unregister_are_bounded() -> None:
     assert integration._repair_device_ids(SimpleNamespace(), entry) == {"d1"}
     hass = _hass_with_services()
     integration._unregister_services(hass)
-    assert hass.services.async_remove.call_count == 6
+    assert hass.services.async_remove.call_count == 4
     assert MODE_OFF != MODE_AUTO
 
 
@@ -247,7 +239,9 @@ def test_repair_issue_sync_tracks_faults_and_removes_stale_persistent_issues() -
 
     issue_id = create_issue.call_args.args[2]
     assert issue_id.startswith("quarantine_")
-    delete_issue.assert_called_once_with(hass, DOMAIN, "quarantine_old")
+    deleted = {call.args[2] for call in delete_issue.call_args_list}
+    assert "quarantine_old" in deleted
+    assert "reconfiguration_required" in deleted
 
     coordinator.data = {"faulted_devices": [], "quarantined_devices": []}
     empty_registry = SimpleNamespace(issues={})
@@ -257,4 +251,6 @@ def test_repair_issue_sync_tracks_faults_and_removes_stale_persistent_issues() -
     issue_registry.async_delete_issue = delete_cleared
     with patch.dict(sys.modules, {"homeassistant.helpers.issue_registry": issue_registry}):
         integration._sync_repair_issues(hass, entry)
-    delete_cleared.assert_called_once_with(hass, DOMAIN, issue_id)
+    cleared = {call.args[2] for call in delete_cleared.call_args_list}
+    assert issue_id in cleared
+    assert "reconfiguration_required" in cleared

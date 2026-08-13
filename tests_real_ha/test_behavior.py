@@ -3,13 +3,11 @@
 These exercise the actual load-shedding behavior end-to-end against a real
 (in-process) Home Assistant runtime, rather than the hand-written mock layer:
 
-- overload hard-interlock shed issues a bounded physical OFF with readback;
+- overload shed issues a bounded physical OFF with readback;
 - grid loss triggers the emergency all-stop path;
 - observe mode records an intended action but never calls a physical service;
-- planner auto mode persists across a config-entry reload.
-
-An ``input_boolean`` helper is used as a real, switchable actuator; no real
-hardware is involved.
+- planner auto mode persists across a config-entry reload;
+- automatic restore re-enables a pending load after a safe-capacity window.
 """
 
 from __future__ import annotations
@@ -26,18 +24,11 @@ from power_orchestrator.const import (
     CONF_DEVICES,
     CONF_GRID_LOSS_MODE,
     CONF_GRID_LOSS_SENSOR,
-    CONF_HYSTERESIS,
     CONF_LOAD_SENSOR,
-    CONF_MAX_LOAD,
     CONF_PAUSE_PERIOD,
-    CONF_RESTORE_COOLDOWN,
-    CONF_RESTORE_DWELL,
-    CONF_RESTORE_ENABLED,
-    CONF_RESTORE_HYSTERESIS,
-    CONF_RESTORE_THRESHOLD,
-    CONF_SAFETY_RESERVE,
     CONF_THRESHOLD_DURATION,
     CONF_THRESHOLD_POWER,
+    CONF_THRESHOLDS,
     DOMAIN,
     GRID_LOSS_MODE_SENSOR,
 )
@@ -47,6 +38,14 @@ REPO = Path(__file__).parents[1]
 LOAD_SENSOR = "sensor.test_load"
 GRID_SENSOR = "binary_sensor.test_grid"
 ACTUATOR = "input_boolean.test_boiler"
+
+
+def _patch_restore_dwell(monkeypatch, coordinator, dwell: float) -> None:
+    """Patch the const module actually imported by the running coordinator."""
+    import sys
+
+    policy_mod = sys.modules[type(coordinator._policy_engine).__module__]
+    monkeypatch.setattr(policy_mod._const, "RESTORE_SAFE_CAPACITY_DWELL_S", dwell)
 
 
 def _install_integration(hass) -> None:
@@ -73,10 +72,9 @@ def _entry() -> MockConfigEntry:
         title="Power Orchestrator behavior",
         data={
             CONF_LOAD_SENSOR: LOAD_SENSOR,
-            CONF_MAX_LOAD: 5000,
             CONF_AVERAGING_PERIOD: 30,
-            CONF_SAFETY_RESERVE: 200,
-            CONF_HYSTERESIS: 100,
+            CONF_PAUSE_PERIOD: 0,
+            CONF_THRESHOLDS: [{"power_limit": 5000, "duration_s": 0}],
             CONF_DEVICES: [
                 {
                     "device_id": "boiler",
@@ -89,6 +87,8 @@ def _entry() -> MockConfigEntry:
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
             CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
         },
+        version=3,
+        minor_version=1,
     )
 
 
@@ -103,52 +103,8 @@ async def _setup_loaded(hass) -> MockConfigEntry:
     return entry
 
 
-def _restore_entry(*, dwell: int = 0) -> MockConfigEntry:
-    """Entry with guarded restore enabled; ``dwell`` controls the headroom timer."""
-    return MockConfigEntry(
-        domain=DOMAIN,
-        title="Power Orchestrator restore",
-        data={
-            CONF_LOAD_SENSOR: LOAD_SENSOR,
-            CONF_MAX_LOAD: 5000,
-            CONF_AVERAGING_PERIOD: 30,
-            CONF_SAFETY_RESERVE: 200,
-            CONF_HYSTERESIS: 100,
-            CONF_PAUSE_PERIOD: 0,
-            CONF_RESTORE_ENABLED: True,
-            CONF_RESTORE_THRESHOLD: 4000,
-            CONF_RESTORE_HYSTERESIS: 200,
-            CONF_RESTORE_DWELL: dwell,
-            CONF_RESTORE_COOLDOWN: 0,
-            CONF_DEVICES: [
-                {
-                    "device_id": "boiler",
-                    "name": "Test boiler",
-                    "entity": ACTUATOR,
-                    "expected_power": 500,
-                    "priority": 1,
-                    "restore_enabled": True,
-                }
-            ],
-            CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
-            CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
-        },
-    )
-
-
-async def _setup_restore(hass, *, dwell: int = 0) -> MockConfigEntry:
-    _install_integration(hass)
-    await _prepare_entities(hass)
-    entry = _restore_entry(dwell=dwell)
-    entry.add_to_hass(hass)
-    assert await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
-    assert entry.state is ConfigEntryState.LOADED
-    return entry
-
-
 async def _shed_the_boiler(hass) -> None:
-    """Arm auto/live, drive an overload, and confirm the planner shed the load."""
+    """Arm auto, drive an overload, and confirm the planner shed the load."""
     await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
     await hass.async_block_till_done()
     hass.states.async_set(LOAD_SENSOR, "9500", {"unit_of_measurement": "W"})
@@ -159,101 +115,65 @@ async def _shed_the_boiler(hass) -> None:
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
-async def test_guarded_restore_reenables_planner_shed_load(hass):
-    """Once armed and safe, the planner restores a load it shed itself."""
-    entry = await _setup_restore(hass)
+async def test_automatic_restore_reenables_pending_load(hass, monkeypatch):
+    """Auto restores a pending load after a continuous safe-capacity window."""
+    entry = await _setup_loaded(hass)
     coordinator = entry.runtime_data.coordinator
+    _patch_restore_dwell(monkeypatch, coordinator, 0.0)
     await _shed_the_boiler(hass)
 
-    await hass.services.async_call(
-        DOMAIN, "authorize_restore", {"confirm_restore": True}, blocking=True
-    )
-    await hass.async_block_till_done()
-
-    # Load returns well under the restore ceiling; the pending post-shed fence
-    # reconciles on this newer report and the guarded restore then fires.
-    hass.states.async_set(LOAD_SENSOR, "3000", {"unit_of_measurement": "W"})
+    hass.states.async_set(LOAD_SENSOR, "2000", {"unit_of_measurement": "W"})
     await hass.async_block_till_done()
     await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
     await hass.async_block_till_done()
 
-    # The planner-shed load is physically re-enabled and released from the
-    # restore-candidate set. (Status settles back to monitoring once the
-    # turn-on state change triggers a follow-up evaluation.)
     assert hass.states.get(ACTUATOR).state == "on"
     assert "boiler" not in coordinator.data["planner_shed_devices"]
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
-async def test_request_restore_enforces_headroom(hass):
-    """An explicit restore request still honors headroom (not just arming).
-
-    A long dwell keeps the *policy* restore lane from firing, so this isolates
-    the operator request path, which bypasses only the time-based dwell.
-    """
-    await _setup_restore(hass, dwell=3600)
+async def test_restore_requires_safe_capacity(hass, monkeypatch):
+    """Projected load at or above the lowest tier blocks automatic restore."""
+    entry = await _setup_loaded(hass)
+    _patch_restore_dwell(monkeypatch, entry.runtime_data.coordinator, 0.0)
     await _shed_the_boiler(hass)
-    await hass.services.async_call(
-        DOMAIN, "authorize_restore", {"confirm_restore": True}, blocking=True
-    )
-    await hass.async_block_till_done()
 
-    # Bring the load down but keep it above the restore ceiling. This newer
-    # report reconciles the post-shed fence; policy restore stays idle (dwell).
-    hass.states.async_set(LOAD_SENSOR, "5000", {"unit_of_measurement": "W"})
+    # 4000 + expected 2000 = 6000 is not strictly below 5000.
+    hass.states.async_set(LOAD_SENSOR, "4000", {"unit_of_measurement": "W"})
     await hass.async_block_till_done()
     await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
     await hass.async_block_till_done()
     assert hass.states.get(ACTUATOR).state == "off"
 
-    # Insufficient headroom: the explicit request must be refused (no ON).
-    await hass.services.async_call(
-        DOMAIN,
-        "request_restore",
-        {"device_id": "boiler", "confirm_restore": True},
-        blocking=True,
-    )
+    hass.states.async_set(LOAD_SENSOR, "2000", {"unit_of_measurement": "W"})
     await hass.async_block_till_done()
-    assert hass.states.get(ACTUATOR).state == "off"
-
-    # With real headroom the operator request restores the load.
-    hass.states.async_set(LOAD_SENSOR, "3000", {"unit_of_measurement": "W"})
-    await hass.async_block_till_done()
-    await hass.services.async_call(
-        DOMAIN,
-        "request_restore",
-        {"device_id": "boiler", "confirm_restore": True},
-        blocking=True,
-    )
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
     await hass.async_block_till_done()
     assert hass.states.get(ACTUATOR).state == "on"
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
-async def test_restore_configurable_via_options_flow(hass):
-    """Guarded restore can be enabled and tuned through the real Options flow."""
+async def test_thresholds_configurable_via_options_flow(hass):
+    """Thresholds can be set through the real Options flow without static defaults."""
     _install_integration(hass)
     await _prepare_entities(hass)
-    # A device-free entry keeps this test focused on the restore options wiring
-    # (no priority-order field to satisfy).
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Power Orchestrator options",
         data={
             CONF_LOAD_SENSOR: LOAD_SENSOR,
-            CONF_MAX_LOAD: 5000,
             CONF_AVERAGING_PERIOD: 30,
-            CONF_SAFETY_RESERVE: 200,
-            CONF_HYSTERESIS: 100,
+            CONF_THRESHOLDS: [{"power_limit": 5000, "duration_s": 0}],
             CONF_DEVICES: [],
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
             CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
         },
+        version=3,
+        minor_version=1,
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
-    assert entry.runtime_data.coordinator._restore_config.enabled is False
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert result["step_id"] == "init"
@@ -262,16 +182,8 @@ async def test_restore_configurable_via_options_flow(hass):
         user_input={
             CONF_LOAD_SENSOR: LOAD_SENSOR,
             CONF_DEVICES: [],
-            CONF_MAX_LOAD: 5000,
             CONF_AVERAGING_PERIOD: 30,
-            CONF_SAFETY_RESERVE: 200,
-            CONF_HYSTERESIS: 100,
             CONF_PAUSE_PERIOD: 0,
-            CONF_RESTORE_ENABLED: True,
-            CONF_RESTORE_THRESHOLD: 4000,
-            CONF_RESTORE_HYSTERESIS: 200,
-            CONF_RESTORE_DWELL: 300,
-            CONF_RESTORE_COOLDOWN: 600,
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
             CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
         },
@@ -289,39 +201,33 @@ async def test_restore_configurable_via_options_flow(hass):
     assert result["type"] == "create_entry"
     await hass.async_block_till_done()
 
-    assert entry.options[CONF_RESTORE_ENABLED] is True
-    assert entry.options[CONF_RESTORE_THRESHOLD] == 4000
-    # The options update reloads the entry; the new coordinator reflects restore.
+    assert entry.options[CONF_THRESHOLDS] == [
+        {"power_limit": 6500.0, "duration_s": 300.0},
+        {"power_limit": 8000.0, "duration_s": 5.0},
+    ]
     reloaded = entry.runtime_data.coordinator
-    assert reloaded._restore_config.enabled is True
-    assert reloaded._restore_config.threshold_w == 4000
+    assert reloaded.policy.lowest_limit_w == 6500.0
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
-async def test_restore_dwell_resets_on_shed_cycle(hass):
-    """A shed cycle (load above the restore ceiling) restarts the restore dwell.
-
-    Uses a long dwell so the dwell is accrued but not yet satisfied; a shed cycle
-    skips the restore lane, so the reset must happen on the shed path itself.
-    """
-    entry = await _setup_restore(hass, dwell=3600)
+async def test_restore_dwell_resets_on_overload(hass, monkeypatch):
+    """A matured overload resets the automatic restore safe-capacity window."""
+    entry = await _setup_loaded(hass)
     coordinator = entry.runtime_data.coordinator
+    _patch_restore_dwell(monkeypatch, coordinator, 3600.0)
     await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
     await hass.async_block_till_done()
-    await hass.services.async_call(
-        DOMAIN, "authorize_restore", {"confirm_restore": True}, blocking=True
-    )
+    coordinator.restore_pending_restore(["boiler"])
+    # Device must be confirmed OFF to be a restore candidate.
+    hass.states.async_set(ACTUATOR, "off")
     await hass.async_block_till_done()
 
-    # Accrue some below-ceiling dwell (long dwell -> not yet satisfied).
-    hass.states.async_set(LOAD_SENSOR, "3000", {"unit_of_measurement": "W"})
+    hass.states.async_set(LOAD_SENSOR, "2000", {"unit_of_measurement": "W"})
     await hass.async_block_till_done()
     await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
     await hass.async_block_till_done()
     assert coordinator._policy_engine.runtime.restore_since is not None
 
-    # A hard-interlock overload sheds and skips the restore lane; the dwell must
-    # still be reset so a later restore requires a fresh observation period.
     hass.states.async_set(LOAD_SENSOR, "9500", {"unit_of_measurement": "W"})
     await hass.async_block_till_done()
     await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
@@ -330,24 +236,27 @@ async def test_restore_dwell_resets_on_shed_cycle(hass):
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
-async def test_restore_does_not_fire_until_armed(hass):
-    """A shed load stays off when restore is enabled but not explicitly armed."""
-    entry = await _setup_restore(hass)
+async def test_observe_never_restores(hass, monkeypatch):
+    """Observe mode never issues a physical restore."""
+    entry = await _setup_loaded(hass)
     coordinator = entry.runtime_data.coordinator
+    _patch_restore_dwell(monkeypatch, coordinator, 0.0)
     await _shed_the_boiler(hass)
+    await hass.services.async_call(DOMAIN, "set_mode", {"mode": "observe"}, blocking=True)
+    await hass.async_block_till_done()
 
-    assert coordinator.restore_commands_allowed is False
-    hass.states.async_set(LOAD_SENSOR, "3000", {"unit_of_measurement": "W"})
+    hass.states.async_set(LOAD_SENSOR, "2000", {"unit_of_measurement": "W"})
     await hass.async_block_till_done()
     await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
     await hass.async_block_till_done()
 
     assert hass.states.get(ACTUATOR).state == "off"
+    assert coordinator.restore_commands_allowed is False
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
-async def test_overload_hard_interlock_sheds_one_load(hass):
-    """A load above the hard interlock is physically switched off in Auto."""
+async def test_overload_zero_dwell_tier_sheds_one_load(hass):
+    """A load above a zero-dwell tier is physically switched off in Auto."""
     entry = await _setup_loaded(hass)
     coordinator = entry.runtime_data.coordinator
 
@@ -363,7 +272,7 @@ async def test_overload_hard_interlock_sheds_one_load(hass):
 
     assert hass.states.get(ACTUATOR).state == "off"
     assert coordinator.status == "load_shedding"
-    assert coordinator.reason_code == "hard_interlock"
+    assert coordinator.reason_code == "shed_custom_threshold"
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
@@ -382,6 +291,7 @@ async def test_grid_loss_triggers_emergency_stop(hass):
 
     assert hass.states.get(ACTUATOR).state == "off"
     assert coordinator.status == "grid_loss"
+    assert "boiler" in coordinator.data["planner_shed_devices"]
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
@@ -397,7 +307,6 @@ async def test_observe_mode_records_but_does_not_switch(hass):
     await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
     await hass.async_block_till_done()
 
-    # Observe must record an intended action but leave the actuator untouched.
     assert hass.states.get(ACTUATOR).state == "on"
     assert coordinator.status == "observe"
     assert "observe" in coordinator.last_action.lower()
@@ -405,18 +314,13 @@ async def test_observe_mode_records_but_does_not_switch(hass):
 
 @pytest.mark.usefixtures("enable_custom_integrations")
 async def test_state_change_listener_triggers_evaluation(hass):
-    """A tracked-entity state change alone drives a guarded evaluation.
-
-    This exercises the entity-scoped ``async_track_state_change_event``
-    subscription without any explicit ``force_evaluate`` call.
-    """
+    """A tracked-entity state change alone drives a guarded evaluation."""
     entry = await _setup_loaded(hass)
     coordinator = entry.runtime_data.coordinator
     await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
     await hass.async_block_till_done()
     assert hass.states.get(ACTUATOR).state == "on"
 
-    # Flip a tracked safety input; the listener must wake the coordinator.
     hass.states.async_set(GRID_SENSOR, "off")
     await hass.async_block_till_done()
 

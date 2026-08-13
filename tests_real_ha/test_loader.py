@@ -19,11 +19,8 @@ from power_orchestrator.const import (
     CONF_DEVICES,
     CONF_GRID_LOSS_MODE,
     CONF_GRID_LOSS_SENSOR,
-    CONF_HYSTERESIS,
     CONF_LOAD_SENSOR,
-    CONF_MAX_LOAD,
     CONF_PRIORITY_ORDER,
-    CONF_SAFETY_RESERVE,
     CONF_THRESHOLD_DURATION,
     CONF_THRESHOLD_POWER,
     DOMAIN,
@@ -47,10 +44,7 @@ async def test_config_entry_loads_with_real_home_assistant(hass):
         title="Power Orchestrator smoke",
         data={
             CONF_LOAD_SENSOR: "sensor.test_load",
-            CONF_MAX_LOAD: 5000,
             CONF_AVERAGING_PERIOD: 30,
-            CONF_SAFETY_RESERVE: 200,
-            CONF_HYSTERESIS: 100,
             CONF_DEVICES: [],
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
             CONF_GRID_LOSS_SENSOR: "binary_sensor.test_grid",
@@ -111,10 +105,7 @@ async def test_diagnostics_and_reconfigure_are_compatible_with_real_home_assista
         title="Power Orchestrator diagnostics smoke",
         data={
             CONF_LOAD_SENSOR: "sensor.test_load",
-            CONF_MAX_LOAD: 5000,
             CONF_AVERAGING_PERIOD: 30,
-            CONF_SAFETY_RESERVE: 200,
-            CONF_HYSTERESIS: 100,
             CONF_DEVICES: [],
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
             CONF_GRID_LOSS_SENSOR: "binary_sensor.test_grid",
@@ -134,10 +125,7 @@ async def test_diagnostics_and_reconfigure_are_compatible_with_real_home_assista
         user_input={
             CONF_LOAD_SENSOR: "sensor.test_load",
             CONF_DEVICES: [],
-            CONF_MAX_LOAD: 5000,
             CONF_AVERAGING_PERIOD: 30,
-            CONF_SAFETY_RESERVE: 200,
-            CONF_HYSTERESIS: 100,
             "pause_period": 60,
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
             CONF_GRID_LOSS_SENSOR: "binary_sensor.test_grid",
@@ -173,10 +161,7 @@ async def test_diagnostics_and_reconfigure_are_compatible_with_real_home_assista
         user_input={
             CONF_LOAD_SENSOR: "sensor.test_load",
             CONF_DEVICES: [],
-            CONF_MAX_LOAD: 5000,
             CONF_AVERAGING_PERIOD: 30,
-            CONF_SAFETY_RESERVE: 200,
-            CONF_HYSTERESIS: 100,
             "pause_period": 60,
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
             CONF_GRID_LOSS_SENSOR: "binary_sensor.test_grid",
@@ -239,10 +224,7 @@ async def test_native_flow_exposes_repeatable_thresholds_and_reorderable_priorit
         flow_id,
         user_input={
             CONF_LOAD_SENSOR: "sensor.test_load",
-            CONF_MAX_LOAD: 5000,
             CONF_AVERAGING_PERIOD: 30,
-            CONF_SAFETY_RESERVE: 200,
-            CONF_HYSTERESIS: 100,
         },
     )
     assert result["step_id"] == "thresholds"

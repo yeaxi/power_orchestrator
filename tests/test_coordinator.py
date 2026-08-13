@@ -20,7 +20,7 @@ from power_orchestrator.const import (
     STATUS_SAFETY_BLOCKED,
 )
 from power_orchestrator.coordinator import CoordinatorConfig, PowerOrchestratorCoordinator
-from power_orchestrator.policy import PolicyConfig
+from power_orchestrator.policy import PolicyConfig, policy_for_tests
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 from power_orchestrator.storage import RuntimeStore
 
@@ -100,20 +100,27 @@ def coordinator(
         store=store,
         config=CoordinatorConfig(
             load_sensor="sensor.load",
-            max_load=5000,
             averaging_period=10,
-            safety_reserve=200,
-            hysteresis=100,
             pause_period=60,
             grid_loss_mode=grid_mode,
             grid_loss_sensor=grid_sensor,
             battery_threshold=battery_threshold,
             battery_soc_sensor=battery_soc,
-            policy=policy,
+            policy=policy or policy_for_tests((5000.0, 0.0)),
         ),
     )
     result.mode = mode
     return result
+
+
+def set_valid_stop_states(coordinator_instance: PowerOrchestratorCoordinator) -> None:
+    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
+        state("on")
+        if entity_id == "binary_sensor.grid"
+        else state("1000")
+        if entity_id == "sensor.load"
+        else state("on")
+    )
 
 
 def test_grid_safety_uses_semantic_unavailable_state_not_timestamp_age() -> None:
@@ -158,7 +165,10 @@ async def test_invalid_load_blocks_without_physical_command() -> None:
     )
     await coordinator_instance._evaluate()
     assert coordinator_instance.status == STATUS_SAFETY_BLOCKED
-    coordinator_instance.hass.services.async_call.assert_not_awaited()
+    assert all(
+        call.args[0] == "persistent_notification"
+        for call in coordinator_instance.hass.services.async_call.await_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -177,7 +187,10 @@ async def test_unavailable_grid_source_is_not_reported_as_confirmed_grid_loss() 
     assert coordinator_instance.status == STATUS_SAFETY_BLOCKED
     assert coordinator_instance.reason_code == "telemetry_invalid"
     assert "unavailable" in coordinator_instance.last_action.lower()
-    coordinator_instance.hass.services.async_call.assert_not_awaited()
+    assert all(
+        call.args[0] == "persistent_notification"
+        for call in coordinator_instance.hass.services.async_call.await_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -186,9 +199,7 @@ async def test_manual_stop_is_guarded_and_confirmed() -> None:
     device = coordinator_instance._model.get_device("d1")
     assert device is not None
     device.is_on = True
-    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
-        state("on") if entity_id == "switch.load_1" else state("on")
-    )
+    set_valid_stop_states(coordinator_instance)
     coordinator_instance._confirm_device_state = AsyncMock(return_value=True)
 
     assert await coordinator_instance.async_request_stop("d1", source="test") is True
@@ -210,6 +221,7 @@ async def test_confirmed_stop_is_durable_and_saved_before_command() -> None:
     device = coordinator_instance._model.get_device("d1")
     assert device is not None
     device.is_on = True
+    set_valid_stop_states(coordinator_instance)
     coordinator_instance._confirm_device_state = AsyncMock(return_value=True)
 
     async def service_call(*_args, **_kwargs):
@@ -238,6 +250,7 @@ async def test_journal_persistence_failure_is_retained_and_retried() -> None:
     device = coordinator_instance._model.get_device("d1")
     assert device is not None
     device.is_on = True
+    set_valid_stop_states(coordinator_instance)
     coordinator_instance._confirm_device_state = AsyncMock(return_value=True)
 
     assert await coordinator_instance.async_request_stop("d1", source="test") is True
@@ -264,6 +277,7 @@ async def test_observe_only_action_is_durable_without_physical_call() -> None:
     device = coordinator_instance._model.get_device("d1")
     assert device is not None
     device.is_on = True
+    set_valid_stop_states(coordinator_instance)
 
     assert await coordinator_instance.async_request_stop("d1", source="observe_test") is False
     assert backend.events == ["save"]
@@ -282,7 +296,6 @@ async def test_overload_sheds_one_eligible_load_and_never_reenables_it() -> None
     policy = PolicyConfig.from_mapping(
         {
             "thresholds": [{"power_limit": 1000, "duration_s": 0}],
-            "hard_interlock": 9000,
         }
     )
     coordinator_instance = coordinator(policy=policy)
@@ -316,7 +329,6 @@ async def test_zero_power_on_device_is_not_ordinary_shed_candidate() -> None:
     policy = PolicyConfig.from_mapping(
         {
             "thresholds": [{"power_limit": 1000, "duration_s": 0}],
-            "hard_interlock": 9000,
         }
     )
     coordinator_instance = coordinator(policy=policy)
@@ -347,7 +359,6 @@ async def test_no_eligible_load_reports_per_device_reasons() -> None:
     policy = PolicyConfig.from_mapping(
         {
             "thresholds": [{"power_limit": 1000, "duration_s": 0}],
-            "hard_interlock": 9000,
         }
     )
     coordinator_instance = coordinator(policy=policy, mode=MODE_OBSERVE)
@@ -401,7 +412,6 @@ async def test_mode_off_does_not_quarantine_normal_overload_candidate() -> None:
     policy = PolicyConfig.from_mapping(
         {
             "thresholds": [{"power_limit": 1000, "duration_s": 0}],
-            "hard_interlock": 9000,
         }
     )
     coordinator_instance = coordinator(policy=policy, mode=MODE_OFF)

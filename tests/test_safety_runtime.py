@@ -15,7 +15,7 @@ from power_orchestrator.const import (
     STATUS_SAFETY_BLOCKED,
 )
 from power_orchestrator.coordinator import CoordinatorConfig, PowerOrchestratorCoordinator
-from power_orchestrator.policy import PolicyConfig
+from power_orchestrator.policy import PolicyConfig, policy_for_tests
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 
 
@@ -50,16 +50,13 @@ def _coordinator(
         store=store,
         config=CoordinatorConfig(
             load_sensor="sensor.load",
-            max_load=5000,
             averaging_period=10,
-            safety_reserve=200,
-            hysteresis=100,
             pause_period=60,
             grid_loss_mode="grid_loss_sensor",
             grid_loss_sensor="binary_sensor.grid",
             battery_threshold=None,
             battery_soc_sensor=None,
-            policy=policy,
+            policy=policy or policy_for_tests((5000.0, 0.0)),
         ),
     )
     coordinator.mode = mode
@@ -153,13 +150,112 @@ async def test_unconfirmed_stop_latches_fault_and_never_claims_success() -> None
     assert device is not None
     device.is_on = True
     coordinator._confirm_device_state = AsyncMock(return_value=False)
-    coordinator.hass.states.get.return_value = _state("on")
+    coordinator.hass.states.get.side_effect = lambda entity_id: (
+        _state("on")
+        if entity_id == "binary_sensor.grid"
+        else _state("1000")
+        if entity_id == "sensor.load"
+        else _state("on")
+    )
 
     assert await coordinator.async_request_stop("d1", source="test") is False
     assert device.is_on is None
     assert "d1" in coordinator._faults.faulted
     assert coordinator.hass.services.async_call.await_args.args[1] == "turn_off"
     assert all(call.args[1] != "turn_on" for call in coordinator.hass.services.async_call.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_stop_request_with_invalid_telemetry_never_calls_device_service() -> None:
+    coordinator = _coordinator()
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    coordinator.hass.states.get.side_effect = lambda entity_id: (
+        _state("unavailable")
+        if entity_id == "binary_sensor.grid"
+        else _state("unknown")
+    )
+
+    assert await coordinator.async_request_stop("d1", source="test") is False
+    assert all(
+        call.args[0] == "persistent_notification"
+        for call in coordinator.hass.services.async_call.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_on_pending_is_accepted_when_capacity_is_safe() -> None:
+    coordinator = _coordinator(policy=policy_for_tests((5000.0, 0.0)))
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    coordinator._pending_restore = ["d1"]
+    coordinator.hass.states.get.side_effect = lambda entity_id: (
+        _state("on")
+        if entity_id == "binary_sensor.grid"
+        else _state("1000")
+        if entity_id == "sensor.load"
+        else _state("on")
+    )
+
+    await coordinator._handle_manual_on_pending(device)
+
+    assert coordinator._pending_restore == []
+    assert all(
+        len(call.args) < 2 or call.args[1] != "turn_off"
+        for call in coordinator.hass.services.async_call.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_on_pending_is_reshed_when_limit_is_enforced() -> None:
+    coordinator = _coordinator(policy=policy_for_tests((1000.0, 0.0)))
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    coordinator._pending_restore = ["d1"]
+    coordinator.hass.states.get.side_effect = lambda entity_id: (
+        _state("on")
+        if entity_id == "binary_sensor.grid"
+        else _state("2000")
+        if entity_id == "sensor.load"
+        else _state("on")
+    )
+    coordinator._confirm_device_state = AsyncMock(return_value=True)
+    coordinator._policy_engine.observe_load(2000.0, now=0.0)
+
+    await coordinator._handle_manual_on_pending(device)
+
+    assert coordinator._pending_restore == ["d1"]
+    assert device.is_on is False
+    assert any(
+        call.args[0:2] == ("switch", "turn_off")
+        for call in coordinator.hass.services.async_call.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_on_pending_with_invalid_telemetry_stays_on_and_pending() -> None:
+    coordinator = _coordinator(policy=policy_for_tests((5000.0, 0.0)))
+    device = coordinator._model.get_device("d1")
+    assert device is not None
+    device.is_on = True
+    coordinator._pending_restore = ["d1"]
+    coordinator.hass.states.get.side_effect = lambda entity_id: (
+        _state("unavailable")
+        if entity_id == "binary_sensor.grid"
+        else _state("unknown")
+    )
+
+    await coordinator._handle_manual_on_pending(device)
+
+    assert coordinator._pending_restore == ["d1"]
+    assert device.is_on is True
+    assert all(
+        len(call.args) < 2 or call.args[1] != "turn_off"
+        for call in coordinator.hass.services.async_call.await_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -183,6 +279,13 @@ async def test_off_mode_persists_without_authorizing_commands() -> None:
 @pytest.mark.asyncio
 async def test_auto_mode_permits_physical_commands() -> None:
     coordinator = _coordinator(mode=MODE_OBSERVE)
+    coordinator.hass.states.get.side_effect = lambda entity_id: (
+        _state("on")
+        if entity_id == "binary_sensor.grid"
+        else _state("1000")
+        if entity_id == "sensor.load"
+        else _state("off")
+    )
 
     await coordinator.async_set_mode(MODE_AUTO)
 

@@ -11,6 +11,7 @@ from power_orchestrator import async_setup_entry
 from power_orchestrator.const import (
     CONF_GRID_LOSS_MODE,
     CONF_LOAD_SENSOR,
+    CONF_THRESHOLDS,
     GRID_LOSS_MODE_SENSOR,
     MODE_AUTO,
     MODE_OFF,
@@ -37,6 +38,7 @@ async def test_persisted_mode_is_restored_only_when_safety_storage_is_valid(
         data={
             CONF_LOAD_SENSOR: "sensor.load",
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
+            CONF_THRESHOLDS: [{"power_limit": 5000, "duration_s": 0}],
         },
         options={},
         async_on_unload=MagicMock(),
@@ -79,6 +81,7 @@ async def test_setup_resolves_unified_mode_from_legacy_observe_execution() -> No
         data={
             CONF_LOAD_SENSOR: "sensor.load",
             CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
+            CONF_THRESHOLDS: [{"power_limit": 5000, "duration_s": 0}],
             "execution_mode": "observe",
         },
         options={},

@@ -148,7 +148,6 @@ async def test_config_flow_user_and_grid_loss_steps() -> None:
     await flow.async_step_load_monitoring(
         {
             "load_sensor": "sensor.load",
-            "max_load": 5000,
             "threshold_count": 1,
             "threshold_1_power": 6500,
             "threshold_1_time": 30,
@@ -187,10 +186,7 @@ async def test_initial_thresholds_are_collected_as_repeatable_steps() -> None:
     result = await flow.async_step_load_monitoring(
         {
             "load_sensor": "sensor.load",
-            "max_load": 9000,
             "averaging_period": 10,
-            "safety_reserve": 0,
-            "hysteresis": 200,
         }
     )
     assert result["step_id"] == "thresholds"
@@ -217,10 +213,7 @@ async def test_accepting_threshold_defaults_preserves_the_complete_seed() -> Non
     result = await flow.async_step_load_monitoring(
         {
             "load_sensor": "sensor.load",
-            "max_load": 9000,
             "averaging_period": 10,
-            "safety_reserve": 0,
-            "hysteresis": 200,
         }
     )
     add_marker = next(
@@ -229,7 +222,7 @@ async def test_accepting_threshold_defaults_preserves_the_complete_seed() -> Non
         if getattr(key, "schema", None) == CONF_ADD_THRESHOLD
     )
     default = add_marker.default() if callable(add_marker.default) else add_marker.default
-    assert default is True
+    assert default is False
 
     result = await flow.async_step_thresholds(
         {"threshold_power": 6500, "threshold_duration": 300, CONF_ADD_THRESHOLD: True}

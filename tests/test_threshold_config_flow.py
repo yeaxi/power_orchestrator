@@ -44,15 +44,17 @@ async def test_load_monitoring_persists_custom_threshold_pairs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_load_monitoring_rejects_threshold_above_hard_interlock() -> None:
+async def test_load_monitoring_rejects_non_increasing_thresholds() -> None:
     flow = PowerOrchestratorConfigFlow()
     flow.hass = MagicMock()
     result = await flow.async_step_load_monitoring(
         {
             "load_sensor": "sensor.whole_house",
-            CONF_THRESHOLD_COUNT: 1,
-            "threshold_1_power": 9001,
+            CONF_THRESHOLD_COUNT: 2,
+            "threshold_1_power": 7000,
             "threshold_1_time": 5,
+            "threshold_2_power": 6000,
+            "threshold_2_time": 5,
         }
     )
     assert result["type"] == "form"

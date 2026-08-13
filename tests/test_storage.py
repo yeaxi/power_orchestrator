@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from power_orchestrator.policy import DEFAULT_POLICY, PolicyEngine, ReasonCode
+from power_orchestrator.policy import policy_for_tests, PolicyEngine, ReasonCode
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 from power_orchestrator.storage import RuntimeStore
 
@@ -130,10 +130,10 @@ def test_malformed_device_runtime_fails_closed() -> None:
 
 def test_policy_runtime_round_trip_ignores_removed_reenable_state() -> None:
     store = RuntimeStore(FakeStore())
-    engine = PolicyEngine(DEFAULT_POLICY)
+    engine = PolicyEngine(policy_for_tests((6500.0, 300.0), (7000.0, 30.0), (8000.0, 5.0)))
     engine.append_shed(operation_id="op-1", load_generation=2, reason_code=ReasonCode.SHED_FAST_OVERLOAD)
     store.save_policy_runtime(engine)
-    restored = PolicyEngine(DEFAULT_POLICY)
+    restored = PolicyEngine(policy_for_tests((6500.0, 300.0), (7000.0, 30.0), (8000.0, 5.0)))
     store.restore_policy_runtime(restored, make_model())
     assert restored.runtime.pending_post_shed_generation == 2
     assert not hasattr(restored.runtime, "shed_stack")
