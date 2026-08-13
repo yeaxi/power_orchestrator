@@ -132,6 +132,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             {
                 "safety_reserve": self._safety_reserve,
                 "hard_interlock": self._max_load,
+                "hysteresis": self._hysteresis,
                 "thresholds": [
                     {
                         "power_limit": self._max_load,
@@ -442,6 +443,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._policy_engine.last_decision = decision
             planner_disabled = True
         elif self._policy_enabled:
+            # Dwell/hysteresis timers use a monotonic clock: they measure
+            # in-process durations and must be immune to wall-clock jumps. This
+            # is deliberately distinct from the wall-clock timestamps used for
+            # pauses/ownership/cooldowns, which are persisted and must survive a
+            # restart (see _pause_device and _refresh_device_states).
             decision = self._policy_engine.observe_load(current, now=time.monotonic())
             planner_disabled = False
         else:
@@ -1047,6 +1053,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return False
 
     def _pause_device(self, device: ManagedDevice) -> None:
+        # Wall-clock (time.time), not monotonic: pause_until is persisted and
+        # must remain meaningful across a Home Assistant restart. Dwell timers
+        # use monotonic instead (see the observe_load call in _evaluate).
         device.pause_until = time.time() + self._pause_period
         device.last_turn_off_time = time.time()
         setter = getattr(self._store, "set_pause", None)
