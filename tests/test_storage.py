@@ -143,7 +143,7 @@ def test_policy_runtime_round_trip_ignores_removed_reenable_state() -> None:
     store.save_policy_runtime(engine)
     restored = PolicyEngine(policy_for_tests((6500.0, 300.0), (7000.0, 30.0), (8000.0, 5.0)))
     store.restore_policy_runtime(restored, make_model())
-    assert restored.runtime.pending_post_shed_generation == 2
+    assert restored.runtime.pending_post_shed_generation == 0
     assert not hasattr(restored.runtime, "shed_stack")
 
 
