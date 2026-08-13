@@ -2,18 +2,37 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
 INTEGRATION = ROOT / "custom_components" / "power_orchestrator"
 
+# Keys accepted by the HACS manifest schema. HACS rejects anything else
+# (voluptuous PREVENT_EXTRA), which fails the HACS validation action.
+HACS_JSON_ALLOWED_KEYS = {
+    "content_in_root",
+    "country",
+    "filename",
+    "hacs",
+    "hide_default_branch",
+    "homeassistant",
+    "name",
+    "persistent_directory",
+    "render_readme",
+    "zip_release",
+}
+
+
+def _pyproject() -> dict:
+    return tomllib.loads((ROOT / "pyproject.toml").read_text())
+
 
 def test_hacs_and_manifest_metadata_are_release_ready():
     manifest = json.loads((INTEGRATION / "manifest.json").read_text())
     hacs = json.loads((ROOT / "hacs.json").read_text())
 
-    assert manifest["version"] == "0.5.0"
     assert manifest["single_config_entry"] is True
     assert manifest.get("dependencies", []) == []
     assert manifest["codeowners"]
@@ -22,16 +41,45 @@ def test_hacs_and_manifest_metadata_are_release_ready():
     assert hacs["homeassistant"] == "2026.7.4"
     assert hacs["render_readme"] is True
     assert hacs["zip_release"] is True
-    assert set(hacs["domains"]) == {"sensor", "binary_sensor", "select"}
-    assert (ROOT / "brand" / "icon.png").is_file()
+    assert hacs["filename"] == "power_orchestrator.zip"
+    assert set(hacs) <= HACS_JSON_ALLOWED_KEYS
     assert "MIT License" in (ROOT / "LICENSE").read_text()
 
 
+def test_manifest_keys_are_sorted_the_way_hassfest_requires():
+    """hassfest requires domain, then name, then alphabetical order."""
+    keys = list(json.loads((INTEGRATION / "manifest.json").read_text()))
+    assert keys == sorted(keys, key=lambda key: {"domain": ".domain", "name": ".name"}.get(key, key))
+
+
+def test_brand_assets_live_where_hacs_and_home_assistant_look():
+    """HACS checks the integration-local path for a non-root layout, as does HA 2026.3+."""
+    assert (INTEGRATION / "brand" / "icon.png").is_file()
+    assert not (ROOT / "brand").exists()
+
+
+def test_declared_version_is_consistent_across_packaging_files():
+    manifest_version = json.loads((INTEGRATION / "manifest.json").read_text())["version"]
+    assert manifest_version == _pyproject()["project"]["version"]
+    assert manifest_version.count(".") == 2
+    assert all(part.isdigit() for part in manifest_version.split("."))
+
+
+def test_device_info_model_matches_the_declared_version():
+    """A release bump must not leave a stale version in the device registry."""
+    manifest_version = json.loads((INTEGRATION / "manifest.json").read_text())["version"]
+    for platform in ("binary_sensor.py", "select.py", "sensor.py"):
+        source = (INTEGRATION / platform).read_text()
+        for line in source.splitlines():
+            if '"model":' in line:
+                assert f'"v{manifest_version}"' in line, f"{platform}: {line.strip()}"
+
+
 def test_pyproject_and_ci_define_the_local_quality_gate():
-    pyproject = (ROOT / "pyproject.toml").read_text()
-    assert 'name = "power-orchestrator"' in pyproject
-    assert 'version = "0.5.0"' in pyproject
-    assert 'testpaths = ["tests"]' in pyproject
+    pyproject = _pyproject()
+    assert pyproject["project"]["name"] == "power-orchestrator"
+    assert pyproject["tool"]["pytest"]["ini_options"]["testpaths"] == ["tests"]
+    assert pyproject["tool"]["coverage"]["report"]["fail_under"] == 75
 
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
     assert "pytest" in workflow
