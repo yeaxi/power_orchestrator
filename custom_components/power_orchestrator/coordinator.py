@@ -146,11 +146,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         self._last_policy_decision = self._policy_engine.last_decision
 
         # Guarded restore is fail-closed: disabled unless configured, and never
-        # armed automatically. ``_planner_shed_devices`` tracks only loads this
-        # planner shed via ordinary policy (never emergency/service/manual).
+        # armed automatically. The ordered queue contains only confirmed stops
+        # issued by this integration.
         self._restore_config = config.restore_config or RestoreConfig()
         self._restore_armed = False
-        self._planner_shed_devices: set[str] = set()
+        self._pending_restore: list[str] = []
         self._restore_cooldown_until: dict[str, float] = {}
 
         self._mode = MODE_OFF
@@ -528,7 +528,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             if device.device_id in self._faults.quarantined:
                 device.is_on = None
                 # A quarantined load is no longer a guarded-restore candidate.
-                self._planner_shed_devices.discard(device.device_id)
+                self._remove_pending_restore(device.device_id)
                 if logical_state is True:
                     await self._command_off(device, emergency=True, source="quarantine")
             else:
@@ -547,7 +547,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                     self._last_action = f"Preserving external ownership for {device.name}"
                     # The user re-enabled this load; the planner relinquishes any
                     # restore claim on it.
-                    self._planner_shed_devices.discard(device.device_id)
+                    self._remove_pending_restore(device.device_id)
                 if (
                     device.ownership is Ownership.EXTERNAL
                     and device.ownership_until is not None
@@ -620,6 +620,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             if await self._command_off(device, emergency=True, source="grid_loss"):
                 self._grid_loss_expected_off.add(device.device_id)
                 self._pause_device(device)
+                self._append_pending_restore(device.device_id)
             else:
                 failed.append(device.name)
                 self._faults.latch(
@@ -699,9 +700,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return
 
         self._pause_device(device)
-        # Record that the planner itself shed this load; only such loads are
-        # ever eligible for a later guarded restore (never emergency/manual).
-        self._planner_shed_devices.add(device.device_id)
+        self._append_pending_restore(device.device_id)
         operation_id = self._last_operation_id or "unknown"
         if self._policy_enabled:
             self._policy_engine.append_shed(
@@ -879,7 +878,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         return restore_candidates(
             self.hass,
             self._model,
-            planner_shed=self._planner_shed_devices,
+            planner_shed=self._pending_restore,
             faulted=self._faults.faulted,
             quarantined=self._faults.quarantined,
             cooldown_until=self._restore_cooldown_until,
@@ -912,7 +911,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             await self._persist_runtime_if_dirty()
             return True
         operation_id = self._last_operation_id or "unknown"
-        self._planner_shed_devices.discard(device.device_id)
+        self._remove_pending_restore(device.device_id)
         self._restore_cooldown_until[device.device_id] = (
             time.time() + self._restore_config.cooldown_s
         )
@@ -1404,7 +1403,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             )
             if restored:
                 operation_id = self._last_operation_id or "unknown"
-                self._planner_shed_devices.discard(device_id)
+                self._remove_pending_restore(device_id)
                 self._restore_cooldown_until[device_id] = (
                     time.time() + self._restore_config.cooldown_s
                 )
@@ -1475,6 +1474,23 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             if device is not None:
                 device.is_on = None
 
+    def restore_pending_restore(self, device_ids: list[str]) -> None:
+        """Restore the validated queue in its original shed order."""
+        configured = {device.device_id for device in self._model.all_devices()}
+        self._pending_restore = []
+        for device_id in device_ids:
+            if device_id in configured and device_id not in self._pending_restore:
+                self._pending_restore.append(device_id)
+
+    def _append_pending_restore(self, device_id: str) -> None:
+        if device_id in self._pending_restore:
+            self._pending_restore.remove(device_id)
+        self._pending_restore.append(device_id)
+
+    def _remove_pending_restore(self, device_id: str) -> None:
+        if device_id in self._pending_restore:
+            self._pending_restore.remove(device_id)
+
     def restore_policy_runtime(self, runtime: Any) -> None:
         """Compatibility hook for callers that restore through the store."""
         del runtime
@@ -1484,6 +1500,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         if callable(setter):
             setter(self._execution_mode)
         self._store.save_policy_runtime(self._policy_engine)
+        pending_saver = getattr(self._store, "save_pending_restore", None)
+        if callable(pending_saver):
+            pending_saver(self._pending_restore)
         saver = getattr(self._store, "save_device_runtime", None)
         if callable(saver):
             saver(
@@ -1574,7 +1593,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             "restore_commands_allowed": self.restore_commands_allowed,
             "restore_barrier_pending": self._policy_engine.runtime.pending_post_restore_generation
             is not None,
-            "planner_shed_devices": sorted(self._planner_shed_devices),
+            "planner_shed_devices": list(self._pending_restore),
             "last_operation_id": self._last_operation_id,
             "last_operation_result": self._last_operation_result,
             "last_action_id": self._last_action_id,

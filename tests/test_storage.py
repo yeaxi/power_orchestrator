@@ -42,6 +42,28 @@ async def test_empty_store_and_mode_round_trip() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pending_restore_round_trip_preserves_order_and_filters_devices() -> None:
+    backend = FakeStore()
+    store = RuntimeStore(backend)
+    await store.async_load()
+    store.save_pending_restore(["d1", "missing", "d2", "d1"])
+    await store.async_save()
+
+    restored = RuntimeStore(FakeStore(backend._data))
+    await restored.async_load()
+
+    assert restored.restore_pending_restore(make_model()) == ["d1", "d2"]
+
+
+@pytest.mark.asyncio
+async def test_malformed_pending_restore_fails_closed() -> None:
+    store = RuntimeStore(FakeStore({"pending_restore": "d1"}))
+    await store.async_load()
+
+    assert store.restore_pending_restore(make_model()) == []
+
+
+@pytest.mark.asyncio
 async def test_legacy_recovery_blocked_devices_migrate_to_quarantine() -> None:
     backend = FakeStore(
         {
