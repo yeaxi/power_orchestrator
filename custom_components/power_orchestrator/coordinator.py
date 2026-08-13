@@ -400,7 +400,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
         if decision.triggered:
             self._status = STATUS_LOAD_SHEDDING
-            if not self._policy_engine.can_shed_again(self._load_generation):
+            if not self._policy_engine.can_shed_again():
                 self._last_action = "Waiting for a newer aggregate report after the previous shed"
                 return
             await self._perform_shedding(max(current, average), decision=decision)

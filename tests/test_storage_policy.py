@@ -38,8 +38,11 @@ def test_policy_runtime_persists_only_shedding_fence(monkeypatch) -> None:
     assert restored.runtime.tier_started_at is None
     assert restored.runtime.tier_since == {}
     assert restored.runtime.restore_since is None
+    assert restored.can_shed_again() is False
     assert restored.reconcile_shed(1, reported_at=500.0) is False
+    assert restored.can_shed_again() is False
     assert restored.reconcile_shed(1, reported_at=501.0) is True
+    assert restored.can_shed_again() is True
 
 
 def test_monotonic_tier_and_restore_times_are_never_persisted() -> None:
