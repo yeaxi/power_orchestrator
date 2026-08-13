@@ -374,6 +374,11 @@ class RuntimeStore:
         runtime.pending_post_shed_after_reported_at = self._finite_or_none(
             raw.get("pending_post_shed_after_reported_at")
         )
+        if (
+            runtime.pending_post_shed_generation is not None
+            and runtime.pending_post_shed_after_reported_at is None
+        ):
+            runtime.pending_post_shed_after_reported_at = time.time()
         runtime.pending_operation_id = raw.get("pending_operation_id") if isinstance(raw.get("pending_operation_id"), str) else None
         last_generation = raw.get("last_shed_load_generation")
         runtime.last_shed_load_generation = (
@@ -394,6 +399,11 @@ class RuntimeStore:
         runtime.pending_post_restore_after_reported_at = self._finite_or_none(
             raw.get("pending_post_restore_after_reported_at")
         )
+        if (
+            runtime.pending_post_restore_generation is not None
+            and runtime.pending_post_restore_after_reported_at is None
+        ):
+            runtime.pending_post_restore_after_reported_at = time.time()
         runtime.pending_restore_operation_id = (
             raw.get("pending_restore_operation_id")
             if isinstance(raw.get("pending_restore_operation_id"), str)

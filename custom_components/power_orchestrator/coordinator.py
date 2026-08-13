@@ -321,12 +321,6 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._append_load_sample(load)
             pending = self._policy_engine.runtime.pending_post_shed_generation
             if pending is not None:
-                if self._policy_engine.runtime.pending_post_shed_after_reported_at is None:
-                    self._policy_engine.set_post_shed_fence(
-                        self._last_confirmed_reported_at.get(
-                            self._policy_engine.runtime.pending_operation_id or ""
-                        )
-                    )
                 self._policy_engine.reconcile_shed(
                     self._load_generation,
                     reported_at=self._load_reported_at,
