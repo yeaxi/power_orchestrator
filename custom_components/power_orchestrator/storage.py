@@ -363,19 +363,34 @@ class RuntimeStore:
         runtime.active_tier = None
         runtime.tier_started_at = None
         runtime.tier_since = {}
+        # Aggregate generations restart from zero with the coordinator. Preserve
+        # the fence itself, but require the first fresh report in this process.
         pending = raw.get("pending_post_shed_generation")
         runtime.pending_post_shed_generation = (
-            pending if isinstance(pending, int) and not isinstance(pending, bool) and pending >= 0 else None
+            0
+            if isinstance(pending, int) and not isinstance(pending, bool) and pending >= 0
+            else None
         )
         runtime.pending_post_shed_after_reported_at = self._finite_or_none(
             raw.get("pending_post_shed_after_reported_at")
         )
+        if (
+            runtime.pending_post_shed_generation is not None
+            and runtime.pending_post_shed_after_reported_at is None
+        ):
+            runtime.pending_post_shed_after_reported_at = time.time()
         runtime.pending_operation_id = raw.get("pending_operation_id") if isinstance(raw.get("pending_operation_id"), str) else None
         last_generation = raw.get("last_shed_load_generation")
-        runtime.last_shed_load_generation = last_generation if isinstance(last_generation, int) and last_generation >= 0 else None
+        runtime.last_shed_load_generation = (
+            0
+            if isinstance(last_generation, int)
+            and not isinstance(last_generation, bool)
+            and last_generation >= 0
+            else None
+        )
         restore_pending = raw.get("pending_post_restore_generation")
         runtime.pending_post_restore_generation = (
-            restore_pending
+            0
             if isinstance(restore_pending, int)
             and not isinstance(restore_pending, bool)
             and restore_pending >= 0
@@ -384,6 +399,11 @@ class RuntimeStore:
         runtime.pending_post_restore_after_reported_at = self._finite_or_none(
             raw.get("pending_post_restore_after_reported_at")
         )
+        if (
+            runtime.pending_post_restore_generation is not None
+            and runtime.pending_post_restore_after_reported_at is None
+        ):
+            runtime.pending_post_restore_after_reported_at = time.time()
         runtime.pending_restore_operation_id = (
             raw.get("pending_restore_operation_id")
             if isinstance(raw.get("pending_restore_operation_id"), str)
@@ -393,7 +413,7 @@ class RuntimeStore:
         runtime.restore_since = None
         last_restore_generation = raw.get("last_restore_load_generation")
         runtime.last_restore_load_generation = (
-            last_restore_generation
+            0
             if isinstance(last_restore_generation, int)
             and not isinstance(last_restore_generation, bool)
             and last_restore_generation >= 0

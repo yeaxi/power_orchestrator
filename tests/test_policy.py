@@ -60,11 +60,12 @@ def test_policy_post_shed_barrier_requires_newer_causal_report() -> None:
         load_generation=3,
         reason_code=ReasonCode.SHED_CUSTOM_THRESHOLD,
     )
-    assert not engine.can_shed_again(3)
+    assert not engine.can_shed_again()
     engine.set_post_shed_fence(10.0)
     assert not engine.reconcile_shed(4, reported_at=10.0)
+    assert not engine.can_shed_again()
     assert engine.reconcile_shed(4, reported_at=11.0)
-    assert engine.can_shed_again(4)
+    assert engine.can_shed_again()
 
 
 def test_policy_mapping_rejects_bad_thresholds() -> None:

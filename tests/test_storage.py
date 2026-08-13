@@ -114,6 +114,14 @@ async def test_resolve_unified_mode_maps_legacy_observe_and_defaults() -> None:
     await live_store.async_load()
     assert live_store.resolve_unified_mode() == "auto"
 
+    off_store = RuntimeStore(FakeStore({"mode": "off", "execution_mode": "live"}))
+    await off_store.async_load()
+    assert off_store.resolve_unified_mode() == "off"
+
+    empty_store = RuntimeStore(FakeStore({}))
+    await empty_store.async_load()
+    assert empty_store.resolve_unified_mode() == "observe"
+
     empty = RuntimeStore(FakeStore())
     await empty.async_load()
     assert empty.resolve_unified_mode() == "observe"
@@ -135,7 +143,7 @@ def test_policy_runtime_round_trip_ignores_removed_reenable_state() -> None:
     store.save_policy_runtime(engine)
     restored = PolicyEngine(policy_for_tests((6500.0, 300.0), (7000.0, 30.0), (8000.0, 5.0)))
     store.restore_policy_runtime(restored, make_model())
-    assert restored.runtime.pending_post_shed_generation == 2
+    assert restored.runtime.pending_post_shed_generation == 0
     assert not hasattr(restored.runtime, "shed_stack")
 
 

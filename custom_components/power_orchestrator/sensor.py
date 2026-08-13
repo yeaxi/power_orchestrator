@@ -61,7 +61,7 @@ class PowerOrchestratorSensorBase(CoordinatorEntity, SensorEntity):  # type: ign
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "Power Orchestrator",
             "manufacturer": "Power Orchestrator",
-            "model": "v0.5.0",
+            "model": "v0.6.0",
         }
 
     @property
@@ -118,6 +118,12 @@ class PowerOrchestratorStatusSensor(PowerOrchestratorSensorBase):
             ),
             "shed_rejection_evaluated_at": (self._coordinator.data or {}).get(
                 "shed_rejection_evaluated_at"
+            ),
+            "pending_restore_ids": list(
+                (self._coordinator.data or {}).get("pending_restore_ids", ())
+            ),
+            "pending_restore_names": list(
+                (self._coordinator.data or {}).get("pending_restore_names", ())
             ),
         }
 

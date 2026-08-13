@@ -1,18 +1,18 @@
 # Troubleshooting
 
-Look at Status, Reason code, Current load, Grid OK, Faulted, and Action journal healthy first.
+Look at Status, Reason code, Current load, Grid OK, Faulted, and Action journal healthy first. Status attributes list `pending_restore_ids` and `pending_restore_names`.
 
 ## `safety_blocked`
 
 Usual causes:
 
 - load sensor missing, unavailable, unknown, negative, or not in `W`/`kW`
-- grid sensor off, missing, or unavailable
-- battery SoC at or below threshold, or invalid
+- grid sensor missing or unavailable
+- battery SoC invalid or unavailable
 - failed or contradictory readback
 - corrupt persisted state
 
-An averaging window cannot make a bad sensor valid.
+An averaging window cannot make a bad sensor valid. Invalid load or unavailable safety telemetry also creates a persistent notification and never calls device services.
 
 ## A load is faulted or quarantined
 
@@ -22,17 +22,19 @@ Missing proof keeps the load blocked on purpose. Restart does not clear a persis
 
 ## Mode did not persist
 
-The config entry must stay loaded and able to write its Store. A failed write keeps the previous safe mode. It does not arm the controller.
+The config entry must stay loaded and able to write its Store. A failed write keeps the previous safe mode. It does not enable Auto.
 
-A new entry starts `off`. Only a valid stored `auto` comes back after restart.
+A new entry starts in `observe`. Only a valid stored `auto`, `observe`, or `off` comes back after restart.
 
 ## Restore did not run
 
-Restore needs all of: global enable, per-load opt-in, `live`, `auto`, and an explicit arm. It only re-enables loads the planner itself shed. It disarms on restart and never restores `climate` loads.
+Automatic restore needs Auto mode, a pending queue entry, confirmed OFF, clear fences, and a continuous 60-second safe-capacity window below the lowest threshold. It restores one load per cycle in reverse shed order. A newer aggregate report is required after each restore.
 
-## `observe` did nothing physical
+A manual ON of a pending load under safe capacity removes it from the queue. Under enforced overload or grid loss, Auto re-sheds it and keeps it queued.
 
-That is the point. `observe` records intended actions and never sends service calls. It is not live evidence.
+## Observe did nothing physical
+
+That is the point. Observe records intended actions and performs zero physical actions, including on grid loss. It is not live evidence.
 
 ## Report a bug
 

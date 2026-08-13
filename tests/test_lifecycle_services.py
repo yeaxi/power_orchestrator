@@ -95,9 +95,68 @@ async def test_setup_and_migration_initialize_registry_and_drop_unknown_fields()
     assert "solar_forecast_entry" not in updated["options"]
     assert "solar_power" not in updated["options"]
     assert "only_from_solar" not in updated["options"]["devices"][0]
-    assert updated["version"] == 3
-    assert updated["minor_version"] == 1
+    assert updated["version"] == 2
+    assert updated["minor_version"] == 3
     assert updated["data"].get("reconfiguration_required") is True
+
+
+@pytest.mark.asyncio
+async def test_migrate_entry_converts_legacy_limits_to_thresholds_v2_3() -> None:
+    """Old max_load and named-tier fields become an explicit thresholds list at v2.3."""
+    updater = MagicMock()
+    hass = SimpleNamespace(config_entries=SimpleNamespace(async_update_entry=updater))
+    entry = SimpleNamespace(
+        entry_id="entry-legacy",
+        version=2,
+        minor_version=1,
+        data={
+            "load_sensor": "sensor.load",
+            "max_load": 5000,
+            "hysteresis": 100,
+            "hard_interlock": 9000,
+            "safety_reserve": 500,
+            "restore_enabled": True,
+            "restore_threshold": 4000,
+            "restore_hysteresis": 100,
+            "restore_dwell": 60,
+            "restore_cooldown": 120,
+            "devices": [
+                {
+                    "device_id": "d1",
+                    "entity": "switch.d1",
+                    "expected_power": 1000,
+                    "restore_enabled": True,
+                }
+            ],
+        },
+        options={
+            "shed_sustained_limit": 6000,
+            "shed_sustained_duration": 300,
+            "execution_mode": "live",
+        },
+    )
+    assert await integration.async_migrate_entry(hass, entry) is True
+    updated = updater.call_args.kwargs
+    assert updated["version"] == 2
+    assert updated["minor_version"] == 3
+    assert updated["data"]["thresholds"] == [{"power_limit": 6000.0, "duration_s": 300.0}]
+    for key in (
+        "max_load",
+        "hysteresis",
+        "hard_interlock",
+        "safety_reserve",
+        "restore_enabled",
+        "restore_threshold",
+        "restore_hysteresis",
+        "restore_dwell",
+        "restore_cooldown",
+        "shed_sustained_limit",
+        "execution_mode",
+    ):
+        assert key not in updated["data"]
+        assert key not in updated["options"]
+    assert "restore_enabled" not in updated["data"]["devices"][0]
+    assert "reconfiguration_required" not in updated["data"]
 
 
 @pytest.mark.asyncio

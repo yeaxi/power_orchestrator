@@ -393,10 +393,9 @@ class PolicyEngine:
         else:
             self.runtime.pending_post_shed_after_reported_at = reported_at
 
-    def can_shed_again(self, load_generation: int) -> bool:
-        """Require an aggregate report newer than the last confirmed shed."""
-        pending = self.runtime.pending_post_shed_generation
-        return pending is None or load_generation > pending
+    def can_shed_again(self) -> bool:
+        """Block another shed until causal aggregate reconciliation completes."""
+        return self.runtime.pending_post_shed_generation is None
 
     def reconcile_shed(self, load_generation: int, *, reported_at: float | None) -> bool:
         """Release the barrier only after both causal state reports are confirmed."""

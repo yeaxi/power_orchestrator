@@ -321,12 +321,6 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._append_load_sample(load)
             pending = self._policy_engine.runtime.pending_post_shed_generation
             if pending is not None:
-                if self._policy_engine.runtime.pending_post_shed_after_reported_at is None:
-                    self._policy_engine.set_post_shed_fence(
-                        self._last_confirmed_reported_at.get(
-                            self._policy_engine.runtime.pending_operation_id or ""
-                        )
-                    )
                 self._policy_engine.reconcile_shed(
                     self._load_generation,
                     reported_at=self._load_reported_at,
@@ -406,7 +400,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
         if decision.triggered:
             self._status = STATUS_LOAD_SHEDDING
-            if not self._policy_engine.can_shed_again(self._load_generation):
+            if not self._policy_engine.can_shed_again():
                 self._last_action = "Waiting for a newer aggregate report after the previous shed"
                 return
             await self._perform_shedding(max(current, average), decision=decision)
@@ -1409,6 +1403,13 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         if device_id in self._pending_restore:
             self._pending_restore.remove(device_id)
 
+    def _pending_restore_names(self) -> list[str]:
+        names: list[str] = []
+        for device_id in self._pending_restore:
+            device = self._model.get_device(device_id)
+            names.append(device.name if device is not None else device_id)
+        return names
+
     def restore_policy_runtime(self, runtime: Any) -> None:
         """Compatibility hook for callers that restore through the store."""
         del runtime
@@ -1509,7 +1510,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             "restore_commands_allowed": self.restore_commands_allowed,
             "restore_barrier_pending": self._policy_engine.runtime.pending_post_restore_generation
             is not None,
-            "planner_shed_devices": list(self._pending_restore),
+            "pending_restore_ids": list(self._pending_restore),
+            "pending_restore_names": self._pending_restore_names(),
             "reconfiguration_required": self._reconfiguration_required,
             "last_operation_id": self._last_operation_id,
             "last_operation_result": self._last_operation_result,

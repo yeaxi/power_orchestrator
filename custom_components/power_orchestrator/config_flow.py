@@ -302,8 +302,8 @@ def _prepare_options_submission(
 class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
     """Five-step onboarding flow for load shedding and safety sources."""
 
-    VERSION = 3
-    MINOR_VERSION = 1
+    VERSION = 2
+    MINOR_VERSION = 3
 
     def __init__(self) -> None:
         self._discovered: dict[str, Any] = {}

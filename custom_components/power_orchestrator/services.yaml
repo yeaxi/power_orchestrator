@@ -5,11 +5,11 @@ force_evaluate:
 
 set_mode:
   name: Set mode
-  description: "Persist the controller mode. Auto permits guarded physical shedding and automatic restore of pending loads; Observe evaluates and records intended actions without physical services; Off disables normal shedding. Off and Observe never call physical services, including emergency paths."
+  description: "Persist the controller mode. Auto permits guarded physical shedding and automatic restore of pending loads. Observe evaluates and records intended actions without physical services. Off disables normal shedding. Off and Observe never call physical services, including grid-loss paths."
   fields:
     mode:
       name: Mode
-      description: "Auto may issue guarded physical OFF/ON commands. Observe evaluates and audits only. Off disarms normal policy decisions."
+      description: "Auto may issue guarded physical OFF and ON commands for pending restore. Observe evaluates and audits only. Off disarms normal policy decisions."
       required: true
       selector:
         select:
