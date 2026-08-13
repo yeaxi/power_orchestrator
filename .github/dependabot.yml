@@ -1,0 +1,24 @@
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
+    labels: ["dependencies"]
+
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
+    labels: ["dependencies"]
+    # Home Assistant and its pytest plugin are a matched pair, and bumping the
+    # floor is a supported-version decision rather than a dependency refresh.
+    # Both move by hand together with hacs.json and the hassfest image tag.
+    ignore:
+      - dependency-name: homeassistant
+      - dependency-name: pytest-homeassistant-custom-component

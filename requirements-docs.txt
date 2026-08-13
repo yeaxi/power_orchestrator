@@ -1,0 +1,3 @@
+# Pinned so a MkDocs release cannot break `mkdocs build --strict` on an
+# unchanged commit.
+mkdocs-material==9.7.7

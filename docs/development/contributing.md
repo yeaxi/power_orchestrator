@@ -13,9 +13,13 @@ Python 3.14 is required. CI pins 3.14.2. Use `uv` and the repo `.venv`.
 ```bash
 uv venv --python 3.14.2 .venv
 source .venv/bin/activate
-uv pip install pytest pytest-asyncio voluptuous PyYAML coverage mypy ruff \
-  homeassistant==2026.7.4 pytest-homeassistant-custom-component==0.13.348
+uv pip install -r requirements-ci.txt
 ```
+
+`requirements-ci.txt` pins every tool version, and CI installs the same file, so
+a gate cannot pass locally and fail in CI because of a tool release. `homeassistant`
+and `pytest-homeassistant-custom-component` move together, and the same Home
+Assistant version appears in `hacs.json`.
 
 ## Local gates
 
@@ -35,7 +39,7 @@ Coverage fails under 75% (`pyproject.toml`).
 Build docs before you merge doc changes:
 
 ```bash
-python -m pip install mkdocs-material
+python -m pip install -r requirements-docs.txt
 mkdocs build --strict
 ```
 

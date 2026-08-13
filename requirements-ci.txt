@@ -1,0 +1,21 @@
+# Exact versions for every local and CI gate.
+#
+# CI installs this file instead of resolving latest releases, so a new tool
+# release cannot change a gate's verdict on an unchanged commit. Bump versions
+# in a dedicated commit and let the gates prove the bump.
+#
+# homeassistant and pytest-homeassistant-custom-component move together: each
+# plugin release targets one Home Assistant version. The same Home Assistant
+# version is pinned in hacs.json (minimum supported) and in the hassfest image
+# tag used by .github/workflows/validate.yml.
+homeassistant==2026.7.4
+pytest-homeassistant-custom-component==0.13.348
+
+pytest==9.0.3
+pytest-asyncio==1.4.0
+voluptuous==0.15.2
+PyYAML==6.0.3
+
+coverage==7.14.1
+mypy==2.3.0
+ruff==0.16.2
