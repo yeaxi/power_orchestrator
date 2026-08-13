@@ -17,7 +17,7 @@ quality = ["coverage[toml]", "mypy", "ruff"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["custom_components"]
+pythonpath = ["custom_components", "scripts"]
 asyncio_mode = "auto"
 
 [tool.ruff]

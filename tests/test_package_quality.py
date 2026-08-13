@@ -101,6 +101,28 @@ def test_pyproject_and_ci_define_the_local_quality_gate():
     assert "tests_real_ha" in workflow
 
 
+def test_release_pipeline_publishes_the_asset_hacs_downloads():
+    """hacs.json promises a release zip, so a tagged release has to produce one."""
+    hacs = json.loads((ROOT / "hacs.json").read_text())
+    release = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+
+    assert "tags:" in release
+    assert "build_release_zip.py" in release
+    assert hacs["filename"] in release
+    assert "contents: write" in release
+    assert "./.github/workflows/ci.yml" in release
+    assert "./.github/workflows/validate.yml" in release
+
+
+def test_ecosystem_validation_runs_in_ci():
+    validate = (ROOT / ".github" / "workflows" / "validate.yml").read_text()
+    hass_version = json.loads((ROOT / "hacs.json").read_text())["homeassistant"]
+
+    assert f"ghcr.io/home-assistant/hassfest:{hass_version}" in validate
+    assert "hacs/action" in validate
+    assert "category: integration" in validate
+
+
 def test_controlled_ha_verification_procedure_is_present():
     procedure = (ROOT / "docs" / "development" / "verification.md").read_text()
     for heading in (

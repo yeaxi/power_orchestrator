@@ -18,8 +18,9 @@ uv pip install -r requirements-ci.txt
 
 `requirements-ci.txt` pins every tool version, and CI installs the same file, so
 a gate cannot pass locally and fail in CI because of a tool release. `homeassistant`
-and `pytest-homeassistant-custom-component` move together, and the same Home
-Assistant version appears in `hacs.json`.
+and `pytest-homeassistant-custom-component` move together; the same Home Assistant
+version appears in `hacs.json` and in the hassfest image tag in
+`.github/workflows/validate.yml`.
 
 ## Local gates
 
@@ -36,6 +37,10 @@ python -m pytest -c pytest_real_ha.ini tests_real_ha -q
 
 Coverage fails under 75% (`pyproject.toml`).
 
+Two more gates run on GitHub and need Docker or GitHub API access, so they are not
+part of the local loop: hassfest and HACS validation
+(`.github/workflows/validate.yml`). Both also run on every pull request.
+
 Build docs before you merge doc changes:
 
 ```bash
@@ -50,3 +55,5 @@ One logical change per PR. Run the gates above. Do not commit `.venv`, caches, H
 Git checkpoint and rollback steps: [Git workflow](git-workflow.md).
 
 Live Home Assistant verification is a separate, explicitly approved procedure: [Verification](verification.md).
+
+Publishing a version: [Release](release.md).
