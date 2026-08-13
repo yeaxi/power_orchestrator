@@ -125,8 +125,23 @@ def test_invalid_load_numeric_entities_are_unavailable() -> None:
     coordinator.status = "safety_blocked"
     coordinator.mode = "auto"
     coordinator.grid_ok = True
+    coordinator.grid_safety_source_configured = True
+    coordinator.grid_safety_source_available = True
     coordinator.startup_safe = True
     coordinator.last_action = "blocked"
+    coordinator.data = {
+        "faulted_devices": [],
+        "quarantined_devices": [],
+        "fault_reasons": {},
+        "safety_fault_reason": None,
+        "shed_rejection_counts": {},
+        "shed_rejection_total": 0,
+        "shed_rejection_truncated": 0,
+        "shed_rejection_devices": [],
+        "shed_rejection_evaluated_at": None,
+        "pending_restore_ids": [],
+        "pending_restore_names": [],
+    }
     entry = SimpleNamespace(entry_id="entry-1")
     for entity in (
         PowerOrchestratorCurrentLoadSensor(coordinator, entry),
@@ -137,7 +152,39 @@ def test_invalid_load_numeric_entities_are_unavailable() -> None:
         assert entity.native_value is None
     status_attributes = PowerOrchestratorStatusSensor(coordinator, entry).extra_state_attributes
     assert status_attributes["load_sensor_reason"] == "unsupported_unit"
+    assert status_attributes["pending_restore_ids"] == []
     assert "automatic_reenable" not in status_attributes
+    assert "execution_mode" not in status_attributes
+
+
+def test_status_attributes_expose_pending_restore_ids_and_names() -> None:
+    coordinator = MagicMock()
+    coordinator.status = "monitoring"
+    coordinator.mode = "auto"
+    coordinator.grid_ok = True
+    coordinator.grid_safety_source_configured = True
+    coordinator.grid_safety_source_available = True
+    coordinator.load_sensor_valid = True
+    coordinator.load_sensor_reason = "ok"
+    coordinator.startup_safe = True
+    coordinator.data = {
+        "faulted_devices": [],
+        "quarantined_devices": [],
+        "fault_reasons": {},
+        "safety_fault_reason": None,
+        "shed_rejection_counts": {},
+        "shed_rejection_total": 0,
+        "shed_rejection_truncated": 0,
+        "shed_rejection_devices": [],
+        "shed_rejection_evaluated_at": None,
+        "pending_restore_ids": ["boiler", "dryer"],
+        "pending_restore_names": ["Test boiler", "Test dryer"],
+    }
+    attributes = PowerOrchestratorStatusSensor(
+        coordinator, SimpleNamespace(entry_id="entry-1")
+    ).extra_state_attributes
+    assert attributes["pending_restore_ids"] == ["boiler", "dryer"]
+    assert attributes["pending_restore_names"] == ["Test boiler", "Test dryer"]
 
 
 def test_grid_ok_sensor_availability_tracks_source_semantic_availability() -> None:

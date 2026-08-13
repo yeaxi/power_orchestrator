@@ -21,7 +21,7 @@ Energy Dashboard discovery is optional. It never authorizes a physical action.
 4. Restart Home Assistant.
 5. Open **Settings → Devices & Services → Add Integration → Power Orchestrator**.
 
-Leave planner mode `off` and execution mode `observe` until you have checked entity IDs, limits, and shedding order.
+Leave mode in **Observe** until you have checked entity IDs, thresholds, and shedding order.
 
 HACS installs and updates from published releases, so it lists released versions
 rather than `main`. Updates arrive the same way: HACS offers the new version once
@@ -33,7 +33,7 @@ a release is published, and you restart Home Assistant to load it.
 2. Restart Home Assistant.
 3. Add the integration from **Settings → Devices & Services**.
 
-Same first-run rule: `off` and `observe` until you are ready.
+Same first-run rule: stay in **Observe** until you are ready for Auto.
 
 ## After install
 

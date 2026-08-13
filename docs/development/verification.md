@@ -1,173 +1,181 @@
-# Power Orchestrator — контрольована HA verification procedure
+# Power Orchestrator — controlled HA verification procedure
 
-Цей документ описує **майбутню контрольовану перевірку** інтеграції. Він не є дозволом на deployment і не виконує live-дій.
+This document describes a future controlled verification of the integration. It is not permission to deploy and does not perform live actions.
 
-> **Safety boundary:** без окремого явного дозволу не виконувати deploy, reload, restart, запис у live config/storage або будь-які фізичні `turn_off` service calls. Локальні тести використовують mocks.
+> **Safety boundary:** without separate explicit approval, do not deploy, reload, restart, write live config or storage, or issue physical `turn_off` / `turn_on` service calls. Local tests use mocks or an in-process Home Assistant runtime.
 
-## 1. Мета та критерій успіху
+## 1. Goal and success criteria
 
-Перевірити, що інтеграція працює **лише як load-shedding controller**:
+Verify that the integration works only as a load-shedding controller with automatic restore:
 
-- конфігурація приймає aggregate load, safety source та optional loads;
-- `auto`/`off` і `observe`/`live` мають чіткі межі;
-- перевищення ліміту виконує bounded stop з readback;
-- аварійний grid/battery стан виконує all-stop path;
-- invalid aggregate/device input не authorizes ordinary physical action; unavailable/off grid source дозволяє лише emergency stop path для відомих ON loads;
-- після restart валідний persisted mode відновлюється без безумовного скидання;
-- немає PV/forecast admission та normal enable never-shed loads;
-- guarded restore (якщо enabled+armed) re-enable лише planner-shed loads з causal ON readback.
+- configuration accepts aggregate load, safety source, optional loads, and explicit thresholds;
+- one mode select (`off` / `observe` / `auto`) has clear boundaries;
+- Observe performs zero physical actions, including on grid loss;
+- a held threshold performs a bounded stop with readback;
+- grid or battery loss in Auto performs the all-stop path and queues pending restore;
+- invalid aggregate or unavailable safety input creates a persistent notification and never calls device services;
+- after reload, valid persisted mode and the pending-restore queue return;
+- there is no PV or forecast admission and no normal enable of never-shed loads;
+- automatic restore re-enables pending loads one by one after a 60-second safe-capacity window, in reverse shed order, with causal ON readback.
 
-В integration немає **no normal automatic enabling** never-shed навантажень: її фізична action surface — stop плюс fail-closed guarded restore (off by default, per-load opt-in, лише при `live` + explicit arming, planner-shed only, без climate). Verify окремо: (1) restore не спрацьовує поки не armed; (2) armed restore re-enable лише load, який shed сам planner, і лише коли load ≤ restore ceiling протягом restore dwell; (3) manual re-enable знімає restore claim; (4) restore ніколи не конфліктує з shed/emergency.
+There is **no normal automatic enabling** of never-shed loads. The physical action surface is stop plus automatic restore of the pending queue.
 
-Успіх означає, що всі обов'язкові перевірки нижче пройдені, кожна дозволена фізична дія має очікуваний readback, а жоден небезпечний або невизначений input не призводить до normal action.
+Success means every required check below passes, every allowed physical action has the expected readback, and no unsafe or undefined input leads to a normal action.
 
-## 2. Передумови та approval gates
+## 2. Prerequisites and approval gates
 
-### Обов'язково до live-сесії
+### Required before a live session
 
-- [ ] Є explicit approval на окрему live UI verification session.
-- [ ] Обрано лише non-critical/test loads або підготовлено безпечне вікно.
-- [ ] Зафіксовано entity IDs, automations і попередню конфігурацію.
-- [ ] Визначено оператора, який може фізично вимкнути навантаження вручну.
-- [ ] Є rollback procedure.
-- [ ] Для safety тестів доступні test sensors/helpers.
+- [ ] Explicit approval exists for a separate live UI verification session.
+- [ ] Only non-critical or test loads are selected, or a safe window is prepared.
+- [ ] Entity IDs, automations, and prior configuration are recorded.
+- [ ] An operator can physically turn loads off by hand.
+- [ ] A rollback procedure exists.
+- [ ] Test sensors or helpers are available for safety cases.
 
-### Заборонено без окремого дозволу
+### Forbidden without separate approval
 
-- [ ] `ha core restart`, reload integration або reload config entry.
-- [ ] Зміна live dashboard, battery sensors або фізичних навантажень.
-- [ ] Ручне редагування `.storage` під час запущеного HA.
-- [ ] Видалення старих automations/packages до завершення спостереження.
+- [ ] `ha core restart`, reload integration, or reload config entry.
+- [ ] Change of live dashboard, battery sensors, or physical loads.
+- [ ] Manual edits to `.storage` while Home Assistant is running.
+- [ ] Removal of old automations or packages before observation ends.
 
 ## 3. Installation/package check
 
-Виконувати лише після approval на installation; це не замінює локальні тести.
+Run only after approval for installation. This does not replace local tests.
 
-1. Перевірити manifest, version, domain і package layout.
-2. Встановити integration, не активуючи фізичне керування.
-3. Переконатися, що package не містить credentials, tokens або connection strings.
-4. Залишити planner mode `off`, execution mode `observe`.
+1. Check manifest, version, domain, and package layout.
+2. Install the integration without enabling physical control.
+3. Confirm the package contains no credentials, tokens, or connection strings.
+4. Leave mode in `observe`.
 
-**Очікування:** package приймається Home Assistant/HACS, config flow доступний, фізичні service calls не виконуються під час installation.
+**Expectation:** Home Assistant or HACS accepts the package, the config flow is available, and no physical service calls run during installation.
 
 ## 4. Config flow walkthrough
 
-Перевірити:
+Check that:
 
-- Energy Dashboard discovery є optional і не є safety permit;
-- aggregate load sensor є обов'язковим;
-- safety source можна налаштувати як grid sensor або battery threshold;
-- custom load має controllable entity, expected power, optional power sensor і actuator group;
-- priority/pause поля мають inline descriptions;
-- відсутні PV, forecast, generation, normal-enable або automatic-re-enable поля;
-- duplicate/invalid devices і missing safety source відхиляються.
+- Energy Dashboard discovery is optional and is not a safety permit;
+- aggregate load sensor is required;
+- safety source can be a grid sensor or a battery threshold;
+- custom load has a controllable entity, expected power, optional power sensor, and actuator group;
+- priority and pause fields have inline descriptions;
+- thresholds are an explicit increasing list with dwell times;
+- PV, forecast, generation, and deleted limit or restore-control fields are absent;
+- duplicate or invalid devices and a missing safety source are rejected.
 
-**Очікування:** config flow не змінює state жодного навантаження.
+**Expectation:** the config flow does not change the state of any load.
 
 ## 5. Entity and device verification
 
-Після створення entry перевірити один device **Power Orchestrator** і config-entry-scoped unique IDs для:
+After creating the entry, confirm one device **Power Orchestrator** and config-entry-scoped unique IDs for:
 
-- status;
-- current/average load;
+- status, including `pending_restore_ids` and `pending_restore_names`;
+- current and average load;
 - available capacity;
-- last action/operation;
-- execution mode/reason code;
+- last action and last operation;
+- reason code;
 - Grid OK;
 - Faulted;
 - Action journal healthy;
-- mode select з опціями `auto`, `off`.
+- mode select with options `auto`, `observe`, `off`.
 
-Перевірити, що новий entry є `off` до першої evaluation, а лише валідний persisted mode може відновити `auto` після reload/restart.
+Confirm a new entry starts in `observe`, and only a valid persisted mode can restore `auto` after reload or restart.
 
 ## 6. Safe runtime checks
 
-Спочатку використовувати mocks/helpers або non-critical test load. Після кожного кроку перевіряти status, reason code, last action і фактичний actuator state.
+Start with mocks, helpers, or a non-critical test load. After each step, check status, reason code, last action, pending restore attributes, and the real actuator state.
 
-| Input/event | Очікуваний результат | Заборонений результат |
+| Input/event | Expected result | Forbidden result |
 |---|---|---|
-| Available valid grid `on`, valid load | Безпечна evaluation без фізичної дії | Нормальне automatic enabling |
-| Load `unknown`, unavailable, NaN, negative, wrong unit | `safety_blocked`; sample не стає `0 W` | Дозволена дія |
-| Grid `off`, missing або unavailable | Emergency stop path; bounded stop attempt | Залишити відомий активний load без stop attempt |
-| Battery SoC at/below threshold або unavailable | Grid-loss/safety behavior | Дозволена normal дія |
-| Valid load above limit | Один lowest-priority known-on load shed | Batch shedding або re-enable |
-| Mode `off` | Немає ordinary physical action | Mode bypass |
-| Mode `off` + emergency state | Emergency handling залишається активним | `off` вимикає safety stop |
-| Service error/readback failure | Unknown/faulted/safety-blocked state | Claim success без readback |
+| Available valid grid `on`, valid load | Safe evaluation without physical action | Normal automatic enabling of a never-shed load |
+| Load `unknown`, unavailable, NaN, negative, wrong unit | `safety_blocked`; persistent notification; sample does not become `0 W` | Allowed device service call |
+| Unavailable safety source | `safety_blocked`; persistent notification | Treated as confirmed grid loss |
+| Grid `off` in Auto | Emergency stop path; pending queue updated | Leave a known-on load without a stop attempt |
+| Battery SoC at or below threshold, or unavailable | Grid-loss or safety-blocked behavior | Allowed normal action |
+| Valid load above a zero-dwell threshold in Auto | One lowest-priority known-on load shed | Batch shedding |
+| Valid load above a non-zero dwell before it matures | No shed yet | Premature shed |
+| Safe capacity for 60 s with pending loads in Auto | One restore per cycle in reverse shed order | Immediate restore or out-of-order restore |
+| Manual ON of a pending load under safe capacity | Accepted; removed from queue | Left pending without notice |
+| Manual ON of a pending load under enforced overload | Re-shed; remains queued | Accepted while overload is enforced |
+| Mode `observe` during overload or grid loss | Recorded intent only; zero physical actions | Any device service call |
+| Mode `off` | No ordinary physical action | Mode bypass |
+| Service error or readback failure | Unknown, faulted, or safety-blocked state | Claim success without readback |
 
-Нормальний stop — не більше одного за evaluation cycle. Emergency all-stop є окремим дозволеним винятком.
+A normal stop is at most one per evaluation cycle. Emergency all-stop is a separate allowed exception in Auto.
 
-## 7. Pause, restart and options lifecycle
+## 7. Pause, restart, and options lifecycle
 
-У controlled/test environment:
+In a controlled or test environment:
 
-1. Створити overload і перевірити bounded stop.
-2. Перевірити pause timestamp та відсутність будь-якого automatic re-enable.
-3. Встановити mode `auto`, переконатися, що storage записав його.
-4. Виконати окремо approved restart test.
-5. Перевірити, що mode `auto` відновився до першої evaluation і не був скинутий у `off` без причини.
-6. Перевірити, що missing/corrupt/invalid persisted data дає safe `off`.
-7. Перевірити Options/Reconfigure і guarded reload.
+1. Create an overload and confirm a bounded stop.
+2. Confirm the pending-restore queue and Status attributes.
+3. Set mode `auto` and confirm storage wrote it.
+4. Run a separately approved reload or restart test.
+5. Confirm mode `auto` and the pending queue returned.
+6. Confirm missing, corrupt, or invalid persisted data yields safe `observe` or `off`.
+7. Confirm Options or Reconfigure and a guarded reload.
 
-Не редагувати HA storage вручну під час запущеного HA.
+Do not edit Home Assistant storage by hand while Home Assistant is running.
 
 ## 8. Services and manual override
 
-Після окремого service-test approval:
+After separate service-test approval:
 
-- перевірити `set_mode` лише для `auto`/`off`;
-- перевірити reject missing/invalid mode до виконання handler;
-- викликати `force_evaluate` і перевірити entity update;
-- викликати `request_stop` для відомого device;
-- перевірити, що readback failure залишає device unknown/faulted;
-- перевірити `clear_quarantine` лише після незалежних verified OFF/load/readback доказів;
-- перевірити відсутність будь-якого service, що додає або запускає навантаження;
-- після unload перевірити, що integration services видалені з registry.
+- check `set_mode` for `auto`, `observe`, and `off`;
+- reject missing or invalid mode before the handler runs;
+- call `force_evaluate` and check entity update;
+- call `request_stop` for a known device and confirm it joins the pending queue;
+- confirm readback failure leaves the device unknown or faulted;
+- check `clear_quarantine` only after independent verified OFF, load, and readback evidence;
+- confirm there is no service that starts a never-shed load;
+- after unload, confirm integration services are removed from the registry.
 
 ## 9. Rollback
 
-Зупинити перевірку і виконати rollback, якщо:
+Stop the check and roll back if:
 
-- unknown/unavailable input призводить до звичайної physical action;
-- readback не відповідає command, але integration повідомляє success;
-- більше одного ordinary action відбувається за цикл;
-- `off` обходиться;
-- emergency stop не створює safety-blocked state;
-- після unload залишаються listeners/services.
+- unknown or unavailable input leads to an ordinary physical action;
+- readback does not match the command but the integration reports success;
+- more than one ordinary action happens per cycle;
+- `off` or `observe` is bypassed;
+- emergency stop in Auto does not attempt stops for known-on loads;
+- listeners or services remain after unload.
 
-Rollback sequence лише з approval:
+Rollback sequence only with approval:
 
-1. Встановити mode `off`.
-2. Зупинити config entry та незалежно перевірити фізичні loads.
-3. Відновити попередній відомий пакет/config path.
-4. Reload/restart виконати лише за approved operational procedure.
-5. Зафіксувати status, reason, action, entity ID і timestamp без credentials.
+1. Set mode `off`.
+2. Stop the config entry and independently check physical loads.
+3. Restore the previous known package or config path.
+4. Reload or restart only under an approved operational procedure.
+5. Record status, reason, action, entity ID, and timestamp without credentials.
 
 ## 10. Evidence record
 
-Для кожної approved session записати:
+For each approved session, record:
 
-- Home Assistant та integration version;
+- Home Assistant and integration version;
 - config-entry ID;
-- load/safety source entity IDs;
-- configured loads, names, priorities, expected powers;
+- load and safety source entity IDs;
+- configured loads, names, priorities, expected powers, and thresholds;
 - entity unique IDs;
-- test case, timestamp, expected/observed result;
-- чи відбулася physical дія;
-- rollback decision та approval.
+- test case, timestamp, expected and observed result;
+- whether a physical action occurred;
+- rollback decision and approval.
 
-Ніколи не включати passwords, API keys, tokens, cookies, connection strings або private credentials.
+Never include passwords, API keys, tokens, cookies, connection strings, or private credentials.
 
 ## 11. Current local verification status
 
-Локальний non-live gate має покривати:
+The local non-live gate must cover:
 
-- повний mocked regression suite;
+- full unit regression suite;
+- real in-process Home Assistant behavior and loader suite;
 - Python compilation;
 - JSON resource validation;
-- YAML parsing для `services.yaml` і CI workflow;
-- config/options flow;
-- safety, availability, readback, mode persistence та service lifecycle;
-- static scan, який забороняє PV/forecast/admission/normal-enable surface.
+- YAML parsing for `services.yaml` and CI workflow;
+- config and options flow;
+- safety, availability, readback, mode persistence, pending-restore persistence, and service lifecycle;
+- static scan that forbids PV, forecast, admission, and normal-enable surfaces.
 
-Цей документ описує майбутню перевірку і **not a substitute for the controlled live HA verification**.
+This document describes future verification and is **not a substitute for the controlled live HA verification**.

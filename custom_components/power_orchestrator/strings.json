@@ -3,15 +3,15 @@
   "services": {
     "force_evaluate": {
       "name": "Force evaluate",
-      "description": "Run an immediate evaluation; safety gates and execution policy are not bypassed."
+      "description": "Run an immediate evaluation. Safety gates and mode policy are not bypassed."
     },
     "set_mode": {
       "name": "Set mode",
-      "description": "Auto permits guarded physical shedding; Observe evaluates and records intended actions without physical services; Off disables normal shedding. Off and Observe never call physical services, including emergency paths.",
+      "description": "Persist the controller mode. Auto permits guarded physical shedding and automatic restore of pending loads. Observe evaluates and records intended actions without physical services. Off disables normal shedding. Off and Observe never call physical services, including grid-loss paths.",
       "fields": {
         "mode": {
           "name": "Mode",
-          "description": "Auto may issue guarded physical OFF commands. Observe evaluates and audits only. Off disarms normal policy decisions."
+          "description": "Auto may issue guarded physical OFF and ON commands for pending restore. Observe evaluates and audits only. Off disarms normal policy decisions."
         }
       }
     },
@@ -79,7 +79,7 @@
           "add_threshold": "Add another threshold"
         },
         "data_description": {
-          "threshold_power": "The power limit must be greater than the previous threshold and must not exceed the safety interlock.",
+          "threshold_power": "The power limit must be greater than the previous threshold.",
           "threshold_duration": "How many seconds the available load must continuously remain above this threshold.",
           "add_threshold": "After saving this step, open another step; the list is not limited to ten fixed positions."
         }
@@ -102,8 +102,8 @@
           "add_custom_device": "If enabled, opens a control-mapping form after discovery so you can add a switch, light, or input_boolean manually.",
           "entity": "The actual on/off control entity that the integration may command. This is the physical service target and must be a switch, light, or input_boolean.",
           "name": "Friendly name shown in entities, priorities, notifications, and logs. Leave it empty to keep the discovered or Home Assistant name.",
-          "expected_power": "Expected load in watts used to estimate the effect of shedding. It is planning telemetry only and never authorizes an activation.",
-          "power_sensor": "Measured device-power sensor used for telemetry and readback. Available non-negative readings are never used to authorize an activation.",
+          "expected_power": "Expected load in watts used to estimate the effect of shedding. It is planning telemetry only and never turns a load on.",
+          "power_sensor": "Measured device-power sensor used for telemetry and readback. Available non-negative readings are never used to turn a load on.",
           "actuators": "Optional additional entities in the same logical load group, such as a climate entity paired with a switch. Every actuator must provide causal readback; partial, unknown, or unavailable group state is fail-closed and cannot confirm ON or OFF.",
           "add_another": "Controls only the custom-device form loop. It has no runtime effect; enable it to configure another custom device before assigning priorities."
         }
@@ -321,15 +321,6 @@
     },
     "missing_device_id": {
       "message": "A logical device ID is required."
-    },
-    "restore_authorization_failed": {
-      "message": "Arming guarded restore failed: {reason}."
-    },
-    "restore_request_failed": {
-      "message": "The guarded restore request failed: {reason}."
-    },
-    "restore_requires_confirmation": {
-      "message": "Guarded restore requires explicit confirmation."
     },
     "request_rejected": {
       "message": "The request was rejected: {reason}."

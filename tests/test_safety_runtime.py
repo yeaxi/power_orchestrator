@@ -354,3 +354,43 @@ def test_custom_policy_is_bounded_and_shedding_only() -> None:
     assert policy.thresholds[0].limit_w == 1000
     assert policy.thresholds[0].duration_s == 1
     assert not hasattr(policy, "forecast_entity")
+
+
+@pytest.mark.asyncio
+async def test_telemetry_notification_dedupes_and_dismisses() -> None:
+    """Same telemetry reason is not recreated; recovery dismisses the notification."""
+    coordinator = _coordinator()
+    await coordinator._ensure_telemetry_notification("load_unknown")
+    await coordinator._ensure_telemetry_notification("load_unknown")
+    create_calls = [
+        call
+        for call in coordinator.hass.services.async_call.await_args_list
+        if call.args[:2] == ("persistent_notification", "create")
+    ]
+    assert len(create_calls) == 1
+    assert coordinator._telemetry_notification_active is True
+
+    await coordinator._ensure_telemetry_notification("safety_telemetry_unavailable")
+    create_calls = [
+        call
+        for call in coordinator.hass.services.async_call.await_args_list
+        if call.args[:2] == ("persistent_notification", "create")
+    ]
+    assert len(create_calls) == 2
+
+    await coordinator._dismiss_telemetry_notification()
+    dismiss_calls = [
+        call
+        for call in coordinator.hass.services.async_call.await_args_list
+        if call.args[:2] == ("persistent_notification", "dismiss")
+    ]
+    assert len(dismiss_calls) == 1
+    assert coordinator._telemetry_notification_active is False
+
+    await coordinator._dismiss_telemetry_notification()
+    dismiss_calls = [
+        call
+        for call in coordinator.hass.services.async_call.await_args_list
+        if call.args[:2] == ("persistent_notification", "dismiss")
+    ]
+    assert len(dismiss_calls) == 1

@@ -119,6 +119,12 @@ class PowerOrchestratorStatusSensor(PowerOrchestratorSensorBase):
             "shed_rejection_evaluated_at": (self._coordinator.data or {}).get(
                 "shed_rejection_evaluated_at"
             ),
+            "pending_restore_ids": list(
+                (self._coordinator.data or {}).get("pending_restore_ids", ())
+            ),
+            "pending_restore_names": list(
+                (self._coordinator.data or {}).get("pending_restore_names", ())
+            ),
         }
 
 

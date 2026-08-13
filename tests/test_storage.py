@@ -114,6 +114,14 @@ async def test_resolve_unified_mode_maps_legacy_observe_and_defaults() -> None:
     await live_store.async_load()
     assert live_store.resolve_unified_mode() == "auto"
 
+    off_store = RuntimeStore(FakeStore({"mode": "off", "execution_mode": "live"}))
+    await off_store.async_load()
+    assert off_store.resolve_unified_mode() == "off"
+
+    empty_store = RuntimeStore(FakeStore({}))
+    await empty_store.async_load()
+    assert empty_store.resolve_unified_mode() == "observe"
+
     empty = RuntimeStore(FakeStore())
     await empty.async_load()
     assert empty.resolve_unified_mode() == "observe"

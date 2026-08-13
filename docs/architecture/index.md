@@ -1,6 +1,6 @@
 # Architecture
 
-Power Orchestrator is a bounded load-shedding controller. Policy, ownership, safety gates, and physical actions stay separate.
+Power Orchestrator is a bounded load-shedding controller. Policy, safety gates, and physical actions stay separate.
 
 The [load-shedding specification](power-orchestrator-spec.md) is the project contract. It does not authorize live cutover, Home Assistant service calls, or physical actions.
 

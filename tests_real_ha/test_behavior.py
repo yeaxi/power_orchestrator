@@ -6,13 +6,14 @@ These exercise the actual load-shedding behavior end-to-end against a real
 - overload shed issues a bounded physical OFF with readback;
 - grid loss triggers the emergency all-stop path;
 - observe mode records an intended action but never calls a physical service;
-- planner auto mode persists across a config-entry reload;
-- automatic restore re-enables a pending load after a safe-capacity window.
+- auto mode and the pending-restore queue persist across a config-entry reload;
+- automatic restore re-enables pending loads after a safe-capacity window.
 """
 
 from __future__ import annotations
 
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -32,12 +33,16 @@ from power_orchestrator.const import (
     DOMAIN,
     GRID_LOSS_MODE_SENSOR,
 )
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_get_persistent_notifications,
+)
 
 REPO = Path(__file__).parents[1]
 LOAD_SENSOR = "sensor.test_load"
 GRID_SENSOR = "binary_sensor.test_grid"
 ACTUATOR = "input_boolean.test_boiler"
+ACTUATOR_B = "input_boolean.test_dryer"
 
 
 def _patch_restore_dwell(monkeypatch, coordinator, dwell: float) -> None:
@@ -128,7 +133,7 @@ async def test_automatic_restore_reenables_pending_load(hass, monkeypatch):
     await hass.async_block_till_done()
 
     assert hass.states.get(ACTUATOR).state == "on"
-    assert "boiler" not in coordinator.data["planner_shed_devices"]
+    assert "boiler" not in coordinator.data["pending_restore_ids"]
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
@@ -291,7 +296,7 @@ async def test_grid_loss_triggers_emergency_stop(hass):
 
     assert hass.states.get(ACTUATOR).state == "off"
     assert coordinator.status == "grid_loss"
-    assert "boiler" in coordinator.data["planner_shed_devices"]
+    assert "boiler" in coordinator.data["pending_restore_ids"]
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
@@ -330,7 +335,7 @@ async def test_state_change_listener_triggers_evaluation(hass):
 
 @pytest.mark.usefixtures("enable_custom_integrations")
 async def test_auto_mode_persists_across_reload(hass):
-    """A persisted auto planner mode is restored after a config-entry reload."""
+    """A persisted auto mode is restored after a config-entry reload."""
     entry = await _setup_loaded(hass)
     coordinator = entry.runtime_data.coordinator
     await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
@@ -343,3 +348,279 @@ async def test_auto_mode_persists_across_reload(hass):
 
     reloaded = entry.runtime_data.coordinator
     assert reloaded.mode == "auto"
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_nonzero_tier_dwell_waits_before_shed(hass):
+    """A non-zero dwell tier does not shed until the continuous exceedance matures."""
+    _install_integration(hass)
+    await _prepare_entities(hass)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Power Orchestrator dwell",
+        data={
+            CONF_LOAD_SENSOR: LOAD_SENSOR,
+            CONF_AVERAGING_PERIOD: 30,
+            CONF_PAUSE_PERIOD: 0,
+            CONF_THRESHOLDS: [{"power_limit": 5000, "duration_s": 300}],
+            CONF_DEVICES: [
+                {
+                    "device_id": "boiler",
+                    "name": "Test boiler",
+                    "entity": ACTUATOR,
+                    "expected_power": 2000,
+                    "priority": 1,
+                }
+            ],
+            CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
+            CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
+        },
+        version=3,
+        minor_version=1,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data.coordinator
+
+    await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
+    await hass.async_block_till_done()
+    hass.states.async_set(LOAD_SENSOR, "9500", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR).state == "on"
+    assert "custom_1" in coordinator._policy_engine.runtime.tier_since
+
+    coordinator._policy_engine.runtime.tier_since["custom_1"] = time.monotonic() - 301
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR).state == "off"
+    assert coordinator.status == "load_shedding"
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_zero_dwell_top_tier_sheds_immediately(hass):
+    """A zero-dwell top tier sheds while a lower non-zero tier is still waiting."""
+    _install_integration(hass)
+    await _prepare_entities(hass)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Power Orchestrator top tier",
+        data={
+            CONF_LOAD_SENSOR: LOAD_SENSOR,
+            CONF_AVERAGING_PERIOD: 30,
+            CONF_PAUSE_PERIOD: 0,
+            CONF_THRESHOLDS: [
+                {"power_limit": 5000, "duration_s": 300},
+                {"power_limit": 9000, "duration_s": 0},
+            ],
+            CONF_DEVICES: [
+                {
+                    "device_id": "boiler",
+                    "name": "Test boiler",
+                    "entity": ACTUATOR,
+                    "expected_power": 2000,
+                    "priority": 1,
+                }
+            ],
+            CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
+            CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
+        },
+        version=3,
+        minor_version=1,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
+    await hass.async_block_till_done()
+    hass.states.async_set(LOAD_SENSOR, "9500", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR).state == "off"
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_invalid_load_and_unavailable_safety_notify_without_device_services(hass):
+    """Invalid load and unavailable safety telemetry notify and never call device services."""
+    assert await async_setup_component(hass, "persistent_notification", {})
+    entry = await _setup_loaded(hass)
+    coordinator = entry.runtime_data.coordinator
+    await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
+    await hass.async_block_till_done()
+
+    hass.states.async_set(LOAD_SENSOR, "unknown", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR).state == "on"
+    assert coordinator.status == "safety_blocked"
+    assert coordinator._telemetry_notification_active is True
+    notifications = async_get_persistent_notifications(hass)
+    assert any(
+        "telemetry blocked" in str(item.get("title", "")).lower()
+        for item in notifications.values()
+    )
+
+    hass.states.async_set(LOAD_SENSOR, "3000", {"unit_of_measurement": "W"})
+    hass.states.async_set(GRID_SENSOR, "unavailable")
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR).state == "on"
+    assert coordinator.status == "safety_blocked"
+    assert coordinator.physical_commands_allowed is False
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_manual_on_pending_under_safe_capacity_is_accepted(hass, monkeypatch):
+    """Manual ON of a pending load under safe capacity is accepted and dequeued."""
+    entry = await _setup_loaded(hass)
+    coordinator = entry.runtime_data.coordinator
+    _patch_restore_dwell(monkeypatch, coordinator, 0.0)
+    await _shed_the_boiler(hass)
+    assert "boiler" in coordinator.data["pending_restore_ids"]
+
+    hass.states.async_set(LOAD_SENSOR, "2000", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    hass.states.async_set(ACTUATOR, "on")
+    await hass.async_block_till_done()
+
+    assert "boiler" not in coordinator.data["pending_restore_ids"]
+    assert hass.states.get(ACTUATOR).state == "on"
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_manual_on_pending_under_overload_is_reshed(hass):
+    """Manual ON of a pending load under enforced overload is re-shed and stays queued."""
+    entry = await _setup_loaded(hass)
+    coordinator = entry.runtime_data.coordinator
+    await _shed_the_boiler(hass)
+    assert coordinator.data["pending_restore_ids"] == ["boiler"]
+
+    hass.states.async_set(LOAD_SENSOR, "9500", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    # Seed the zero-dwell tier so overload is already enforced for re-shed.
+    coordinator._policy_engine.observe_load(9500.0, now=time.monotonic())
+    hass.states.async_set(ACTUATOR, "on")
+    await hass.async_block_till_done()
+
+    assert hass.states.get(ACTUATOR).state == "off"
+    assert coordinator.data["pending_restore_ids"] == ["boiler"]
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_pending_queue_survives_config_entry_reload(hass):
+    """The ordered pending-restore queue survives a config-entry reload."""
+    entry = await _setup_loaded(hass)
+    await _shed_the_boiler(hass)
+    coordinator = entry.runtime_data.coordinator
+    assert coordinator.data["pending_restore_ids"] == ["boiler"]
+    assert coordinator.data["pending_restore_names"] == ["Test boiler"]
+
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    reloaded = entry.runtime_data.coordinator
+    assert reloaded.data["pending_restore_ids"] == ["boiler"]
+    assert reloaded.data["pending_restore_names"] == ["Test boiler"]
+    status_entity = next(
+        (
+            state
+            for state in hass.states.async_all("sensor")
+            if state.attributes.get("pending_restore_ids") == ["boiler"]
+        ),
+        None,
+    )
+    assert status_entity is not None
+    assert status_entity.attributes.get("pending_restore_names") == ["Test boiler"]
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_grid_loss_queues_multiple_and_restores_reverse_order(hass, monkeypatch):
+    """Grid-loss all-stop queues multiple loads and restores them in reverse stop order."""
+    _install_integration(hass)
+    assert await async_setup_component(
+        hass,
+        "input_boolean",
+        {
+            "input_boolean": {
+                "test_boiler": {"initial": True},
+                "test_dryer": {"initial": True},
+            }
+        },
+    )
+    hass.states.async_set(LOAD_SENSOR, "3000", {"unit_of_measurement": "W"})
+    hass.states.async_set(GRID_SENSOR, "on")
+    await hass.async_block_till_done()
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Power Orchestrator multi",
+        data={
+            CONF_LOAD_SENSOR: LOAD_SENSOR,
+            CONF_AVERAGING_PERIOD: 30,
+            CONF_PAUSE_PERIOD: 0,
+            CONF_THRESHOLDS: [{"power_limit": 8000, "duration_s": 0}],
+            CONF_DEVICES: [
+                {
+                    "device_id": "boiler",
+                    "name": "Test boiler",
+                    "entity": ACTUATOR,
+                    "expected_power": 1500,
+                    "priority": 1,
+                },
+                {
+                    "device_id": "dryer",
+                    "name": "Test dryer",
+                    "entity": ACTUATOR_B,
+                    "expected_power": 1500,
+                    "priority": 2,
+                },
+            ],
+            CONF_GRID_LOSS_MODE: GRID_LOSS_MODE_SENSOR,
+            CONF_GRID_LOSS_SENSOR: GRID_SENSOR,
+        },
+        version=3,
+        minor_version=1,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data.coordinator
+    _patch_restore_dwell(monkeypatch, coordinator, 0.0)
+
+    await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
+    await hass.async_block_till_done()
+    hass.states.async_set(GRID_SENSOR, "off")
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(ACTUATOR).state == "off"
+    assert hass.states.get(ACTUATOR_B).state == "off"
+    # Emergency stops reverse shed order: dryer then boiler.
+    assert coordinator.data["pending_restore_ids"] == ["dryer", "boiler"]
+
+    # Raise aggregate first so grid recovery cannot restore under residual headroom.
+    hass.states.async_set(LOAD_SENSOR, "7000", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    hass.states.async_set(GRID_SENSOR, "on")
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR).state == "off"
+    assert hass.states.get(ACTUATOR_B).state == "off"
+    assert coordinator.data["pending_restore_ids"] == ["dryer", "boiler"]
+
+    hass.states.async_set(LOAD_SENSOR, "1000", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    # Reverse actual stop order restores boiler first.
+    assert hass.states.get(ACTUATOR).state == "on"
+    assert hass.states.get(ACTUATOR_B).state == "off"
+    assert coordinator.data["pending_restore_ids"] == ["dryer"]
+
+    hass.states.async_set(LOAD_SENSOR, "1100", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR_B).state == "on"
+    assert coordinator.data["pending_restore_ids"] == []

@@ -31,11 +31,12 @@ def _bounded_runtime_data(coordinator: Any) -> dict[str, Any]:
         "load_sensor_valid", "load_sensor_reason", "startup_safe", "physical_commands_allowed",
         "journal_persistence_blocked", "action_journal_invalid", "journal_unresolved_count",
         "audit_history_total", "audit_history_truncated", "faulted_devices_count",
-        "quarantined_devices_count", "safety_fault_reason",
+        "quarantined_devices_count", "safety_fault_reason", "pending_restore_count",
     )
     projected = {key: raw[key] for key in keys if key in raw}
     projected.setdefault("faulted_devices_count", _count(raw, "faulted_devices"))
     projected.setdefault("quarantined_devices_count", _count(raw, "quarantined_devices"))
+    projected.setdefault("pending_restore_count", _count(raw, "pending_restore_ids"))
     return projected
 
 

@@ -38,6 +38,23 @@ def test_policy_runtime_persists_only_shedding_fence() -> None:
     assert restored.runtime.restore_since is None
 
 
+def test_monotonic_tier_and_restore_times_are_never_persisted() -> None:
+    """In-process dwell and restore timers must not survive storage round-trip."""
+    store = RuntimeStore(Backend())
+    engine = PolicyEngine(policy_for_tests((5000.0, 30.0)))
+    engine.runtime.tier_since = {"custom_1": 123.0}
+    engine.runtime.tier_started_at = 123.0
+    engine.runtime.restore_since = 456.0
+    store.save_policy_runtime(engine)
+    raw = store.snapshot()["policy_runtime"]
+    assert set(raw).isdisjoint({"tier_since", "tier_started_at", "restore_since"})
+    restored = PolicyEngine(policy_for_tests((5000.0, 30.0)))
+    store.restore_policy_runtime(restored)
+    assert restored.runtime.tier_since == {}
+    assert restored.runtime.tier_started_at is None
+    assert restored.runtime.restore_since is None
+
+
 def test_policy_runtime_persists_restore_fence() -> None:
     store = RuntimeStore(Backend())
     engine = PolicyEngine(policy_for_tests((6500.0, 300.0), (7000.0, 30.0), (8000.0, 5.0)))
