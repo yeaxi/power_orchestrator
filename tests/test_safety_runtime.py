@@ -15,7 +15,7 @@ from power_orchestrator.const import (
     STATUS_SAFETY_BLOCKED,
 )
 from power_orchestrator.coordinator import CoordinatorConfig, PowerOrchestratorCoordinator
-from power_orchestrator.policy import PolicyConfig
+from power_orchestrator.policy import PolicyConfig, policy_for_tests
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 
 
@@ -50,16 +50,13 @@ def _coordinator(
         store=store,
         config=CoordinatorConfig(
             load_sensor="sensor.load",
-            max_load=5000,
             averaging_period=10,
-            safety_reserve=200,
-            hysteresis=100,
             pause_period=60,
             grid_loss_mode="grid_loss_sensor",
             grid_loss_sensor="binary_sensor.grid",
             battery_threshold=None,
             battery_soc_sensor=None,
-            policy=policy,
+            policy=policy or policy_for_tests((5000.0, 0.0)),
         ),
     )
     coordinator.mode = mode

@@ -22,7 +22,6 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
     CONF_DEVICE_POWER_SENSOR,
-    CONF_DEVICE_RESTORE_ENABLED,
     CONF_PRIORITY,
     CONF_SHED_PRIORITY,
 )
@@ -157,7 +156,6 @@ def _normalize_options_devices(value: Any) -> list[dict[str, Any]]:
                 CONF_PRIORITY: priority,
                 CONF_SHED_PRIORITY: shed_priority,
                 CONF_DEVICE_ACTUATORS: actuators,
-                CONF_DEVICE_RESTORE_ENABLED: bool(raw.get(CONF_DEVICE_RESTORE_ENABLED, False)),
             }
         )
         seen_ids.add(device_id)

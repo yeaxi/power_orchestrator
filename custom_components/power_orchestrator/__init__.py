@@ -31,27 +31,17 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
     CONF_DEVICE_POWER_SENSOR,
-    CONF_DEVICE_RESTORE_ENABLED,
     CONF_DEVICES,
     CONF_GRID_LOSS_MODE,
     CONF_GRID_LOSS_SENSOR,
-    CONF_HYSTERESIS,
     CONF_LOAD_SENSOR,
-    CONF_MAX_LOAD,
     CONF_PAUSE_PERIOD,
     CONF_PRIORITY,
-    CONF_RESTORE_COOLDOWN,
-    CONF_RESTORE_DWELL,
-    CONF_RESTORE_ENABLED,
-    CONF_RESTORE_HYSTERESIS,
-    CONF_RESTORE_THRESHOLD,
-    CONF_SAFETY_RESERVE,
+    CONF_RECONFIGURATION_REQUIRED,
     CONF_SHED_PRIORITY,
     CONF_THRESHOLDS,
     DEFAULT_AVERAGING_PERIOD,
-    DEFAULT_HYSTERESIS,
     DEFAULT_PAUSE_PERIOD,
-    DEFAULT_SAFETY_RESERVE,
     DOMAIN,
     GRID_LOSS_MODE_SENSOR,
     MAX_RUNTIME_PAUSE_SECONDS,
@@ -62,7 +52,7 @@ from .const import (
     STORAGE_VERSION,
 )
 from .coordinator import CoordinatorConfig, PowerOrchestratorCoordinator
-from .policy import PolicyConfig, RestoreConfig
+from .policy import PolicyConfig, derive_thresholds_from_mapping, strip_legacy_policy_fields
 from .power_model import ManagedDevice, PowerModel
 from .runtime import PowerOrchestratorRuntimeData
 from .storage import RuntimeStore
@@ -77,9 +67,8 @@ _REGISTERED_SERVICES = (
     "set_mode",
     "request_stop",
     "clear_quarantine",
-    "authorize_restore",
-    "request_restore",
 )
+_RECONFIGURATION_ISSUE_ID = "reconfiguration_required"
 _REPAIR_ISSUE_IDS_KEY = f"{DOMAIN}_repair_issue_ids"
 _ALLOWED_CONTROL_DOMAINS = frozenset({"switch", "light", "input_boolean"})
 _ALLOWED_ACTUATOR_DOMAINS = frozenset({"switch", "light", "input_boolean", "climate"})
@@ -213,6 +202,36 @@ def _sync_repair_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
         _LOGGER.debug("Unable to synchronize Power Orchestrator repair issues", exc_info=True)
         return
     previous_by_entry[entry.entry_id] = desired_ids
+    _sync_reconfiguration_issue(hass, entry)
+
+
+def _sync_reconfiguration_issue(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Expose a repair issue when migration could not derive a user threshold list."""
+    from homeassistant.helpers.issue_registry import (
+        IssueSeverity,
+        async_create_issue,
+        async_delete_issue,
+    )
+
+    runtime = getattr(entry, "runtime_data", None)
+    coordinator = getattr(runtime, "coordinator", None)
+    required = bool(getattr(coordinator, "_reconfiguration_required", False))
+    try:
+        if required:
+            async_create_issue(
+                hass,
+                DOMAIN,
+                _RECONFIGURATION_ISSUE_ID,
+                is_fixable=False,
+                is_persistent=True,
+                issue_domain=DOMAIN,
+                severity=IssueSeverity.ERROR,
+                translation_key="reconfiguration_required",
+            )
+        else:
+            async_delete_issue(hass, DOMAIN, _RECONFIGURATION_ISSUE_ID)
+    except Exception:  # pragma: no cover - issue registry is non-safety-critical
+        _LOGGER.debug("Unable to synchronize reconfiguration issue", exc_info=True)
 
 
 def _sync_repair_issues_for_runtime(
@@ -324,7 +343,6 @@ def _normalize_devices(raw_devices: Any) -> list[dict[str, Any]]:
                 CONF_PRIORITY: priority,
                 CONF_SHED_PRIORITY: shed_priority,
                 CONF_DEVICE_ACTUATORS: actuators,
-                CONF_DEVICE_RESTORE_ENABLED: bool(raw.get(CONF_DEVICE_RESTORE_ENABLED, False)),
             }
         )
         seen_ids.add(device_id)
@@ -400,30 +418,27 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     store = RuntimeStore(Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{entry.entry_id}"))
     await store.async_load()
     policy = PolicyConfig.from_mapping(data)
-    restore_config = RestoreConfig.from_mapping(data)
+    reconfiguration_required = policy is None
+    if policy is None:
+        # Fail closed with a non-acting placeholder until the user reconfigures.
+        from .policy import ReasonCode, ThresholdTier
+
+        policy = PolicyConfig(
+            thresholds=(
+                ThresholdTier("unconfigured", 1.0, 0.0, ReasonCode.CONFIGURATION_INVALID),
+            )
+        )
     coordinator = PowerOrchestratorCoordinator(
         hass=hass,
         model=model,
         store=store,
         config=CoordinatorConfig(
             load_sensor=str(data.get(CONF_LOAD_SENSOR, "")),
-            max_load=_safe_number(
-                data.get(CONF_MAX_LOAD), default=5000, minimum=100, maximum=50000
-            ),
             averaging_period=_safe_number(
                 data.get(CONF_AVERAGING_PERIOD),
                 default=DEFAULT_AVERAGING_PERIOD,
                 minimum=1,
                 maximum=300,
-            ),
-            safety_reserve=_safe_number(
-                data.get(CONF_SAFETY_RESERVE),
-                default=DEFAULT_SAFETY_RESERVE,
-                minimum=0,
-                maximum=5000,
-            ),
-            hysteresis=_safe_number(
-                data.get(CONF_HYSTERESIS), default=DEFAULT_HYSTERESIS, minimum=0, maximum=5000
             ),
             pause_period=_safe_number(
                 data.get(CONF_PAUSE_PERIOD),
@@ -437,9 +452,9 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
             battery_soc_sensor=data.get(CONF_BATTERY_SOC),
             entry_id=entry.entry_id,
             policy=policy,
-            restore_config=restore_config,
         ),
     )
+    coordinator._reconfiguration_required = reconfiguration_required
     coordinator._safety_storage_invalid = store.safety_storage_invalid
     store.restore_pause_timestamps(model, MAX_RUNTIME_PAUSE_SECONDS)
     faulted, quarantined = store.restore_device_runtime(model)
@@ -456,6 +471,8 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     coordinator.restore_pending_restore(store.restore_pending_restore(model))
     if store.safety_storage_invalid:
         restored_mode = MODE_OFF
+    elif reconfiguration_required:
+        restored_mode = MODE_OBSERVE
     else:
         restored_mode = store.resolve_unified_mode(data.get("execution_mode"))
     if restored_mode not in MODES:
@@ -540,10 +557,25 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Drop obsolete configuration fields while preserving load-shedding settings."""
+    """Migrate to thresholds-only policy and strip deleted restore/load fields."""
     changed = False
     data = dict(entry.data or {})
     options = dict(getattr(entry, "options", {}) or {})
+    merged = {**data, **options}
+    tiers = derive_thresholds_from_mapping(merged)
+    reconfiguration_required = tiers is None
+    if tiers is not None:
+        serialized = [
+            {"power_limit": tier.limit_w, "duration_s": tier.duration_s} for tier in tiers
+        ]
+        if data.get(CONF_THRESHOLDS) != serialized:
+            data[CONF_THRESHOLDS] = serialized
+            changed = True
+        options.pop(CONF_THRESHOLDS, None)
+    else:
+        data[CONF_RECONFIGURATION_REQUIRED] = True
+        changed = True
+
     allowed_keys = {
         CONF_AVERAGING_PERIOD,
         CONF_BATTERY_SOC,
@@ -551,23 +583,31 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_DEVICES,
         CONF_GRID_LOSS_MODE,
         CONF_GRID_LOSS_SENSOR,
-        CONF_HYSTERESIS,
         CONF_LOAD_SENSOR,
-        CONF_MAX_LOAD,
         CONF_PAUSE_PERIOD,
-        CONF_SAFETY_RESERVE,
         CONF_THRESHOLDS,
-        CONF_RESTORE_ENABLED,
-        CONF_RESTORE_THRESHOLD,
-        CONF_RESTORE_HYSTERESIS,
-        CONF_RESTORE_DWELL,
-        CONF_RESTORE_COOLDOWN,
+        CONF_RECONFIGURATION_REQUIRED,
+        "policy_version",
     }
-    clean_data = {key: value for key, value in data.items() if key in allowed_keys}
+    clean_data = strip_legacy_policy_fields(
+        {key: value for key, value in data.items() if key in allowed_keys or key == CONF_THRESHOLDS}
+    )
+    clean_data = {key: value for key, value in clean_data.items() if key in allowed_keys}
+    if reconfiguration_required:
+        clean_data[CONF_RECONFIGURATION_REQUIRED] = True
+    elif CONF_RECONFIGURATION_REQUIRED in clean_data and tiers is not None:
+        clean_data.pop(CONF_RECONFIGURATION_REQUIRED, None)
+        changed = True
     if clean_data != data:
         data = clean_data
         changed = True
-    clean_options = {key: value for key, value in options.items() if key in allowed_keys}
+    clean_options = strip_legacy_policy_fields(
+        {key: value for key, value in options.items() if key in allowed_keys}
+    )
+    clean_options = {key: value for key, value in clean_options.items() if key in allowed_keys}
+    # Thresholds live in entry.data after migration.
+    clean_options.pop(CONF_THRESHOLDS, None)
+    clean_options.pop(CONF_RECONFIGURATION_REQUIRED, None)
     if clean_options != options:
         options = clean_options
         changed = True
@@ -580,7 +620,6 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_DEVICE_ACTUATORS,
         CONF_PRIORITY,
         CONF_SHED_PRIORITY,
-        CONF_DEVICE_RESTORE_ENABLED,
     }
     for payload in (data, options):
         raw_devices = payload.get(CONF_DEVICES)
@@ -596,7 +635,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             changed = True
     current_version = getattr(entry, "version", None)
     current_minor_version = getattr(entry, "minor_version", None)
-    if current_version != 2 or current_minor_version != 2:
+    if current_version != 3 or current_minor_version != 1:
         changed = True
     if changed:
         updater = getattr(hass.config_entries, "async_update_entry", None)
@@ -605,8 +644,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry,
                 data=data,
                 options=options,
-                version=2,
-                minor_version=2,
+                version=3,
+                minor_version=1,
             )
     return True
 
@@ -691,37 +730,6 @@ async def _register_services(hass: HomeAssistant) -> None:
             ) from exc
 
 
-
-    async def authorize_restore(call: Any) -> None:
-        data = getattr(call, "data", {})
-        try:
-            await _service_runtime(hass).coordinator.async_authorize_restore(
-                confirm_restore=bool(data.get("confirm_restore", False)),
-            )
-        except Exception as exc:
-            raise _translated_error(
-                HomeAssistantError, "restore_authorization_failed", reason=str(exc)
-            ) from exc
-
-    async def request_restore(call: Any) -> None:
-        data = getattr(call, "data", {})
-        device_id = data.get("device_id")
-        if not isinstance(device_id, str) or not device_id.strip():
-            raise _translated_error(ServiceValidationError, "missing_device_id")
-        if not bool(data.get("confirm_restore", False)):
-            raise _translated_error(ServiceValidationError, "restore_requires_confirmation")
-        source, actor_id, context_id = _service_source(call)
-        try:
-            runtime = _service_runtime(hass)
-            await runtime.coordinator.async_request_restore(
-                device_id.strip(), source=source, actor_id=actor_id, context_id=context_id
-            )
-            _sync_repair_issues_for_runtime(hass, runtime)
-        except Exception as exc:
-            raise _translated_error(
-                HomeAssistantError, "restore_request_failed", reason=str(exc)
-            ) from exc
-
     service_schema = {
         "force_evaluate": vol.Schema({}),
         "set_mode": vol.Schema({vol.Required("mode"): vol.In(sorted(MODES))}),
@@ -731,22 +739,12 @@ async def _register_services(hass: HomeAssistant) -> None:
         "clear_quarantine": vol.Schema(
             {vol.Required("device_id"): str, vol.Optional("source", default="service"): str}
         ),
-        "authorize_restore": vol.Schema({vol.Required("confirm_restore"): bool}),
-        "request_restore": vol.Schema(
-            {
-                vol.Required("device_id"): str,
-                vol.Required("confirm_restore"): bool,
-                vol.Optional("source", default="service"): str,
-            }
-        ),
     }
     handlers = {
         "force_evaluate": force_evaluate,
         "set_mode": set_mode,
         "request_stop": request_stop,
         "clear_quarantine": clear_quarantine,
-        "authorize_restore": authorize_restore,
-        "request_restore": request_restore,
     }
     for name in _REGISTERED_SERVICES:
         services.async_register(DOMAIN, name, handlers[name], schema=service_schema[name])

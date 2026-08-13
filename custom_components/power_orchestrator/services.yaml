@@ -5,11 +5,11 @@ force_evaluate:
 
 set_mode:
   name: Set mode
-  description: "Persist the controller mode. Auto permits guarded physical shedding; Observe evaluates and records intended actions without physical services; Off disables normal shedding. Off and Observe never call physical services, including emergency paths."
+  description: "Persist the controller mode. Auto permits guarded physical shedding and automatic restore of pending loads; Observe evaluates and records intended actions without physical services; Off disables normal shedding. Off and Observe never call physical services, including emergency paths."
   fields:
     mode:
       name: Mode
-      description: "Auto may issue guarded physical OFF commands. Observe evaluates and audits only. Off disarms normal policy decisions."
+      description: "Auto may issue guarded physical OFF/ON commands. Observe evaluates and audits only. Off disarms normal policy decisions."
       required: true
       selector:
         select:
@@ -20,7 +20,7 @@ set_mode:
 
 request_stop:
   name: Request logical-device stop
-  description: "Request a guarded logical-device stop through the integration; the integration never enables a load."
+  description: "Request a guarded logical-device stop through the integration."
   fields:
     device_id:
       name: Logical device ID
@@ -48,40 +48,6 @@ clear_quarantine:
     source:
       name: Clear source
       description: "Audit label for the explicit clear request."
-      required: false
-      selector:
-        text: {}
-
-authorize_restore:
-  name: Arm guarded restore
-  description: "Arm the fail-closed restore lane so the planner may re-enable loads it shed, once safe headroom returns. Arming performs no physical action and requires Auto mode. Disarmed automatically outside Auto."
-  fields:
-    confirm_restore:
-      name: Confirm restore arming
-      description: "Must be true to arm guarded restore of planner-shed loads."
-      required: true
-      selector:
-        boolean: {}
-
-request_restore:
-  name: Request guarded load restore
-  description: "Request a guarded re-enable of one load the planner previously shed. Only planner-shed, opted-in loads are eligible; the integration never starts a never-shed or PV/forecast-admitted load. Requires Auto mode."
-  fields:
-    device_id:
-      name: Logical device ID
-      description: "Stable configured device_id of a load the planner shed."
-      required: true
-      selector:
-        text: {}
-    confirm_restore:
-      name: Confirm restore
-      description: "Must be true to request a guarded restore."
-      required: true
-      selector:
-        boolean: {}
-    source:
-      name: Request source
-      description: "Audit label for the caller."
       required: false
       selector:
         text: {}

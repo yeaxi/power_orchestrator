@@ -19,22 +19,9 @@ from .const import (
     CONF_THRESHOLD_COUNT,
     CONF_THRESHOLD_DURATION,
     CONF_THRESHOLD_POWER,
-    DEFAULT_HARD_INTERLOCK,
-    DEFAULT_SHED_CRITICAL_DURATION,
-    DEFAULT_SHED_CRITICAL_LIMIT,
-    DEFAULT_SHED_FAST_DURATION,
-    DEFAULT_SHED_FAST_LIMIT,
-    DEFAULT_SHED_SUSTAINED_DURATION,
-    DEFAULT_SHED_SUSTAINED_LIMIT,
     MAX_CUSTOM_THRESHOLDS,
 )
-from .policy import validate_threshold_pair
-
-_CANONICAL_THRESHOLD_INPUTS = (
-    {"power_limit": DEFAULT_SHED_SUSTAINED_LIMIT, "duration_s": DEFAULT_SHED_SUSTAINED_DURATION},
-    {"power_limit": DEFAULT_SHED_FAST_LIMIT, "duration_s": DEFAULT_SHED_FAST_DURATION},
-    {"power_limit": DEFAULT_SHED_CRITICAL_LIMIT, "duration_s": DEFAULT_SHED_CRITICAL_DURATION},
-)
+from .policy import MAX_POLICY_POWER_W, validate_threshold_pair
 
 
 def _threshold_field(index: int, kind: str) -> str:
@@ -42,7 +29,7 @@ def _threshold_field(index: int, kind: str) -> str:
 
 
 def _threshold_defaults(value: Any) -> list[dict[str, float]]:
-    """Normalize persisted threshold pairs and fill canonical defaults."""
+    """Normalize persisted threshold pairs; never invent static policy defaults."""
     result: list[dict[str, float]] = []
     if isinstance(value, (list, tuple)):
         for raw in value[:MAX_CUSTOM_THRESHOLDS]:
@@ -55,8 +42,6 @@ def _threshold_defaults(value: Any) -> list[dict[str, float]]:
                 continue
             if math.isfinite(limit) and math.isfinite(duration) and limit > 0 and duration >= 0:
                 result.append({"power_limit": limit, "duration_s": duration})
-    if not result:
-        result = [dict(item) for item in _CANONICAL_THRESHOLD_INPUTS]
     return result
 
 
@@ -67,7 +52,9 @@ def _parse_threshold_input(
     """Parse legacy numbered threshold pairs with the bounded runtime limit."""
     raw_count = user_input.get(CONF_THRESHOLD_COUNT)
     if raw_count is None:
-        pairs = defaults or _threshold_defaults(None)
+        pairs = defaults if defaults is not None else _threshold_defaults(None)
+        if not pairs:
+            return None, "invalid_thresholds"
         return pairs, None
     if isinstance(raw_count, bool):
         return None, "invalid_thresholds"
@@ -93,8 +80,6 @@ def _parse_threshold_input(
             limit, dwell = validate_threshold_pair(float(power), float(duration), previous)
         except (TypeError, ValueError):
             return None, "invalid_thresholds"
-        if limit > DEFAULT_HARD_INTERLOCK:
-            return None, "invalid_thresholds"
         parsed.append({"power_limit": limit, "duration_s": dwell})
         previous = limit
     return parsed, None
@@ -105,21 +90,23 @@ def _threshold_step_fields(
     *,
     add_another_default: bool = False,
 ) -> dict[Any, Any]:
-    """Build one repeatable threshold form instead of fixed numbered fields."""
-    pair = default or {
-        "power_limit": DEFAULT_SHED_SUSTAINED_LIMIT,
-        "duration_s": DEFAULT_SHED_SUSTAINED_DURATION,
-    }
+    """Build one repeatable threshold form without static policy defaults."""
+    if default is None:
+        power_default = 1000.0
+        duration_default = 0.0
+    else:
+        power_default = float(default.get("power_limit", 1000.0))
+        duration_default = float(default.get("duration_s", 0.0))
     return {
-        vol.Required(CONF_THRESHOLD_POWER, default=pair["power_limit"]): selector.NumberSelector(
+        vol.Required(CONF_THRESHOLD_POWER, default=power_default): selector.NumberSelector(
             cast(Any, selector.NumberSelectorConfig)(
                 min=1,
-                max=DEFAULT_HARD_INTERLOCK,
+                max=MAX_POLICY_POWER_W,
                 mode="box",
                 unit_of_measurement="W",
             )
         ),
-        vol.Required(CONF_THRESHOLD_DURATION, default=pair["duration_s"]): selector.NumberSelector(
+        vol.Required(CONF_THRESHOLD_DURATION, default=duration_default): selector.NumberSelector(
             cast(Any, selector.NumberSelectorConfig)(
                 min=0,
                 max=86400,
@@ -133,13 +120,15 @@ def _threshold_step_fields(
 
 def _next_threshold_default(
     collected: list[dict[str, float]], seed: list[dict[str, float]]
-) -> dict[str, float]:
-    """Return the next useful default for a repeatable threshold step."""
+) -> dict[str, float] | None:
+    """Return the next form seed from persisted values, else a strictly higher hint."""
     if len(collected) < len(seed):
         return dict(seed[len(collected)])
-    previous = collected[-1] if collected else {"power_limit": 0.0, "duration_s": 0.0}
+    if not collected:
+        return None
+    previous = collected[-1]
     return {
-        "power_limit": min(DEFAULT_HARD_INTERLOCK, previous["power_limit"] + 500.0),
+        "power_limit": min(MAX_POLICY_POWER_W, previous["power_limit"] + 500.0),
         "duration_s": previous["duration_s"],
     }
 
@@ -165,8 +154,6 @@ def _parse_threshold_step(
         )
     except (TypeError, ValueError):
         return None, "invalid_thresholds"
-    if limit > DEFAULT_HARD_INTERLOCK:
-        return None, "invalid_thresholds"
     return {"power_limit": limit, "duration_s": duration}, None
 
 
@@ -177,7 +164,7 @@ def _threshold_add_allowed(
     if not user_input.get(CONF_ADD_THRESHOLD, False):
         return True
     return (
-        pair["power_limit"] < DEFAULT_HARD_INTERLOCK and len(collected) + 1 < MAX_CUSTOM_THRESHOLDS
+        pair["power_limit"] < MAX_POLICY_POWER_W and len(collected) + 1 < MAX_CUSTOM_THRESHOLDS
     )
 
 
@@ -198,8 +185,6 @@ def _validate_threshold_collection(value: Any) -> list[dict[str, float]]:
             )
         except (TypeError, ValueError):
             raise ValueError("invalid thresholds") from None
-        if limit > DEFAULT_HARD_INTERLOCK:
-            raise ValueError("invalid thresholds")
         parsed.append({"power_limit": limit, "duration_s": duration})
         previous = limit
     return parsed

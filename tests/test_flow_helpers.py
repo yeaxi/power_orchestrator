@@ -54,12 +54,11 @@ def test_normalize_options_devices_happy_path() -> None:
                 "name": "Boiler",
                 "entity": "switch.d1",
                 "expected_power": 2000,
-                "restore_enabled": True,
             }
         ]
     )
     assert devices[0]["device_id"] == "d1"
-    assert devices[0]["restore_enabled"] is True
+    assert "restore_enabled" not in devices[0]
     assert devices[0]["priority"] == 1
 
 

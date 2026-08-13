@@ -80,10 +80,7 @@ def test_every_config_field_has_inline_description_in_all_locales() -> None:
         "user": {"grid_power", "battery_soc"},
         "load_monitoring": {
             "load_sensor",
-            "max_load",
             "averaging_period",
-            "safety_reserve",
-            "hysteresis",
         },
         "thresholds": {"threshold_power", "threshold_duration", "add_threshold"},
         "devices": {
@@ -101,10 +98,7 @@ def test_every_config_field_has_inline_description_in_all_locales() -> None:
         "grid_loss_source": {"grid_loss_sensor", "battery_soc", "battery_threshold"},
         "reconfigure": {
             "load_sensor",
-            "max_load",
             "averaging_period",
-            "safety_reserve",
-            "hysteresis",
             "pause_period",
             "grid_loss_mode",
             "grid_loss_sensor",
