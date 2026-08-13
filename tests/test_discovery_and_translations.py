@@ -111,7 +111,6 @@ def test_every_config_field_has_inline_description_in_all_locales() -> None:
             "battery_soc",
             "battery_threshold",
             "devices",
-            "priority_order",
         },
     }
     for path in (
@@ -152,3 +151,15 @@ def test_every_rendered_flow_step_has_translations(resource: str) -> None:
 
     assert {"thresholds", "init"} <= set(data["options"]["step"])
     assert "thresholds" in data["config"]["step"]
+
+
+@pytest.mark.parametrize("resource", ["strings.json", "translations/en.json", "translations/uk.json"])
+def test_described_fields_are_fields_the_step_renders(resource: str) -> None:
+    """A description without a matching data label documents a field nobody sees."""
+    data = json.loads((INTEGRATION / resource).read_text())
+
+    for section in ("config", "options"):
+        for step, body in data[section]["step"].items():
+            described = set(body.get("data_description", {}))
+            labelled = set(body.get("data", {}))
+            assert described <= labelled, f"{resource}: {section}.step.{step}"
