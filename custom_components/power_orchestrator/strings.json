@@ -6,12 +6,12 @@
       "description": "Run an immediate evaluation; safety gates and execution policy are not bypassed."
     },
     "set_mode": {
-      "name": "Set planner mode",
-      "description": "Auto executes guarded stop-only shedding at overload; off disables normal shedding while emergency safety remains active.",
+      "name": "Set mode",
+      "description": "Auto permits guarded physical shedding; Observe evaluates and records intended actions without physical services; Off disables normal shedding. Off and Observe never call physical services, including emergency paths.",
       "fields": {
         "mode": {
-          "name": "Planner mode",
-          "description": "Auto evaluates overload and may issue guarded physical OFF commands; off disarms normal policy decisions. Auto cannot remain in observe execution."
+          "name": "Mode",
+          "description": "Auto may issue guarded physical OFF commands. Observe evaluates and audits only. Off disarms normal policy decisions."
         }
       }
     },
@@ -26,34 +26,6 @@
         "source": {
           "name": "Request source",
           "description": "Audit label for the caller."
-        }
-      }
-    },
-    "set_execution_mode": {
-      "name": "Set physical execution policy",
-      "description": "Select the compatibility execution boundary. Live permits guarded stop-only commands; observe is diagnostic-only when planner mode is off. Auto always requires live execution.",
-      "fields": {
-        "execution_mode": {
-          "name": "Execution policy",
-          "description": "Observe performs decisions and audit only while planner mode is off; live permits guarded stop commands."
-        },
-        "confirm_live": {
-          "name": "Confirm live ownership",
-          "description": "Must be true to enter live execution."
-        }
-      }
-    },
-    "authorize_shedding": {
-      "name": "Authorize exact shedding loads",
-      "description": "In observe mode, explicitly claim only listed already-on loads for a later live stop-only test. This never calls a physical service.",
-      "fields": {
-        "device_ids": {
-          "name": "Logical device IDs",
-          "description": "Exact configured stable device_id values. No wildcard or omitted device is implied."
-        },
-        "confirm_takeover": {
-          "name": "Confirm ownership takeover",
-          "description": "Must be true to change the listed currently-on loads from external to planner ownership."
         }
       }
     },
@@ -432,9 +404,6 @@
       "last_action": {
         "name": "Last action"
       },
-      "execution_mode": {
-        "name": "Execution mode"
-      },
       "reason_code": {
         "name": "Reason code"
       },
@@ -458,6 +427,7 @@
         "name": "Mode",
         "state": {
           "auto": "Auto",
+          "observe": "Observe",
           "off": "Off"
         }
       }
@@ -468,10 +438,7 @@
       "message": "The request source must be a non-empty string."
     },
     "invalid_service_mode": {
-      "message": "The planner mode must be auto or off."
-    },
-    "invalid_execution_mode": {
-      "message": "The execution mode must be observe or live."
+      "message": "The mode must be auto, observe, or off."
     },
     "entry_not_loaded": {
       "message": "Power Orchestrator is not loaded."
@@ -488,23 +455,14 @@
     "quarantine_clear_failed": {
       "message": "The quarantine clear request failed."
     },
-    "execution_mode_change_failed": {
-      "message": "The execution-mode change failed."
-    },
     "evaluation_failed": {
       "message": "The Power Orchestrator evaluation failed."
     },
     "mode_change_failed": {
-      "message": "The planner-mode change failed."
+      "message": "The mode change failed."
     },
     "missing_device_id": {
       "message": "A logical device ID is required."
-    },
-    "missing_device_ids": {
-      "message": "At least one exact logical device ID is required."
-    },
-    "shedding_authorization_failed": {
-      "message": "The exact shedding-ownership authorization failed: {reason}."
     },
     "restore_authorization_failed": {
       "message": "Arming guarded restore failed: {reason}."
@@ -519,13 +477,13 @@
       "message": "The request was rejected: {reason}."
     },
     "invalid_select_option": {
-      "message": "Unsupported planner mode: {option}."
+      "message": "Unsupported mode: {option}."
     }
   },
   "issues": {
     "quarantine_requires_reconciliation": {
       "title": "Power Orchestrator requires device reconciliation",
-      "description": "Device {device_id} is quarantined because its last action or ownership state could not be proven safe after a restart or failed readback."
+      "description": "Device {device_id} is quarantined because its last action could not be proven safe after a restart or failed readback."
     }
   }
 }

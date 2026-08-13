@@ -1,20 +1,21 @@
 force_evaluate:
   name: Force evaluate
-  description: "Force immediate re-evaluation of load-shedding safety. This does not bypass safety gates or execution policy."
+  description: "Force immediate re-evaluation of load-shedding safety. This does not bypass safety gates or mode policy."
   fields: {}
 
 set_mode:
-  name: Set automation mode
-  description: "Persistently arm or disarm normal load-shedding. Auto executes guarded stop-only shedding at overload; off disables normal shedding while emergency safety stops remain active."
+  name: Set mode
+  description: "Persist the controller mode. Auto permits guarded physical shedding; Observe evaluates and records intended actions without physical services; Off disables normal shedding. Off and Observe never call physical services, including emergency paths."
   fields:
     mode:
-      name: Automation mode
-      description: "Auto evaluates overload and may issue guarded physical OFF commands; off disarms normal policy decisions. This setting survives Home Assistant restart."
+      name: Mode
+      description: "Auto may issue guarded physical OFF commands. Observe evaluates and audits only. Off disarms normal policy decisions."
       required: true
       selector:
         select:
           options:
             - "auto"
+            - "observe"
             - "off"
 
 request_stop:
@@ -51,49 +52,12 @@ clear_quarantine:
       selector:
         text: {}
 
-set_execution_mode:
-  name: Set physical execution policy
-  description: "Select observe or live execution. Observe never emits physical commands; live permits guarded load-shedding stops after explicit confirmation."
-  fields:
-    execution_mode:
-      name: Execution policy
-      description: "Observe performs decisions and audit only; live permits guarded stop commands."
-      required: true
-      selector:
-        select:
-          options:
-            - "observe"
-            - "live"
-    confirm_live:
-      name: Confirm live ownership
-      description: "Must be true to enter live execution."
-      required: false
-      selector:
-        boolean: {}
-
-authorize_shedding:
-  name: Authorize exact shedding loads
-  description: "In observe mode, explicitly claim only listed already-on loads for a later live stop-only test. This never calls a physical service."
-  fields:
-    device_ids:
-      name: Logical device IDs
-      description: "Exact configured stable device_id values. No wildcard or omitted device is implied."
-      required: true
-      selector:
-        object: {}
-    confirm_takeover:
-      name: Confirm ownership takeover
-      description: "Must be true to change the listed currently-on loads from external to planner ownership."
-      required: true
-      selector:
-        boolean: {}
-
 authorize_restore:
   name: Arm guarded restore
-  description: "Arm the fail-closed restore lane so the planner may re-enable loads it shed, once safe headroom returns. Arming performs no physical action and requires live execution with auto mode. Disarmed automatically by observe/off."
+  description: "Arm the fail-closed restore lane so the planner may re-enable loads it shed, once safe headroom returns. Arming performs no physical action and requires Auto mode. Disarmed automatically outside Auto."
   fields:
     confirm_restore:
-      name: Confirm restore ownership
+      name: Confirm restore arming
       description: "Must be true to arm guarded restore of planner-shed loads."
       required: true
       selector:
@@ -101,7 +65,7 @@ authorize_restore:
 
 request_restore:
   name: Request guarded load restore
-  description: "Request a guarded re-enable of one load the planner previously shed. Only planner-shed, opted-in loads are eligible; the integration never starts a never-shed or PV/forecast-admitted load."
+  description: "Request a guarded re-enable of one load the planner previously shed. Only planner-shed, opted-in loads are eligible; the integration never starts a never-shed or PV/forecast-admitted load. Requires Auto mode."
   fields:
     device_id:
       name: Logical device ID

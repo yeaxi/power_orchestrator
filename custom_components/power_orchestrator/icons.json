@@ -16,9 +16,6 @@
       "last_action": {
         "default": "mdi:clipboard-text-clock"
       },
-      "execution_mode": {
-        "default": "mdi:shield-lock"
-      },
       "reason_code": {
         "default": "mdi:alert-circle-outline"
       },

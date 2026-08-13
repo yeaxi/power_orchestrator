@@ -59,7 +59,6 @@ class ReasonCode(str, Enum):
     RESTORE_OBSERVE_MODE = "restore_observe_mode"
     TELEMETRY_INVALID = "telemetry_invalid"
     TELEMETRY_STALE = "telemetry_stale"
-    EXTERNAL_OWNERSHIP = "external_ownership"
     RELAY_READBACK_TIMEOUT = "relay_readback_timeout"
     PERSISTED_RUNTIME_INVALID = "persisted_runtime_invalid"
     AGGREGATE_RECONCILIATION_TIMEOUT = "aggregate_reconciliation_timeout"
@@ -69,14 +68,6 @@ class ReasonCode(str, Enum):
     CONFIGURATION_INVALID = "configuration_invalid"
     FAULT = "fault"
 
-
-class Ownership(str, Enum):
-    """Who owns the currently observed state of a logical load."""
-
-    UNKNOWN = "unknown"
-    PLANNER = "planner"
-    MANUAL = "manual"
-    EXTERNAL = "external"
 
 
 class TelemetryValidity(str, Enum):

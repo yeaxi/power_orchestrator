@@ -8,7 +8,7 @@ import logging
 import math
 import time
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -22,11 +22,10 @@ from .const import (
     EVALUATION_INTERVAL,
     EVENT_ACTION,
     EVENT_DECISION,
-    EXECUTION_MODE_LIVE,
-    EXECUTION_MODE_OBSERVE,
-    EXTERNAL_OWNERSHIP_GRACE_SECONDS,
     MODE_AUTO,
+    MODE_OBSERVE,
     MODE_OFF,
+    MODES,
     QUARANTINE_CLEAR_MAX_POWER_W,
     STATUS_GRID_LOSS,
     STATUS_LOAD_RESTORING,
@@ -38,7 +37,6 @@ from .const import (
 from .fault_registry import FaultRegistry
 from .journal import emit_event, new_action_id, record_action
 from .policy import (
-    Ownership,
     PolicyConfig,
     PolicyDecision,
     PolicyEngine,
@@ -53,7 +51,6 @@ from .states import (
     logical_device_confirmed_off,
     logical_device_reported_at,
     logical_device_state,
-    ordinary_shedding_power_eligible,
     state_is_available,
 )
 from .storage import RuntimeStore
@@ -84,7 +81,6 @@ class CoordinatorConfig:
     battery_soc_sensor: str | None = None
     entry_id: str = DOMAIN
     policy: PolicyConfig | None = None
-    execution_mode: str = EXECUTION_MODE_LIVE
     restore_config: RestoreConfig | None = None
 
 
@@ -123,11 +119,6 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             battery_threshold=config.battery_threshold,
         )
         self._entry_id = config.entry_id
-        self._execution_mode = (
-            config.execution_mode
-            if config.execution_mode in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE)
-            else EXECUTION_MODE_OBSERVE
-        )
         self._policy = config.policy or PolicyConfig.from_mapping(
             {
                 "safety_reserve": self._safety_reserve,
@@ -153,7 +144,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         self._pending_restore: list[str] = []
         self._restore_cooldown_until: dict[str, float] = {}
 
-        self._mode = MODE_OFF
+        self._mode = MODE_OBSERVE
         # There is no normal physical activation path. This compatibility
         # projection remains true so old entity consumers cannot interpret a
         # restart as permission for an unseen physical action.
@@ -171,7 +162,6 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
         self._last_observed_state: dict[str, bool | None] = {}
         self._initial_device_reconciliation_complete = False
-        self._external_ownership_grace = EXTERNAL_OWNERSHIP_GRACE_SECONDS
         self._last_confirmed_reported_at: dict[str, float | None] = {}
         self._last_operation_id: str | None = None
         self._last_action_id: str | None = None
@@ -206,21 +196,13 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         return self._action_journal_invalid
 
     @property
-    def execution_mode(self) -> str:
-        return self._execution_mode
-
-    @property
     def physical_commands_allowed(self) -> bool:
-        return (
-            self._execution_mode == EXECUTION_MODE_LIVE
-            and self._mode == MODE_AUTO
-            and not self._safety_storage_invalid
-        )
+        return self._mode == MODE_AUTO and not self._safety_storage_invalid
 
     @property
     def emergency_commands_allowed(self) -> bool:
-        """Emergency OFF may bypass planner mode, but never observe mode/storage gates."""
-        return self._execution_mode == EXECUTION_MODE_LIVE and not self._safety_storage_invalid
+        """Emergency OFF requires Auto; Off and Observe never call physical services."""
+        return self.physical_commands_allowed
 
     @property
     def restore_commands_allowed(self) -> bool:
@@ -228,7 +210,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
         Restore additionally requires the feature to be configured, explicitly
         armed, and no pending post-shed reconciliation. It never fires during
-        an active shed barrier or in observe mode.
+        an active shed barrier or outside Auto.
         """
         return (
             self.physical_commands_allowed
@@ -253,8 +235,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         return self._policy
 
     @property
-    def execution_mode_is_observe(self) -> bool:
-        return self._execution_mode == EXECUTION_MODE_OBSERVE
+    def mode_is_observe(self) -> bool:
+        return self._mode == MODE_OBSERVE
 
     @property
     def mode(self) -> str:
@@ -262,7 +244,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
     @mode.setter
     def mode(self, value: str) -> None:
-        if value not in (MODE_AUTO, MODE_OFF):
+        if value not in MODES:
             raise ValueError(f"Unsupported mode: {value}")
         if value == MODE_AUTO and self._safety_storage_invalid:
             raise ValueError("safety storage is invalid; resolve persisted state first")
@@ -446,8 +428,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             # Dwell/hysteresis timers use a monotonic clock: they measure
             # in-process durations and must be immune to wall-clock jumps. This
             # is deliberately distinct from the wall-clock timestamps used for
-            # pauses/ownership/cooldowns, which are persisted and must survive a
-            # restart (see _pause_device and _refresh_device_states).
+            # pauses/cooldowns, which are persisted and must survive a restart
+            # (see _pause_device and _refresh_device_states).
             decision = self._policy_engine.observe_load(current, now=time.monotonic())
             planner_disabled = False
         else:
@@ -487,15 +469,13 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             if await self._perform_restore(current):
                 return
 
-        self._status = STATUS_OBSERVE if self.execution_mode_is_observe else STATUS_MONITORING
+        self._status = STATUS_OBSERVE if self.mode_is_observe else STATUS_MONITORING
         if planner_disabled:
-            self._last_action = "Planner mode off; normal load shedding disabled"
+            self._last_action = "Mode off; normal load shedding disabled"
+        elif self.mode_is_observe:
+            self._last_action = "Observe: monitoring without physical commands"
         else:
-            self._last_action = (
-                "Observe: monitoring without physical commands"
-                if self.execution_mode_is_observe
-                else "Monitoring load; only load shedding is permitted"
-            )
+            self._last_action = "Monitoring load; only load shedding is permitted"
 
     def _accept_load_report(self) -> bool:
         """Accept only a newly reported state that advances the aggregate generation."""
@@ -521,7 +501,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._load_samples.popleft()
 
     async def _refresh_device_states(self) -> None:
-        """Reconcile logical actuator states and preserve external ownership briefly."""
+        """Reconcile logical actuator states and drop restore claims on manual ON."""
         for device in self._model.all_devices():
             previous = self._last_observed_state.get(device.device_id, device.is_on)
             logical_state = logical_device_state(self.hass, device)
@@ -533,28 +513,12 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                     await self._command_off(device, emergency=True, source="quarantine")
             else:
                 device.is_on = logical_state
-                if (
-                    previous is not True
-                    and logical_state is True
-                    and not (
-                        not self._initial_device_reconciliation_complete
-                        and previous is None
-                        and device.ownership is not Ownership.UNKNOWN
-                    )
-                ):
-                    device.ownership = Ownership.EXTERNAL
-                    device.ownership_until = time.time() + self._external_ownership_grace
-                    self._last_action = f"Preserving external ownership for {device.name}"
-                    # The user re-enabled this load; the planner relinquishes any
-                    # restore claim on it.
-                    self._remove_pending_restore(device.device_id)
-                if (
-                    device.ownership is Ownership.EXTERNAL
-                    and device.ownership_until is not None
-                    and time.time() >= device.ownership_until
-                ):
-                    device.ownership = Ownership.PLANNER
-                    device.ownership_until = None
+                if previous is not True and logical_state is True:
+                    # Skip the first None->on pass so a restart does not clear a
+                    # durable pending-restore queue merely because reconciliation
+                    # observed the current ON state for the first time.
+                    if self._initial_device_reconciliation_complete or previous is not None:
+                        self._remove_pending_restore(device.device_id)
             self._last_observed_state[device.device_id] = device.is_on
             self._refresh_measured_power(device)
         self._initial_device_reconciliation_complete = True
@@ -604,9 +568,13 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         action_label: str = "grid loss",
     ) -> None:
         """Attempt an emergency OFF for every non-confirmed-off logical load."""
-        if self.execution_mode_is_observe:
-            self._status = STATUS_OBSERVE
-            self._last_action = f"Observe: {action_label} would stop optional loads"
+        if self._mode != MODE_AUTO:
+            self._status = STATUS_OBSERVE if self.mode_is_observe else STATUS_GRID_LOSS
+            self._last_action = (
+                f"Observe: {action_label} would stop optional loads"
+                if self.mode_is_observe
+                else f"Mode off; {action_label} would stop optional loads"
+            )
             await self._record_observe_only_action(
                 action="grid_loss_all_stop",
                 reason=reason_code.value,
@@ -679,9 +647,13 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return
         device = candidates[0]
         reason = decision.reason_code.value
-        if self.execution_mode_is_observe:
-            self._status = STATUS_OBSERVE
-            self._last_action = f"Observe: would switch off {device.name} ({reason})"
+        if self._mode != MODE_AUTO:
+            self._status = STATUS_OBSERVE if self.mode_is_observe else self._status
+            self._last_action = (
+                f"Observe: would switch off {device.name} ({reason})"
+                if self.mode_is_observe
+                else f"Mode off; would switch off {device.name} ({reason})"
+            )
             await self._record_observe_only_action(
                 action="shed",
                 reason=reason,
@@ -850,8 +822,6 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 )
                 return False
             device.is_on = False
-            device.ownership = Ownership.PLANNER
-            device.ownership_until = None
             self._last_operation_result = "confirmed"
             self._record_action(
                 {
@@ -1025,10 +995,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 )
                 return False
             device.is_on = True
-            device.ownership = Ownership.PLANNER
-            device.ownership_until = None
             # Record the planner-driven ON transition so the next device
-            # reconciliation does not misread it as a manual external enable.
+            # reconciliation does not treat it as a manual re-enable.
             self._last_observed_state[device.device_id] = True
             self._last_operation_result = "confirmed"
             self._record_action(
@@ -1105,73 +1073,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             event_type,
             data,
             entry_id=self._entry_id,
-            execution_mode=self._execution_mode,
             mode=self._mode,
         )
-
-    async def async_authorize_shedding(
-        self,
-        device_ids: Sequence[str],
-        *,
-        confirm_takeover: bool = False,
-    ) -> None:
-        """Authorize exact already-on loads for a later explicit live cutover."""
-        if not confirm_takeover:
-            raise ValueError("ownership takeover requires explicit confirmation")
-        if not isinstance(device_ids, (list, tuple)) or not device_ids:
-            raise ValueError("at least one exact device_id is required")
-        if any(not isinstance(device_id, str) or not device_id.strip() for device_id in device_ids):
-            raise ValueError("device_ids must contain non-empty strings")
-        normalized_ids = [device_id.strip() for device_id in device_ids]
-        if len(set(normalized_ids)) != len(normalized_ids):
-            raise ValueError("device_ids must not contain duplicates")
-
-        async with self._evaluation_lock:
-            if self._execution_mode != EXECUTION_MODE_OBSERVE:
-                raise ValueError("ownership takeover is available only in observe mode")
-
-            ownership_snapshot = {
-                device.device_id: (device.ownership, device.ownership_until)
-                for device in self._model.all_devices()
-            }
-            persistence_attempted = False
-            try:
-                await self._refresh_device_states()
-                devices: list[ManagedDevice] = []
-                for device_id in normalized_ids:
-                    device = self._model.get_device(device_id)
-                    if device is None:
-                        raise ValueError(f"unknown device_id: {device_id}")
-                    if device_id in self._faults.faulted or device_id in self._faults.quarantined:
-                        raise ValueError(f"device is faulted or quarantined: {device_id}")
-                    if device.is_on is not True:
-                        raise ValueError(f"device is not confirmed on: {device_id}")
-                    if not ordinary_shedding_power_eligible(device):
-                        raise ValueError(
-                            f"device power telemetry is not positive and valid: {device_id}"
-                        )
-                    devices.append(device)
-
-                for device in devices:
-                    device.ownership = Ownership.PLANNER
-                    device.ownership_until = None
-                persistence_attempted = True
-                self._save_runtime_snapshot()
-                await self._store.async_save()
-            except Exception:
-                for device in self._model.all_devices():
-                    ownership, ownership_until = ownership_snapshot[device.device_id]
-                    device.ownership = ownership
-                    device.ownership_until = ownership_until
-                if persistence_attempted:
-                    self._save_runtime_snapshot()
-                    self._safety_storage_invalid = True
-                    self._status = STATUS_SAFETY_BLOCKED
-                raise
-            self._last_action = (
-                "Authorized explicit shedding ownership: "
-                + ", ".join(device.name for device in devices)
-            )[:_MAX_LAST_ACTION_LENGTH]
 
     async def async_request_stop(
         self,
@@ -1250,86 +1153,31 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 raise
             return True
 
-    async def async_set_execution_mode(self, value: str, *, confirm_live: bool = False) -> None:
-        """Change observe/live physical execution policy with persistence."""
-        if value not in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE):
-            raise ValueError("unsupported execution mode")
-        if value == EXECUTION_MODE_LIVE and not confirm_live:
-            raise ValueError("live execution requires explicit confirmation")
-        async with self._evaluation_lock:
-            if value == EXECUTION_MODE_OBSERVE and self._mode == MODE_AUTO:
-                raise ValueError("auto mode requires live execution")
-            previous = self._execution_mode
-            self._execution_mode = value
-            if value == EXECUTION_MODE_OBSERVE:
-                # Observe can never hold a physical restore arm; a later re-arm
-                # must observe a fresh continuous below-ceiling dwell.
-                self._restore_armed = False
-                self._policy_engine.runtime.restore_since = None
-            setter = getattr(self._store, "set_execution_mode", None)
-            if callable(setter):
-                setter(value)
-            try:
-                self._save_runtime_snapshot()
-                await self._store.async_save()
-            except Exception:
-                self._execution_mode = previous
-                if callable(setter):
-                    setter(previous)
-                raise
-        await self._evaluate_safely()
-        self.async_set_updated_data(self._build_data())
-
     async def async_set_mode(self, value: str) -> None:
-        """Persist auto/off across restart; auto is the physical-action mode."""
-        if value not in (MODE_AUTO, MODE_OFF):
+        """Persist off/observe/auto across restart; Auto alone may act physically."""
+        if value not in MODES:
             raise ValueError(f"Unsupported mode: {value}")
         async with self._evaluation_lock:
-            previous_execution_mode = self._execution_mode
             previous_mode = self._mode
-            ownership_snapshot = {
-                device.device_id: (device.ownership, device.ownership_until)
-                for device in self._model.all_devices()
-            }
+            previous_restore_armed = self._restore_armed
+            previous_restore_since = self._policy_engine.runtime.restore_since
             try:
                 self.mode = value
-                if value == MODE_OFF:
-                    # Disarming normal shedding also disarms guarded restore and
-                    # resets its dwell so a re-arm cannot inherit stale headroom.
+                if value != MODE_AUTO:
+                    # Leaving Auto disarms guarded restore and resets dwell so a
+                    # later re-arm cannot inherit stale headroom.
                     self._restore_armed = False
                     self._policy_engine.runtime.restore_since = None
-                if value == MODE_AUTO:
-                    self._execution_mode = EXECUTION_MODE_LIVE
-                    setter = getattr(self._store, "set_execution_mode", None)
-                    if callable(setter):
-                        setter(EXECUTION_MODE_LIVE)
-                    if previous_mode != MODE_AUTO:
-                        await self._refresh_device_states()
-                        for device in self._model.all_devices():
-                            if (
-                                device.is_on is True
-                                and device.device_id not in self._faults.faulted
-                                and device.device_id not in self._faults.quarantined
-                                and ordinary_shedding_power_eligible(device)
-                            ):
-                                device.ownership = Ownership.PLANNER
-                                device.ownership_until = None
                 self._save_runtime_snapshot()
                 await self._store.async_save()
             except Exception:
-                self._mode = MODE_OFF
-                self._execution_mode = previous_execution_mode
-                for device in self._model.all_devices():
-                    ownership, ownership_until = ownership_snapshot[device.device_id]
-                    device.ownership = ownership
-                    device.ownership_until = ownership_until
+                self._mode = previous_mode
+                self._restore_armed = previous_restore_armed
+                self._policy_engine.runtime.restore_since = previous_restore_since
                 setter = getattr(self._store, "set_mode", None)
                 if callable(setter):
-                    setter(MODE_OFF)
-                execution_setter = getattr(self._store, "set_execution_mode", None)
-                if callable(execution_setter):
-                    execution_setter(previous_execution_mode)
-                self._last_action = "Mode persistence failed; mode forced to off"
+                    setter(previous_mode)
+                self._last_action = "Mode persistence failed; previous mode retained"
                 raise
         await self._evaluate_safely()
         self.async_set_updated_data(self._build_data())
@@ -1343,15 +1191,15 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         """Arm the guarded restore lane after explicit confirmation.
 
         Arming performs no physical action; it only permits the planner to
-        later re-enable loads it shed, and only while live+auto and configured.
+        later re-enable loads it shed, and only while Auto and configured.
         """
         if not confirm_restore:
             raise ValueError("restore arming requires explicit confirmation")
         async with self._evaluation_lock:
             if not self._restore_config.enabled:
                 raise ValueError("restore is not enabled in configuration")
-            if self._execution_mode != EXECUTION_MODE_LIVE or self._mode != MODE_AUTO:
-                raise ValueError("restore requires live execution and auto mode")
+            if self._mode != MODE_AUTO:
+                raise ValueError("restore requires Auto mode")
             if self._safety_storage_invalid:
                 raise ValueError("safety storage is invalid; resolve persisted state first")
             self._restore_armed = True
@@ -1374,8 +1222,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         An explicit operator request may skip the *time-based* headroom dwell,
         but it enforces every other restore gate exactly like policy restore:
         the device must be a current restore candidate (planner-shed, opted-in,
-        confirmed OFF, planner-owned, not faulted/quarantined/paused/in cooldown,
-        non-climate, and fitting under the restore threshold with reserve), the
+        confirmed OFF, not faulted/quarantined/paused/in cooldown, non-climate,
+        and fitting under the restore threshold with reserve), the
         post-restore fence must be clear, and a successful restore installs the
         fence so loads cannot be re-enabled back-to-back.
         """
@@ -1496,9 +1344,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         del runtime
 
     def _save_runtime_snapshot(self) -> None:
-        setter = getattr(self._store, "set_execution_mode", None)
+        setter = getattr(self._store, "set_mode", None)
         if callable(setter):
-            setter(self._execution_mode)
+            setter(self._mode)
         self._store.save_policy_runtime(self._policy_engine)
         pending_saver = getattr(self._store, "save_pending_restore", None)
         if callable(pending_saver):
@@ -1571,7 +1419,6 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             "load_sensor_valid": self._load_sensor_valid,
             "load_sensor_reason": self._load_sensor_reason,
             "mode": self._mode,
-            "execution_mode": self._execution_mode,
             "physical_commands_allowed": self.physical_commands_allowed,
             "startup_safe": self._startup_safe,
             "policy_version": self._policy.policy_version,

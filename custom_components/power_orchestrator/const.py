@@ -28,7 +28,6 @@ CONF_GRID_LOSS_SENSOR: Final = "grid_loss_sensor"
 CONF_BATTERY_THRESHOLD: Final = "battery_threshold"
 CONF_BATTERY_SOC: Final = "battery_soc"
 CONF_POLICY_VERSION: Final = "policy_version"
-CONF_EXECUTION_MODE: Final = "execution_mode"
 CONF_HARD_INTERLOCK: Final = "hard_interlock"
 CONF_SHED_SUSTAINED_LIMIT: Final = "shed_sustained_limit"
 CONF_SHED_SUSTAINED_DURATION: Final = "shed_sustained_duration"
@@ -48,8 +47,8 @@ MAX_CUSTOM_THRESHOLDS: Final = 64
 
 # Guarded restore (opt-in orchestration). Off by default; a load is only ever
 # re-enabled if it was shed by the planner itself, its per-load opt-in is set,
-# and restore is explicitly armed under live execution. No PV/forecast/
-# generation admission is implied by any of these.
+# and restore is explicitly armed under Auto. No PV/forecast/generation
+# admission is implied by any of these.
 CONF_RESTORE_ENABLED: Final = "restore_enabled"
 CONF_RESTORE_THRESHOLD: Final = "restore_threshold"
 CONF_RESTORE_HYSTERESIS: Final = "restore_hysteresis"
@@ -64,14 +63,14 @@ CONF_RESTORE_ARMED: Final = "restore_armed"
 GRID_LOSS_MODE_SENSOR: Final = "grid_loss_sensor"
 GRID_LOSS_MODE_THRESHOLD: Final = "battery_threshold"
 
-# Controller modes
+# Single persisted controller mode. Off and Observe never call physical
+# services; Observe still evaluates and records intended actions; Auto permits
+# guarded physical behavior.
 MODE_AUTO: Final = "auto"
 MODE_OFF: Final = "off"
-
-# Physical execution modes. New installs default to observe until an explicit
-# operator-controlled live cutover.
-EXECUTION_MODE_OBSERVE: Final = "observe"
-EXECUTION_MODE_LIVE: Final = "live"
+MODE_OBSERVE: Final = "observe"
+MODES: Final = frozenset({MODE_AUTO, MODE_OFF, MODE_OBSERVE})
+DEFAULT_MODE: Final = MODE_OBSERVE
 
 # Runtime status values
 STATUS_MONITORING: Final = "monitoring"
@@ -89,7 +88,6 @@ QUARANTINE_CLEAR_MAX_POWER_W: Final = 1.0
 DEFAULT_HYSTERESIS: Final = 200
 DEFAULT_PAUSE_PERIOD: Final = 60
 DEFAULT_POLICY_VERSION: Final = "load_shedding_v2"
-DEFAULT_EXECUTION_MODE: Final = EXECUTION_MODE_OBSERVE
 DEFAULT_HARD_INTERLOCK: Final = 9000.0
 DEFAULT_SHED_SUSTAINED_LIMIT: Final = 6500.0
 DEFAULT_SHED_SUSTAINED_DURATION: Final = 300.0
@@ -99,7 +97,7 @@ DEFAULT_SHED_CRITICAL_LIMIT: Final = 8000.0
 DEFAULT_SHED_CRITICAL_DURATION: Final = 5.0
 
 # Guarded-restore defaults (conservative; restore stays disabled unless the
-# operator opts in globally and per-load and arms it under live execution).
+# operator opts in globally and per-load and arms it under Auto).
 DEFAULT_RESTORE_ENABLED: Final = False
 DEFAULT_RESTORE_HYSTERESIS: Final = 200.0
 DEFAULT_RESTORE_DWELL: Final = 300.0
@@ -109,7 +107,6 @@ EVALUATION_INTERVAL: Final = 30
 RELAY_READBACK_TIMEOUT_SECONDS: Final = 2.0
 RELAY_READBACK_POLL_INTERVAL_SECONDS: Final = 0.1
 MAX_RUNTIME_PAUSE_SECONDS: Final = 24 * 60 * 60
-EXTERNAL_OWNERSHIP_GRACE_SECONDS: Final = 2 * 60 * 60
 
 # Persistence
 STORAGE_KEY: Final = "power_orchestrator_runtime"

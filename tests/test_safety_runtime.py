@@ -10,6 +10,7 @@ import pytest
 from power_orchestrator.const import (
     EVENT_ACTION,
     MODE_AUTO,
+    MODE_OBSERVE,
     MODE_OFF,
     STATUS_SAFETY_BLOCKED,
 )
@@ -32,7 +33,7 @@ def _state(value: str, *, age: float = 0, updated_age: float | None = None, unit
 
 
 def _coordinator(
-    *, execution_mode: str = "live", policy: PolicyConfig | None = None
+    *, mode: str = MODE_AUTO, policy: PolicyConfig | None = None
 ) -> PowerOrchestratorCoordinator:
     hass = MagicMock()
     hass.services.async_call = AsyncMock()
@@ -59,21 +60,21 @@ def _coordinator(
             battery_threshold=None,
             battery_soc_sensor=None,
             policy=policy,
-            execution_mode=execution_mode,
         ),
     )
-    coordinator.mode = MODE_AUTO
+    coordinator.mode = mode
     return coordinator
 
 
 def test_structured_event_has_bounded_schema() -> None:
-    coordinator = _coordinator(execution_mode="observe")
+    coordinator = _coordinator(mode=MODE_OBSERVE)
     coordinator._emit_event(EVENT_ACTION, {"action": "stop", "source": "test"})
     event = coordinator.hass.bus.async_fire.call_args.args[1]
     assert event["schema_version"] == 1
     assert event["event_type"] == EVENT_ACTION
     assert event["entry_id"] == coordinator._entry_id
-    assert event["execution_mode"] == "observe"
+    assert event["mode"] == MODE_OBSERVE
+    assert "execution_mode" not in event
 
 
 def test_numeric_load_ignores_timestamp_age_but_unavailable_state_blocks() -> None:
@@ -95,7 +96,7 @@ def test_numeric_load_ignores_timestamp_age_but_unavailable_state_blocks() -> No
 @pytest.mark.asyncio
 async def test_available_unchanged_aggregate_state_remains_usable_after_window() -> None:
     """A valid unchanged HA state is not aged out by the averaging window."""
-    coordinator = _coordinator(execution_mode="observe")
+    coordinator = _coordinator(mode=MODE_OBSERVE)
     coordinator._refresh_device_states = AsyncMock()
     report = datetime.fromtimestamp(100, timezone.utc)
     grid_state = SimpleNamespace(
@@ -176,49 +177,29 @@ async def test_off_mode_persists_without_authorizing_commands() -> None:
     coordinator._store.async_save.assert_awaited_once()
     assert coordinator._store.set_mode.call_args.args == (MODE_OFF,)
     assert coordinator.physical_commands_allowed is False
+    assert coordinator.emergency_commands_allowed is False
 
 
 @pytest.mark.asyncio
-async def test_auto_mode_promotes_physical_execution_to_live() -> None:
-    coordinator = _coordinator(execution_mode="observe")
+async def test_auto_mode_permits_physical_commands() -> None:
+    coordinator = _coordinator(mode=MODE_OBSERVE)
 
-    await coordinator.async_set_mode(MODE_OFF)
     await coordinator.async_set_mode(MODE_AUTO)
 
     assert coordinator.mode == MODE_AUTO
-    assert coordinator.execution_mode == "live"
     assert coordinator.physical_commands_allowed is True
-    assert coordinator._store.set_execution_mode.call_args.args == ("live",)
+    assert coordinator._store.set_mode.call_args.args == (MODE_AUTO,)
 
 
 @pytest.mark.asyncio
-async def test_observe_execution_cannot_disable_auto_mode() -> None:
-    coordinator = _coordinator(execution_mode="live")
+async def test_observe_mode_blocks_physical_and_emergency_commands() -> None:
+    coordinator = _coordinator(mode=MODE_AUTO)
 
-    with pytest.raises(ValueError, match="auto mode requires live execution"):
-        await coordinator.async_set_execution_mode("observe")
+    await coordinator.async_set_mode(MODE_OBSERVE)
 
-    assert coordinator.mode == MODE_AUTO
-    assert coordinator.execution_mode == "live"
-    assert coordinator.physical_commands_allowed is True
-
-
-@pytest.mark.asyncio
-async def test_entering_auto_claims_currently_on_configured_loads() -> None:
-    coordinator = _coordinator(execution_mode="observe")
-    device = coordinator._model.get_device("d1")
-    assert device is not None
-    coordinator.hass.states.get.side_effect = lambda entity_id: (
-        _state("on")
-        if entity_id in {"binary_sensor.grid", "switch.d1"}
-        else _state("1000")
-    )
-
-    await coordinator.async_set_mode(MODE_OFF)
-    await coordinator.async_set_mode(MODE_AUTO)
-
-    assert device.ownership.value == "planner"
-    assert coordinator.hass.services.async_call.await_count == 0
+    assert coordinator.mode == MODE_OBSERVE
+    assert coordinator.physical_commands_allowed is False
+    assert coordinator.emergency_commands_allowed is False
 
 
 @pytest.mark.asyncio
@@ -226,7 +207,7 @@ async def test_auto_mode_executes_guarded_stop_on_validated_overload() -> None:
     policy = PolicyConfig.from_mapping(
         {"thresholds": [{"power_limit": 1000, "duration_s": 0}]}
     )
-    coordinator = _coordinator(execution_mode="observe", policy=policy)
+    coordinator = _coordinator(mode=MODE_OBSERVE, policy=policy)
     coordinator.hass.states.get.side_effect = lambda entity_id: (
         _state("on")
         if entity_id in {"binary_sensor.grid", "switch.d1"}
@@ -236,7 +217,6 @@ async def test_auto_mode_executes_guarded_stop_on_validated_overload() -> None:
     )
     coordinator._confirm_device_state = AsyncMock(return_value=True)
 
-    await coordinator.async_set_mode(MODE_OFF)
     await coordinator.async_set_mode(MODE_AUTO)
 
     coordinator.hass.services.async_call.assert_awaited_once_with(
@@ -246,6 +226,24 @@ async def test_auto_mode_executes_guarded_stop_on_validated_overload() -> None:
         call.args[1] != "turn_on"
         for call in coordinator.hass.services.async_call.await_args_list
     )
+
+
+@pytest.mark.asyncio
+async def test_observe_mode_records_intended_shed_without_physical_call() -> None:
+    policy = PolicyConfig.from_mapping(
+        {"thresholds": [{"power_limit": 1000, "duration_s": 0}]}
+    )
+    coordinator = _coordinator(mode=MODE_OBSERVE, policy=policy)
+    coordinator.hass.states.get.side_effect = lambda entity_id: (
+        _state("on")
+        if entity_id in {"binary_sensor.grid", "switch.d1"}
+        else _state("2000")
+    )
+
+    await coordinator.async_force_evaluate()
+
+    assert coordinator.hass.services.async_call.await_count == 0
+    assert "observe" in coordinator.last_action.lower()
 
 
 def test_custom_policy_is_bounded_and_shedding_only() -> None:

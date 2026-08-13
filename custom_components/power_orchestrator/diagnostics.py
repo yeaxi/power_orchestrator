@@ -27,7 +27,7 @@ def _bounded_runtime_data(coordinator: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {"value_type": type(raw).__name__}
     keys = (
-        "status", "mode", "execution_mode", "policy_phase", "reason_code", "grid_ok",
+        "status", "mode", "policy_phase", "reason_code", "grid_ok",
         "load_sensor_valid", "load_sensor_reason", "startup_safe", "physical_commands_allowed",
         "journal_persistence_blocked", "action_journal_invalid", "journal_unresolved_count",
         "audit_history_total", "audit_history_truncated", "faulted_devices_count",

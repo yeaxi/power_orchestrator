@@ -5,7 +5,6 @@ import time
 
 import pytest
 
-from power_orchestrator.policy import Ownership
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 
 
@@ -13,9 +12,9 @@ def test_managed_device_defaults_and_serialization() -> None:
     device = ManagedDevice("d1", "Load", "switch.load", expected_power=2000)
     assert device.control_entity_ids == ("switch.load",)
     assert device.is_on is None
-    assert device.ownership is Ownership.UNKNOWN
     payload = device.to_dict()
     assert payload["device_id"] == "d1"
+    assert "ownership" not in payload
     assert "only_from_solar" not in payload
     assert "restore_priority" not in payload
 
@@ -35,7 +34,7 @@ def test_logical_device_deduplicates_actuators_and_ignores_removed_policy_fields
         }
     )
     assert device.control_entity_ids == ("switch.load", "climate.load")
-    assert device.ownership is Ownership.EXTERNAL
+    assert not hasattr(device, "ownership")
     assert device.power_sensor_id == "sensor.load_power"
 
 

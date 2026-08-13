@@ -10,17 +10,17 @@ from typing import Any, Mapping
 from homeassistant.helpers.storage import Store
 
 from .const import (
+    DEFAULT_MODE,
     DEVICE_RUNTIME_SCHEMA_VERSION,
-    EXECUTION_MODE_LIVE,
-    EXECUTION_MODE_OBSERVE,
-    EXTERNAL_OWNERSHIP_GRACE_SECONDS,
     FAULT_NOTIFICATION_SCHEMA_VERSION,
     MAX_RUNTIME_PAUSE_SECONDS,
     MODE_AUTO,
+    MODE_OBSERVE,
     MODE_OFF,
+    MODES,
     STORAGE_VERSION,
 )
-from .policy import Ownership, PolicyEngine, PolicyPhase, ReasonCode, TelemetryValidity
+from .policy import PolicyEngine, PolicyPhase, ReasonCode, TelemetryValidity
 from .power_model import PowerModel
 
 _MAX_AUDIT_ENTRIES = 100
@@ -69,25 +69,44 @@ class RuntimeStore:
         self._data = copy.deepcopy(dict(snapshot))
 
     def set_mode(self, mode: str) -> None:
-        if mode in (MODE_AUTO, MODE_OFF):
+        if mode in MODES:
             self._data["mode"] = mode
+            self._data.pop("execution_mode", None)
 
     def restore_mode(self) -> str | None:
         if "mode" not in self._data:
             return None
         value = self._data.get("mode")
-        return value if value in (MODE_AUTO, MODE_OFF) else MODE_OFF
+        return value if value in MODES else DEFAULT_MODE
 
-    def set_execution_mode(self, mode: str) -> None:
-        if mode in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE):
-            self._data["execution_mode"] = mode
+    def resolve_unified_mode(self, config_execution: Any = None) -> str:
+        """Map legacy planner/execution pairs onto one persisted mode.
 
-    def restore_execution_mode(self) -> str | None:
-        value = self._data.get("execution_mode")
-        return value if value in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE) else None
-
-    def clear_execution_mode(self) -> None:
-        self._data.pop("execution_mode", None)
+        Old observe execution becomes observe. Otherwise retain stored planner
+        auto/off when present. New default is observe. Legacy execution_mode is
+        cleared from the payload. Config execution is consulted only while the
+        store still carries the dual-mode shape or has no usable mode yet.
+        """
+        stored = self._data.get("mode")
+        legacy_execution = self._data.get("execution_mode")
+        has_legacy_execution = "execution_mode" in self._data
+        if legacy_execution not in {"observe", "live"}:
+            if has_legacy_execution or stored not in MODES:
+                legacy_execution = (
+                    config_execution if config_execution in {"observe", "live"} else None
+                )
+            else:
+                legacy_execution = None
+        if legacy_execution == "observe":
+            mode = MODE_OBSERVE
+        elif stored in (MODE_AUTO, MODE_OFF):
+            mode = stored
+        elif stored == MODE_OBSERVE:
+            mode = MODE_OBSERVE
+        else:
+            mode = DEFAULT_MODE
+        self.set_mode(mode)
+        return mode
 
     def save_pending_restore(self, device_ids: list[str]) -> None:
         """Persist the ordered, unique restore queue."""
@@ -188,33 +207,11 @@ class RuntimeStore:
         quarantined_devices: set[str] | frozenset[str] | list[str] | tuple[str, ...] = (),
         fault_reasons: Mapping[str, str] | None = None,
     ) -> None:
-        """Persist ownership, fault, and quarantine state."""
+        """Persist fault and quarantine state for configured loads."""
         configured = {device.device_id for device in model.all_devices()}
-        now = time.time()
-        devices: dict[str, dict[str, Any]] = {}
-        for device in model.all_devices():
-            ownership = device.ownership
-            until = device.ownership_until
-            if ownership is Ownership.EXTERNAL and not (
-                isinstance(until, (int, float))
-                and not isinstance(until, bool)
-                and math.isfinite(float(until))
-                and now < float(until) <= now + EXTERNAL_OWNERSHIP_GRACE_SECONDS
-            ):
-                ownership = Ownership.PLANNER
-                until = None
-            if ownership not in {
-                Ownership.UNKNOWN,
-                Ownership.PLANNER,
-                Ownership.MANUAL,
-                Ownership.EXTERNAL,
-            }:
-                ownership = Ownership.UNKNOWN
-                until = None
-            devices[device.device_id] = {
-                "ownership": ownership.value,
-                "ownership_until": until,
-            }
+        devices: dict[str, dict[str, Any]] = {
+            device.device_id: {} for device in model.all_devices()
+        }
         reasons = {
             device_id: value[:_MAX_FAULT_REASON_LENGTH]
             for device_id, value in (fault_reasons or {}).items()
@@ -234,7 +231,7 @@ class RuntimeStore:
         }
 
     def restore_device_runtime(self, model: PowerModel) -> tuple[set[str], set[str]]:
-        """Restore ownership and return validated fault/quarantine sets."""
+        """Return validated fault/quarantine sets from persisted runtime state."""
         raw = self._data.get("device_runtime")
         configured = {device.device_id for device in model.all_devices()}
         if raw is None:
@@ -244,28 +241,6 @@ class RuntimeStore:
             self._safety_storage_invalid = True
             return set(), configured
         self._safety_storage_invalid = False
-        now = time.time()
-        maximum = now + EXTERNAL_OWNERSHIP_GRACE_SECONDS
-        raw_devices = raw.get("devices", {})
-        if isinstance(raw_devices, dict):
-            for device_id, item in raw_devices.items():
-                device = model.get_device(device_id)
-                if device is None or not isinstance(item, dict):
-                    continue
-                try:
-                    ownership = Ownership(item.get("ownership", Ownership.UNKNOWN.value))
-                except (TypeError, ValueError):
-                    ownership = Ownership.UNKNOWN
-                until = self._finite_or_none(item.get("ownership_until"))
-                if ownership is Ownership.EXTERNAL and not (
-                    until is not None and now < until <= maximum
-                ):
-                    ownership = Ownership.PLANNER
-                    until = None
-                if ownership is not Ownership.EXTERNAL:
-                    until = None
-                device.ownership = ownership
-                device.ownership_until = until
         faulted = self._validated_device_set(raw.get("faulted_devices"), configured)
         quarantined = self._validated_device_set(
             raw.get("quarantined_devices"), configured

@@ -40,7 +40,6 @@ def test_emit_event_builds_bounded_envelope() -> None:
         "power_orchestrator.action",
         {"action": "turn_off"},
         entry_id="entry-1",
-        execution_mode="live",
         mode="auto",
     )
     assert fired
@@ -48,11 +47,11 @@ def test_emit_event_builds_bounded_envelope() -> None:
     assert event_type == "power_orchestrator.action"
     assert event["schema_version"] == EVENT_SCHEMA_VERSION
     assert event["entry_id"] == "entry-1"
-    assert event["execution_mode"] == "live"
+    assert "execution_mode" not in event
     assert event["mode"] == "auto"
     assert event["action"] == "turn_off"
 
 
 def test_emit_event_survives_missing_bus() -> None:
     # No bus / non-callable emitter must not raise.
-    emit_event(SimpleNamespace(), "x", {}, entry_id="e", execution_mode="observe", mode="off")
+    emit_event(SimpleNamespace(), "x", {}, entry_id="e", mode="off")

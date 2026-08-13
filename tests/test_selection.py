@@ -4,7 +4,6 @@ from __future__ import annotations
 import time
 from types import SimpleNamespace
 
-from power_orchestrator.policy import Ownership
 from power_orchestrator.power_model import ManagedDevice, PowerModel
 from power_orchestrator.selection import (
     restore_candidates,
@@ -29,10 +28,9 @@ def _model(*devices: ManagedDevice) -> PowerModel:
     return model
 
 
-def test_shed_candidates_selects_on_planner_load() -> None:
+def test_shed_candidates_selects_already_on_load() -> None:
     device = ManagedDevice("d1", "D1", "switch.d1", priority=1)
     device.is_on = True
-    device.ownership = Ownership.PLANNER
     candidates, rejections = shed_candidates(_model(device), set(), now=time.time())
     assert [d.device_id for d in candidates] == ["d1"]
     assert rejections.counts == {}
@@ -49,16 +47,6 @@ def test_shed_candidates_reports_rejections() -> None:
     assert rejections.total == 2
 
 
-def test_shed_candidates_external_grace_blocks() -> None:
-    device = ManagedDevice("d1", "D1", "switch.d1")
-    device.is_on = True
-    device.ownership = Ownership.EXTERNAL
-    device.ownership_until = time.time() + 3600
-    candidates, rejections = shed_candidates(_model(device), set(), now=time.time())
-    assert candidates == []
-    assert rejections.counts == {"external_ownership_grace": 1}
-
-
 def test_shed_rejection_summary() -> None:
     assert shed_rejection_summary({}) == "no configured devices"
     assert shed_rejection_summary({"off": 2, "quarantined": 1}) == "off=2, quarantined=1"
@@ -66,7 +54,6 @@ def test_shed_rejection_summary() -> None:
 
 def test_restore_candidates_eligibility() -> None:
     device = ManagedDevice("d1", "Boiler", "switch.d1", expected_power=500, restore_enabled=True)
-    device.ownership = Ownership.PLANNER
     hass = _Hass({"switch.d1": _state("off")})
     common = dict(
         planner_shed=["d1"],
@@ -97,7 +84,6 @@ def test_restore_candidates_excludes_climate() -> None:
         "d1", "HVAC", "switch.d1", expected_power=500, restore_enabled=True,
         actuator_entity_ids=("climate.d1",),
     )
-    device.ownership = Ownership.PLANNER
     hass = _Hass({"switch.d1": _state("off"), "climate.d1": _state("off")})
     result = restore_candidates(
         hass, _model(device), planner_shed=["d1"], faulted=set(), quarantined=set(),
@@ -114,8 +100,6 @@ def test_restore_candidates_reverse_actual_shed_order() -> None:
     second = ManagedDevice(
         "d2", "Second", "switch.d2", expected_power=500, restore_enabled=True
     )
-    first.ownership = Ownership.PLANNER
-    second.ownership = Ownership.PLANNER
     hass = _Hass({"switch.d1": _state("off"), "switch.d2": _state("off")})
 
     result = restore_candidates(

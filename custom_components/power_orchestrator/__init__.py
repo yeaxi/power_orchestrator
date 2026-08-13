@@ -33,7 +33,6 @@ from .const import (
     CONF_DEVICE_POWER_SENSOR,
     CONF_DEVICE_RESTORE_ENABLED,
     CONF_DEVICES,
-    CONF_EXECUTION_MODE,
     CONF_GRID_LOSS_MODE,
     CONF_GRID_LOSS_SENSOR,
     CONF_HYSTERESIS,
@@ -50,17 +49,15 @@ from .const import (
     CONF_SHED_PRIORITY,
     CONF_THRESHOLDS,
     DEFAULT_AVERAGING_PERIOD,
-    DEFAULT_EXECUTION_MODE,
     DEFAULT_HYSTERESIS,
     DEFAULT_PAUSE_PERIOD,
     DEFAULT_SAFETY_RESERVE,
     DOMAIN,
-    EXECUTION_MODE_LIVE,
-    EXECUTION_MODE_OBSERVE,
     GRID_LOSS_MODE_SENSOR,
     MAX_RUNTIME_PAUSE_SECONDS,
-    MODE_AUTO,
+    MODE_OBSERVE,
     MODE_OFF,
+    MODES,
     STORAGE_KEY,
     STORAGE_VERSION,
 )
@@ -80,8 +77,6 @@ _REGISTERED_SERVICES = (
     "set_mode",
     "request_stop",
     "clear_quarantine",
-    "set_execution_mode",
-    "authorize_shedding",
     "authorize_restore",
     "request_restore",
 )
@@ -406,11 +401,6 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     await store.async_load()
     policy = PolicyConfig.from_mapping(data)
     restore_config = RestoreConfig.from_mapping(data)
-    execution_mode = store.restore_execution_mode() or data.get(
-        CONF_EXECUTION_MODE, DEFAULT_EXECUTION_MODE
-    )
-    if execution_mode not in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE):
-        execution_mode = DEFAULT_EXECUTION_MODE
     coordinator = PowerOrchestratorCoordinator(
         hass=hass,
         model=model,
@@ -447,7 +437,6 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
             battery_soc_sensor=data.get(CONF_BATTERY_SOC),
             entry_id=entry.entry_id,
             policy=policy,
-            execution_mode=execution_mode,
             restore_config=restore_config,
         ),
     )
@@ -465,20 +454,20 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     coordinator.restore_action_journal(store.unresolved_actions())
     store.restore_policy_runtime(coordinator._policy_engine, model)
     coordinator.restore_pending_restore(store.restore_pending_restore(model))
-    restored_mode = MODE_OFF if store.safety_storage_invalid else store.restore_mode()
-    coordinator.mode = restored_mode if restored_mode in (MODE_AUTO, MODE_OFF) else MODE_OFF
-    if coordinator.mode == MODE_AUTO and coordinator.execution_mode == EXECUTION_MODE_OBSERVE:
-        coordinator._execution_mode = EXECUTION_MODE_LIVE
-        store.set_execution_mode(EXECUTION_MODE_LIVE)
-        try:
-            coordinator._save_runtime_snapshot()
-            await store.async_save()
-        except Exception:
-            coordinator._mode = MODE_OFF
-            coordinator._execution_mode = EXECUTION_MODE_OBSERVE
-            store.set_mode(MODE_OFF)
-            store.set_execution_mode(EXECUTION_MODE_OBSERVE)
-            _LOGGER.exception("Auto mode could not be persisted as live; forcing off")
+    if store.safety_storage_invalid:
+        restored_mode = MODE_OFF
+    else:
+        restored_mode = store.resolve_unified_mode(data.get("execution_mode"))
+    if restored_mode not in MODES:
+        restored_mode = MODE_OBSERVE
+    try:
+        coordinator.mode = restored_mode
+        coordinator._save_runtime_snapshot()
+        await store.async_save()
+    except Exception:
+        coordinator._mode = MODE_OBSERVE
+        store.set_mode(MODE_OBSERVE)
+        _LOGGER.exception("Unified mode could not be persisted; defaulting to observe")
 
     runtime = PowerOrchestratorRuntimeData(coordinator=coordinator, model=model, store=store)
     entry.runtime_data = runtime
@@ -560,7 +549,6 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_BATTERY_SOC,
         CONF_BATTERY_THRESHOLD,
         CONF_DEVICES,
-        CONF_EXECUTION_MODE,
         CONF_GRID_LOSS_MODE,
         CONF_GRID_LOSS_SENSOR,
         CONF_HYSTERESIS,
@@ -657,7 +645,7 @@ async def _register_services(hass: HomeAssistant) -> None:
 
     async def set_mode(call: Any) -> None:
         mode = getattr(call, "data", {}).get("mode")
-        if mode not in (MODE_AUTO, MODE_OFF):
+        if mode not in MODES:
             raise _translated_error(ServiceValidationError, "invalid_service_mode")
         try:
             runtime = _service_runtime(hass)
@@ -702,35 +690,7 @@ async def _register_services(hass: HomeAssistant) -> None:
                 HomeAssistantError, "quarantine_clear_failed", reason=str(exc)
             ) from exc
 
-    async def set_execution_mode(call: Any) -> None:
-        data = getattr(call, "data", {})
-        value = data.get(CONF_EXECUTION_MODE)
-        confirm = data.get("confirm_live", False)
-        if value not in (EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE):
-            raise _translated_error(ServiceValidationError, "invalid_execution_mode")
-        try:
-            await _service_runtime(hass).coordinator.async_set_execution_mode(
-                value, confirm_live=bool(confirm)
-            )
-        except Exception as exc:
-            raise _translated_error(
-                HomeAssistantError, "execution_mode_change_failed", reason=str(exc)
-            ) from exc
 
-    async def authorize_shedding(call: Any) -> None:
-        data = getattr(call, "data", {})
-        device_ids = data.get("device_ids")
-        if not isinstance(device_ids, list) or not device_ids:
-            raise _translated_error(ServiceValidationError, "missing_device_ids")
-        try:
-            await _service_runtime(hass).coordinator.async_authorize_shedding(
-                device_ids,
-                confirm_takeover=bool(data.get("confirm_takeover", False)),
-            )
-        except Exception as exc:
-            raise _translated_error(
-                HomeAssistantError, "shedding_authorization_failed", reason=str(exc)
-            ) from exc
 
     async def authorize_restore(call: Any) -> None:
         data = getattr(call, "data", {})
@@ -764,26 +724,12 @@ async def _register_services(hass: HomeAssistant) -> None:
 
     service_schema = {
         "force_evaluate": vol.Schema({}),
-        "set_mode": vol.Schema({vol.Required("mode"): vol.In([MODE_AUTO, MODE_OFF])}),
+        "set_mode": vol.Schema({vol.Required("mode"): vol.In(sorted(MODES))}),
         "request_stop": vol.Schema(
             {vol.Required("device_id"): str, vol.Optional("source", default="service"): str}
         ),
         "clear_quarantine": vol.Schema(
             {vol.Required("device_id"): str, vol.Optional("source", default="service"): str}
-        ),
-        "set_execution_mode": vol.Schema(
-            {
-                vol.Required(CONF_EXECUTION_MODE): vol.In(
-                    [EXECUTION_MODE_LIVE, EXECUTION_MODE_OBSERVE]
-                ),
-                vol.Optional("confirm_live", default=False): bool,
-            }
-        ),
-        "authorize_shedding": vol.Schema(
-            {
-                vol.Required("device_ids"): vol.All([str], vol.Length(min=1, max=64)),
-                vol.Required("confirm_takeover"): bool,
-            }
         ),
         "authorize_restore": vol.Schema({vol.Required("confirm_restore"): bool}),
         "request_restore": vol.Schema(
@@ -799,8 +745,6 @@ async def _register_services(hass: HomeAssistant) -> None:
         "set_mode": set_mode,
         "request_stop": request_stop,
         "clear_quarantine": clear_quarantine,
-        "set_execution_mode": set_execution_mode,
-        "authorize_shedding": authorize_shedding,
         "authorize_restore": authorize_restore,
         "request_restore": request_restore,
     }

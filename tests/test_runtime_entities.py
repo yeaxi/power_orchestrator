@@ -29,7 +29,6 @@ from power_orchestrator.sensor import (
     PowerOrchestratorAverageLoadSensor,
     PowerOrchestratorAvailableCapacitySensor,
     PowerOrchestratorCurrentLoadSensor,
-    PowerOrchestratorExecutionModeSensor,
     PowerOrchestratorLastOperationSensor,
     PowerOrchestratorReasonCodeSensor,
     PowerOrchestratorStatusSensor,
@@ -62,7 +61,7 @@ async def test_platform_setup_has_expected_stop_only_entities() -> None:
     entry = SimpleNamespace(entry_id="entry-1", runtime_data=SimpleNamespace(coordinator=coordinator))
     add_sensor = MagicMock()
     await async_setup_sensor(MagicMock(), entry, add_sensor)
-    assert len(add_sensor.call_args.args[0]) == 8
+    assert len(add_sensor.call_args.args[0]) == 7
     add_binary = MagicMock()
     await async_setup_binary(MagicMock(), entry, add_binary)
     binary_entities = add_binary.call_args.args[0]
@@ -91,9 +90,8 @@ def test_diagnostic_entities_expose_fault_and_journal_state() -> None:
     assert journal.is_on is False
 
 
-def test_execution_reason_and_operation_entities_do_not_expose_reenable_fields() -> None:
+def test_reason_and_operation_entities_do_not_expose_reenable_fields() -> None:
     coordinator = MagicMock()
-    coordinator.execution_mode = "observe"
     coordinator.mode = MODE_OFF
     coordinator.reason_code = "observe_mode"
     coordinator.data = {
@@ -109,13 +107,12 @@ def test_execution_reason_and_operation_entities_do_not_expose_reenable_fields()
         "audit_history": [],
     }
     entry = SimpleNamespace(entry_id="entry-1")
-    execution = PowerOrchestratorExecutionModeSensor(coordinator, entry)
     reason = PowerOrchestratorReasonCodeSensor(coordinator, entry)
     operation = PowerOrchestratorLastOperationSensor(coordinator, entry)
-    assert execution.native_value == "observe"
     assert reason.native_value == "observe_mode"
     assert operation.native_value == "observe_only"
     assert "pending_action_id" not in operation.extra_state_attributes
+    assert "execution_mode" not in (coordinator.data or {})
 
 
 def test_invalid_load_numeric_entities_are_unavailable() -> None:
@@ -158,16 +155,17 @@ def test_grid_ok_sensor_availability_tracks_source_semantic_availability() -> No
 
 
 @pytest.mark.asyncio
-async def test_mode_select_delegates_only_auto_or_off() -> None:
+async def test_mode_select_delegates_auto_observe_or_off() -> None:
     coordinator = MagicMock()
     coordinator.mode = "auto"
     coordinator.async_set_mode = AsyncMock()
     entity = PowerOrchestratorModeSelect(coordinator, SimpleNamespace(entry_id="entry"))
     entity.async_write_ha_state = MagicMock()
+    assert entity._attr_options == ["auto", "observe", "off"]
     with pytest.raises(ServiceValidationError):
         await entity.async_select_option("invalid")
-    await entity.async_select_option("off")
-    coordinator.async_set_mode.assert_awaited_once_with("off")
+    await entity.async_select_option("observe")
+    coordinator.async_set_mode.assert_awaited_once_with("observe")
 
 
 @pytest.mark.asyncio
