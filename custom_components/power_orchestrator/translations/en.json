@@ -55,7 +55,7 @@
         },
         "data_description": {
           "grid_power": "Optional grid/import power sensor used only as a safety and diagnostic input. The load sensor below is authoritative for shedding decisions.",
-          "battery_soc": "Battery state-of-charge sensor used by threshold safety mode and availability checks. An unavailable, unknown, or wrong-unit value blocks planner actions and can trigger the safety stop."
+          "battery_soc": "Battery state-of-charge sensor used by threshold safety mode and availability checks. An unavailable, unknown, or wrong-unit value blocks physical actions."
         }
       },
       "load_monitoring": {
@@ -66,7 +66,7 @@
           "averaging_period": "Averaging period (s)"
         },
         "data_description": {
-          "load_sensor": "Authoritative whole-house power sensor. Available, non-negative readings in watts drive shedding decisions; unavailable, unknown, or unsupported-unit readings block planner actions.",
+          "load_sensor": "Authoritative whole-house power sensor. Available, non-negative readings in watts drive shedding decisions; unavailable, unknown, or unsupported-unit readings block physical actions.",
           "averaging_period": "Time window used to calculate average load. A longer window smooths short spikes; it does not change the source entity's semantic availability."
         }
       },
@@ -158,8 +158,8 @@
           "devices": "Managed logical devices"
         },
         "data_description": {
-          "load_sensor": "Authoritative whole-house power sensor. Invalid, unavailable, unknown, or wrong-unit values block planner actions.",
-          "averaging_period": "Average-load window; it does not change source-entity semantic availability. Unavailable or unknown input blocks normal planner actions.",
+          "load_sensor": "Authoritative whole-house power sensor. Invalid, unavailable, unknown, or wrong-unit values block physical actions.",
+          "averaging_period": "Average-load window; it does not change source-entity semantic availability. Unavailable or unknown input blocks physical actions.",
           "pause_period": "Seconds a shed device remains paused to prevent rapid repeated shedding.",
           "grid_loss_mode": "Select the authoritative grid-loss safety source.",
           "grid_loss_sensor": "Required in sensor mode; it must be available and ON for normal operation.",
@@ -198,7 +198,7 @@
           "priority_order": "Priority order (drag to reorder)"
         },
         "data_description": {
-          "load_sensor": "Authoritative whole-house power sensor used for bounded shedding. Unavailable, unknown, invalid, or wrong-unit readings block planner actions.",
+          "load_sensor": "Authoritative whole-house power sensor used for bounded shedding. Unavailable, unknown, invalid, or wrong-unit readings block physical actions.",
           "averaging_period": "Time window for average-load decisions. It does not extend the independent safety-input availability budget.",
           "pause_period": "Seconds a device remains paused after a shed stop. Emergency safety stops are not delayed by this timer.",
           "grid_loss_mode": "Select the authoritative safety source. Only a valid, available source permits ordinary shedding decisions.",
