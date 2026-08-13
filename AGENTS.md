@@ -21,12 +21,13 @@ This repo is a single Home Assistant custom integration (`custom_components/powe
 
 **Toolchain / environment.** Requires Python 3.14 (see `pyproject.toml`, CI pins `3.14.2`), which is not the system Python. It is provided via `uv` (`uv` is on `PATH` in interactive shells). A single venv `.venv` holds everything: the quality tools plus real Home Assistant. There is no bespoke mock package anymore — the whole suite runs against real Home Assistant via `pytest-homeassistant-custom-component`.
 
-- `.venv` deps: `pytest pytest-asyncio voluptuous PyYAML coverage mypy ruff homeassistant==2026.7.4 pytest-homeassistant-custom-component==0.13.348`.
+- `.venv` deps: `uv pip install -r requirements-ci.txt`. That file pins every version CI uses, including `homeassistant==2026.7.4` and `pytest-homeassistant-custom-component==0.13.348`, which must be bumped as a pair together with `hacs.json`.
 - The plugin auto-registers, so `hass` and `enable_custom_integrations` fixtures are available; `tests/conftest.py` enables custom integrations automatically. Unit tests that only need a lightweight `hass` still build their own `MagicMock`.
 
 **Gates** (commands themselves are the source of truth in `.github/workflows/ci.yml`):
 
-- Quality + tests — run with `.venv`: `compileall`, `ruff check`, `mypy custom_components/power_orchestrator`, then `coverage run --branch -m pytest tests/` (coverage gate `fail_under = 70`).
+- Quality + tests — run with `.venv`: `compileall`, `ruff check`, `mypy custom_components/power_orchestrator`, then `coverage run --branch -m pytest tests/` (coverage gate `fail_under = 75`).
 - Real HA behavior/loader suite — run with `.venv`: `python -m pytest -c pytest_real_ha.ini tests_real_ha -q` (its `pythonpath` is `custom_components`; covers loader + end-to-end shed/emergency/observe/persistence behavior).
+- Ecosystem validation — `.github/workflows/validate.yml` runs hassfest (pinned Docker image) and HACS validation. Both need Docker or GitHub API access, so they run on GitHub rather than locally, on every push and pull request and weekly on a schedule.
 
 **End-to-end / hello-world:** to exercise the core load-shedding action in a real (ephemeral, in-process) HA runtime, boot HA via the `pytest-homeassistant-custom-component` `hass` fixture, install the integration into `hass.config.path("custom_components", ...)` (as `tests_real_ha/test_loader.py` does), add a `MockConfigEntry` with one managed load, then arm it with the `power_orchestrator.set_mode` service set to `auto`. Non-obvious: a fresh managed load that is already `on` is treated as *externally owned* (2h grace) and will NOT be shed by ordinary policy; `set_mode: auto` is what claims currently-on loads into planner ownership and flips execution to `live`. After arming, driving the aggregate load sensor to `>= 9000 W` (hard interlock) and calling `power_orchestrator.force_evaluate` produces one bounded `turn_off` with readback (status → `load_shedding`).

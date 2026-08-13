@@ -81,19 +81,22 @@ def test_pyproject_and_ci_define_the_local_quality_gate():
     assert pyproject["tool"]["pytest"]["ini_options"]["testpaths"] == ["tests"]
     assert pyproject["tool"]["coverage"]["report"]["fail_under"] == 75
 
+    requirements = f"\n{(ROOT / 'requirements-ci.txt').read_text()}"
+    assert "\nhomeassistant==2026.7.4" in requirements
+    assert "\npytest-homeassistant-custom-component==0.13.348" in requirements
+    for package in ("pytest", "pytest-asyncio", "voluptuous", "PyYAML", "coverage", "ruff", "mypy"):
+        assert f"\n{package}==" in requirements, f"{package} is not pinned"
+
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
-    assert "pytest" in workflow
+    assert "requirements-ci.txt" in workflow
     assert "compileall" in workflow
     assert "json.tool" in workflow
-    assert "PyYAML" in workflow
     assert "yaml.safe_load" in workflow
     assert "ruff check" in workflow
     assert "mypy" in workflow
     assert "coverage run" in workflow
     assert "coverage report" in workflow
     assert 'python-version: "3.14.2"' in workflow
-    assert "homeassistant==2026.7.4" in workflow
-    assert "pytest-homeassistant-custom-component==0.13.348" in workflow
     assert "pytest_real_ha.ini" in workflow
     assert "tests_real_ha" in workflow
 
