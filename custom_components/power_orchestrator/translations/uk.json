@@ -77,7 +77,10 @@
       "user": {
         "title": "Safety Inputs",
         "description": "Оберіть входи навантаження та безпеки для bounded load shedding:\n{summary}",
-        "data": {},
+        "data": {
+          "grid_power": "Сенсор потужності мережі/імпорту (необов'язково)",
+          "battery_soc": "Сенсор рівня заряду батареї (%) (необов'язково)"
+        },
         "data_description": {
           "grid_power": "Необов’язковий сенсор потужності мережі/імпорту лише для safety та діагностики. Авторитетним для shedding-рішень є сенсор навантаження.",
           "battery_soc": "Сенсор заряду батареї для threshold safety mode і перевірки доступності. Недоступне, unknown або неправильне значення блокує planner-дії та може активувати safety stop."
@@ -274,7 +277,6 @@
           "battery_soc": "Обов’язковий у battery-threshold mode; має бути доступним, валідним і вище порогу.",
           "battery_threshold": "SoC, при якому джерело вважається втраченим і діє safety shedding навантажень.",
           "devices": "Повні mappings logical devices: entities керування, expected watts, actuator groups і shedding priorities.",
-          "priority_order": "Порядок пріоритетів (перетягніть для перестановки). Перший entity перевіряється першим.",
           "threshold_count": "Кількість finite, строго зростаючих power/time threshold pairs."
         }
       }

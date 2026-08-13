@@ -77,7 +77,10 @@
       "user": {
         "title": "Safety Inputs",
         "description": "Select the load and safety inputs for bounded load shedding:\n{summary}",
-        "data": {},
+        "data": {
+          "grid_power": "Grid/import power sensor (optional)",
+          "battery_soc": "Battery state-of-charge sensor (%) (optional)"
+        },
         "data_description": {
           "grid_power": "Optional grid/import power sensor used only as a safety and diagnostic input. The load sensor below is authoritative for shedding decisions.",
           "battery_soc": "Battery state-of-charge sensor used by threshold safety mode and availability checks. An unavailable, unknown, or wrong-unit value blocks planner actions and can trigger the safety stop."
@@ -274,7 +277,6 @@
           "battery_soc": "Required in battery-threshold mode; it must be available, valid, and above the threshold.",
           "battery_threshold": "SoC at or below which the safety source is considered lost and optional loads are shed.",
           "devices": "Complete logical-device mappings, including control entities, expected watts, actuator groups, and shedding priorities.",
-          "priority_order": "Priority order (drag to reorder). The first entity is evaluated first.",
           "threshold_count": "Number of finite, strictly increasing power/time threshold pairs."
         }
       }
