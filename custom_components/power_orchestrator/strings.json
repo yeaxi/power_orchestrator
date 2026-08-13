@@ -279,20 +279,6 @@
         }
       }
     },
-    "thresholds": {
-      "title": "Overload threshold {index}",
-      "description": "Add thresholds in strictly increasing power order. Collected thresholds: {count}.",
-      "data": {
-        "threshold_power": "Power limit (W)",
-        "threshold_duration": "Dwell time (s)",
-        "add_threshold": "Add another threshold"
-      },
-      "data_description": {
-        "threshold_power": "The available load must remain above this limit for the dwell time before one eligible load is stopped.",
-        "threshold_duration": "Continuous seconds above the power limit. Invalid or unavailable telemetry never confirms shedding.",
-        "add_threshold": "Continue with another strictly higher power limit."
-      }
-    },
     "error": {
       "invalid_priority_order": "Each priority position must contain a different optional device.",
       "invalid_discovered_devices": "Select only configured logical load candidates.",
@@ -390,20 +376,20 @@
           "threshold_10_power": "Power limit 10 that begins this tier's dwell timer. When available aggregate load remains above the limit, the coordinator sheds one logical device after the configured dwell time.",
           "threshold_10_time": "How many seconds available aggregate load must remain continuously above threshold 10. A short spike, unavailable input, or invalid telemetry never confirms shedding."
         }
-      }
-    },
-    "thresholds": {
-      "title": "Overload threshold {index}",
-      "description": "Add thresholds in strictly increasing power order. Collected thresholds: {count}.",
-      "data": {
-        "threshold_power": "Power limit (W)",
-        "threshold_duration": "Dwell time (s)",
-        "add_threshold": "Add another threshold"
       },
-      "data_description": {
-        "threshold_power": "The available load must remain above this limit for the dwell time before one eligible load is stopped.",
-        "threshold_duration": "Continuous seconds above the power limit. Invalid or unavailable telemetry never confirms shedding.",
-        "add_threshold": "Continue with another strictly higher power limit."
+      "thresholds": {
+        "title": "Overload threshold {index}",
+        "description": "Add thresholds in strictly increasing power order. Collected thresholds: {count}.",
+        "data": {
+          "threshold_power": "Power limit (W)",
+          "threshold_duration": "Dwell time (s)",
+          "add_threshold": "Add another threshold"
+        },
+        "data_description": {
+          "threshold_power": "The available load must remain above this limit for the dwell time before one eligible load is stopped.",
+          "threshold_duration": "Continuous seconds above the power limit. Invalid or unavailable telemetry never confirms shedding.",
+          "add_threshold": "Continue with another strictly higher power limit."
+        }
       }
     },
     "error": {
