@@ -113,6 +113,16 @@ def coordinator(
     return result
 
 
+def set_valid_stop_states(coordinator_instance: PowerOrchestratorCoordinator) -> None:
+    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
+        state("on")
+        if entity_id == "binary_sensor.grid"
+        else state("1000")
+        if entity_id == "sensor.load"
+        else state("on")
+    )
+
+
 def test_grid_safety_uses_semantic_unavailable_state_not_timestamp_age() -> None:
     coordinator_instance = coordinator()
     coordinator_instance.hass.states.get.return_value = None
@@ -189,9 +199,7 @@ async def test_manual_stop_is_guarded_and_confirmed() -> None:
     device = coordinator_instance._model.get_device("d1")
     assert device is not None
     device.is_on = True
-    coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
-        state("on") if entity_id == "switch.load_1" else state("on")
-    )
+    set_valid_stop_states(coordinator_instance)
     coordinator_instance._confirm_device_state = AsyncMock(return_value=True)
 
     assert await coordinator_instance.async_request_stop("d1", source="test") is True
@@ -213,6 +221,7 @@ async def test_confirmed_stop_is_durable_and_saved_before_command() -> None:
     device = coordinator_instance._model.get_device("d1")
     assert device is not None
     device.is_on = True
+    set_valid_stop_states(coordinator_instance)
     coordinator_instance._confirm_device_state = AsyncMock(return_value=True)
 
     async def service_call(*_args, **_kwargs):
@@ -241,6 +250,7 @@ async def test_journal_persistence_failure_is_retained_and_retried() -> None:
     device = coordinator_instance._model.get_device("d1")
     assert device is not None
     device.is_on = True
+    set_valid_stop_states(coordinator_instance)
     coordinator_instance._confirm_device_state = AsyncMock(return_value=True)
 
     assert await coordinator_instance.async_request_stop("d1", source="test") is True
@@ -267,6 +277,7 @@ async def test_observe_only_action_is_durable_without_physical_call() -> None:
     device = coordinator_instance._model.get_device("d1")
     assert device is not None
     device.is_on = True
+    set_valid_stop_states(coordinator_instance)
 
     assert await coordinator_instance.async_request_stop("d1", source="observe_test") is False
     assert backend.events == ["save"]
