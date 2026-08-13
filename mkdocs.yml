@@ -1,0 +1,43 @@
+site_name: Power Orchestrator
+site_url: https://yeaxi.github.io/power_orchestrator/
+repo_url: https://github.com/yeaxi/power_orchestrator
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - search.suggest
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+
+nav:
+  - Home: index.md
+  - Install: install.md
+  - Configure: configuration.md
+  - Entities and services: entities-and-services.md
+  - Troubleshooting: troubleshooting.md
+  - Architecture:
+      - Overview: architecture/index.md
+      - Specification: architecture/power-orchestrator-spec.md
+  - Development:
+      - Contributing: development/contributing.md
+      - Git workflow: development/git-workflow.md
+      - Verification: development/verification.md
+
+markdown_extensions:
+  - tables
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.superfences

@@ -17,7 +17,7 @@ def test_hacs_and_manifest_metadata_are_release_ready():
     assert manifest["single_config_entry"] is True
     assert manifest.get("dependencies", []) == []
     assert manifest["codeowners"]
-    assert manifest["documentation"].startswith("https://github.com/")
+    assert manifest["documentation"] == "https://yeaxi.github.io/power_orchestrator/"
     assert manifest["issue_tracker"].endswith("/issues")
     assert hacs["homeassistant"] == "2026.7.4"
     assert hacs["render_readme"] is True
@@ -51,7 +51,7 @@ def test_pyproject_and_ci_define_the_local_quality_gate():
 
 
 def test_controlled_ha_verification_procedure_is_present():
-    procedure = (ROOT / "HA_VERIFICATION.md").read_text()
+    procedure = (ROOT / "docs" / "development" / "verification.md").read_text()
     for heading in (
         "## 3. Installation/package check",
         "## 4. Config flow walkthrough",
