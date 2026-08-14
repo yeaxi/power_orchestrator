@@ -41,6 +41,8 @@ git tag v0.5.1
 git push origin v0.5.1
 ```
 
+Do not draft the GitHub Release in the UI. Pushing the tag is the only publish path. If a release for that tag already exists, a retry uploads `power_orchestrator.zip` onto it instead of no-oping.
+
 Check the asset locally first if you want the same verification without a tag:
 
 ```bash

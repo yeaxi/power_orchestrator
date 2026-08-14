@@ -136,6 +136,8 @@ def test_release_pipeline_publishes_the_asset_hacs_downloads():
     assert "contents: write" in release
     assert "./.github/workflows/ci.yml" in release
     assert "./.github/workflows/validate.yml" in release
+    assert "pipefail" in release
+    assert "gh release upload" in release
 
 
 def test_ecosystem_validation_runs_in_ci():
