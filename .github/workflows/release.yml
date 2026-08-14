@@ -46,6 +46,7 @@ jobs:
       - name: Build the release asset
         id: build
         run: |
+          set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           python scripts/build_release_zip.py --expect-version "${version}" | tee build.log
           echo "version=${version}" >>"${GITHUB_OUTPUT}"
@@ -77,9 +78,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            dist/power_orchestrator.zip \
-            dist/power_orchestrator.zip.sha256 \
-            --title "${GITHUB_REF_NAME}" \
-            --verify-tag \
-            --generate-notes
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" \
+              dist/power_orchestrator.zip \
+              dist/power_orchestrator.zip.sha256 \
+              --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              dist/power_orchestrator.zip \
+              dist/power_orchestrator.zip.sha256 \
+              --title "${GITHUB_REF_NAME}" \
+              --verify-tag \
+              --generate-notes
+          fi
