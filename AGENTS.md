@@ -21,7 +21,7 @@ This repo is a single Home Assistant custom integration (`custom_components/powe
 
 **Toolchain / environment.** Requires Python 3.14 (see `pyproject.toml`, CI pins `3.14.2`), which is not the system Python. It is provided via `uv` (`uv` is on `PATH` in interactive shells). A single venv `.venv` holds everything: the quality tools plus real Home Assistant. There is no bespoke mock package anymore — the whole suite runs against real Home Assistant via `pytest-homeassistant-custom-component`.
 
-- `.venv` deps: `uv pip install -r requirements-ci.txt`. That file pins every version CI uses, including `homeassistant==2026.7.4` and `pytest-homeassistant-custom-component==0.13.348`, which must be bumped as a pair together with `hacs.json` and the hassfest image tag in `.github/workflows/validate.yml`.
+- `.venv` deps: `uv pip install -r requirements-ci.txt`. That file pins every version CI uses, including `homeassistant==2026.8.2` and `pytest-homeassistant-custom-component==0.13.356`, which must be bumped as a pair together with `hacs.json` and the hassfest image tag in `.github/workflows/validate.yml`.
 - The plugin auto-registers, so `hass` and `enable_custom_integrations` fixtures are available; `tests/conftest.py` enables custom integrations automatically. Unit tests that only need a lightweight `hass` still build their own `MagicMock`.
 
 **Gates** (commands themselves are the source of truth in `.github/workflows/ci.yml`):

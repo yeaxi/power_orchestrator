@@ -1,6 +1,6 @@
 # Install
 
-Requires Home Assistant 2026.7.4 or newer.
+Requires Home Assistant 2026.8.2 or newer.
 
 ## What you need
 
