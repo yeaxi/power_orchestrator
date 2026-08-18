@@ -19,6 +19,16 @@ updates:
     # Home Assistant and its pytest plugin are a matched pair, and bumping the
     # floor is a supported-version decision rather than a dependency refresh.
     # Both move by hand together with hacs.json and the hassfest image tag.
+    #
+    # homeassistant and pytest-homeassistant-custom-component also hard-pin
+    # exact versions of voluptuous, pytest, and coverage in their own
+    # requires_dist. Any Dependabot PR that tries to bump one of those
+    # transitives on its own fails `pip install -r requirements-ci.txt` with
+    # ResolutionImpossible and can never merge, so they ride with the pair
+    # rather than getting their own PRs.
     ignore:
       - dependency-name: homeassistant
       - dependency-name: pytest-homeassistant-custom-component
+      - dependency-name: voluptuous
+      - dependency-name: pytest
+      - dependency-name: coverage
