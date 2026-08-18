@@ -6,5 +6,5 @@
   "hide_default_branch": true,
   "zip_release": true,
   "country": ["UA", "US"],
-  "homeassistant": "2026.7.4"
+  "homeassistant": "2026.8.2"
 }

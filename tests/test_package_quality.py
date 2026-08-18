@@ -39,7 +39,7 @@ def test_hacs_and_manifest_metadata_are_release_ready():
     assert manifest["codeowners"]
     assert manifest["documentation"] == "https://yeaxi.github.io/power_orchestrator/"
     assert manifest["issue_tracker"].endswith("/issues")
-    assert hacs["homeassistant"] == "2026.7.4"
+    assert hacs["homeassistant"] == "2026.8.2"
     assert hacs["render_readme"] is True
     assert hacs["zip_release"] is True
     assert hacs["filename"] == "power_orchestrator.zip"
@@ -106,8 +106,8 @@ def test_pyproject_and_ci_define_the_local_quality_gate():
     assert pyproject["tool"]["coverage"]["report"]["fail_under"] == 75
 
     requirements = f"\n{(ROOT / 'requirements-ci.txt').read_text()}"
-    assert "\nhomeassistant==2026.7.4" in requirements
-    assert "\npytest-homeassistant-custom-component==0.13.348" in requirements
+    assert "\nhomeassistant==2026.8.2" in requirements
+    assert "\npytest-homeassistant-custom-component==0.13.356" in requirements
     for package in ("pytest", "pytest-asyncio", "voluptuous", "PyYAML", "coverage", "ruff", "mypy"):
         assert f"\n{package}==" in requirements, f"{package} is not pinned"
 

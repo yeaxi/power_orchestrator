@@ -1,7 +1,7 @@
 name: Compatibility
 
 # The pinned gates prove the minimum supported Home Assistant version. README
-# and hacs.json also claim "2026.7.4 or newer", which nothing else measures.
+# and hacs.json also claim "2026.8.2 or newer", which nothing else measures.
 # This run installs the current Home Assistant release instead of the pin and
 # reports on the same behavior suite. It is deliberately kept off pull requests:
 # a Home Assistant release must not turn an unrelated PR red, but a silent

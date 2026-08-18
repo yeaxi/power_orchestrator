@@ -8,7 +8,7 @@ Docs: [yeaxi.github.io/power_orchestrator](https://yeaxi.github.io/power_orchest
 
 ## Requirements
 
-- Home Assistant 2026.7.4 or newer
+- Home Assistant 2026.8.2 or newer
 - A whole-house load sensor in `W` or `kW`
 - One safety source: a grid-loss binary sensor (`on` means grid is up), or a battery SoC sensor in `%`
 - One or more optional loads on a `switch`, `light`, or `input_boolean`
