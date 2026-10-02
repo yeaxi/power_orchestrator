@@ -1,6 +1,7 @@
 """Unit tests for telemetry reading and the safety source value object."""
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 from power_orchestrator.const import GRID_LOSS_MODE_SENSOR, GRID_LOSS_MODE_THRESHOLD
@@ -14,12 +15,12 @@ class _Hass:
 
 def _state(value, unit=None, last_reported=None):
     attrs = {"unit_of_measurement": unit} if unit is not None else {}
-    return SimpleNamespace(state=value, attributes=attrs, last_reported=last_reported)
+    return SimpleNamespace(state=value, attributes=attrs, last_reported=last_reported if last_reported is not None else time.time())
 
 
 def test_read_load_sensor_watts_and_kilowatts() -> None:
     hass = _Hass({"sensor.load": _state("2500", unit="W", last_reported=10.0)})
-    r = read_load_sensor(hass, "sensor.load")
+    r = read_load_sensor(hass, "sensor.load", now=10.0)
     assert r.valid is True and r.value == 2500.0 and r.reason == "ok" and r.reported_at == 10.0
     hass = _Hass({"sensor.load": _state("2.5", unit="kW")})
     r = read_load_sensor(hass, "sensor.load")

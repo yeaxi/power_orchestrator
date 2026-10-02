@@ -20,13 +20,15 @@ from .const import (
     MODES,
     STORAGE_VERSION,
 )
-from .policy import PolicyEngine, PolicyPhase, ReasonCode, TelemetryValidity
+from .policy import PolicyEngine, PolicyPhase, PolicyRuntime, ReasonCode, TelemetryValidity
 from .power_model import PowerModel
+from .requests import RestoreIntent, RestoreTicket
 
 _MAX_AUDIT_ENTRIES = 100
 _MAX_UNRESOLVED_ACTIONS = 16
 _MAX_ACTION_FIELD_LENGTH = 256
 _MAX_FAULT_REASON_LENGTH = 160
+_INVALID_ACTION_VALUE = object()
 
 
 class RuntimeStore:
@@ -54,12 +56,15 @@ class RuntimeStore:
             self._action_journal_invalid = False
             return
         self._data = copy.deepcopy(raw)
+        invalid = self._data.get("safety_storage_invalid", False)
+        self._safety_storage_invalid = not isinstance(invalid, bool) or invalid
         self._migrate_device_runtime_payload()
         self._action_journal_invalid = bool(self._data.get("action_journal_invalid"))
         self._data["audit_history"] = self._normalize_history(self._data.get("audit_history", []))
 
     async def async_save(self) -> None:
         self._data["storage_version"] = STORAGE_VERSION
+        self._data["safety_storage_invalid"] = self._safety_storage_invalid
         await self._store.async_save(self._data)
 
     def snapshot(self) -> dict[str, Any]:
@@ -108,6 +113,79 @@ class RuntimeStore:
         self.set_mode(mode)
         return mode
 
+    def save_requests(self, requests: Mapping[tuple[str, str], RestoreIntent]) -> None:
+        """Persist source-specific intents as a bounded list."""
+        self._data["restore_intents"] = [
+            {"device_id": device_id, **intent.to_dict()}
+            for (device_id, _), intent in sorted(requests.items())
+        ]
+        self._data.pop("run_requests", None)
+
+    def restore_requests(self, model: PowerModel) -> dict[tuple[str, str], RestoreIntent]:
+        """Restore v0.7 intents, migrating safe active v0.6 requests."""
+        raw = self._data.get("restore_intents")
+        if raw is None:
+            return self._restore_legacy_requests(model)
+        if not isinstance(raw, list):
+            self._safety_storage_invalid = True
+            return {}
+        restored: dict[tuple[str, str], RestoreIntent] = {}
+        try:
+            for item in raw:
+                if not isinstance(item, dict):
+                    raise ValueError("invalid restore intent")
+                device_id = item.get("device_id")
+                if not isinstance(device_id, str) or model.get_device(device_id) is None:
+                    continue
+                intent = RestoreIntent.from_dict(
+                    {key: value for key, value in item.items() if key != "device_id"}
+                )
+                restored[(device_id, intent.source)] = intent
+        except TypeError, ValueError:
+            self._safety_storage_invalid = True
+            return {}
+        return restored
+
+    def _restore_legacy_requests(self, model: PowerModel) -> dict[tuple[str, str], RestoreIntent]:
+        raw = self._data.get("run_requests", {})
+        if not isinstance(raw, dict):
+            self._safety_storage_invalid = True
+            return {}
+        restored: dict[tuple[str, str], RestoreIntent] = {}
+        try:
+            for device_id, value in raw.items():
+                if not isinstance(device_id, str) or model.get_device(device_id) is None:
+                    continue
+                intent = RestoreIntent.from_dict(value)
+                if intent.active:
+                    restored[(device_id, intent.source)] = intent
+        except TypeError, ValueError:
+            self._safety_storage_invalid = True
+            return {}
+        return restored
+
+    def save_restore_tickets(self, tickets: Mapping[str, RestoreTicket]) -> None:
+        """Persist only explicit proof of controller-owned shedding."""
+        self._data["restore_tickets"] = [ticket.to_dict() for ticket in tickets.values()]
+        self._data["pending_restore"] = list(tickets)
+
+    def restore_restore_tickets(self, model: PowerModel) -> dict[str, RestoreTicket]:
+        """Restore validated v0.7 tickets; legacy bare IDs are intentionally ignored."""
+        raw = self._data.get("restore_tickets", [])
+        if not isinstance(raw, list):
+            self._safety_storage_invalid = True
+            return {}
+        restored: dict[str, RestoreTicket] = {}
+        try:
+            for item in raw:
+                ticket = RestoreTicket.from_dict(item)
+                if model.get_device(ticket.device_id) is not None:
+                    restored[ticket.device_id] = ticket
+        except TypeError, ValueError:
+            self._safety_storage_invalid = True
+            return {}
+        return restored
+
     def save_pending_restore(self, device_ids: list[str]) -> None:
         """Persist the ordered, unique restore queue."""
         seen: set[str] = set()
@@ -128,11 +206,7 @@ class RuntimeStore:
         seen: set[str] = set()
         pending: list[str] = []
         for device_id in raw:
-            if (
-                not isinstance(device_id, str)
-                or device_id not in configured
-                or device_id in seen
-            ):
+            if not isinstance(device_id, str) or device_id not in configured or device_id in seen:
                 continue
             seen.add(device_id)
             pending.append(device_id)
@@ -163,7 +237,7 @@ class RuntimeStore:
             return
         try:
             value = float(pause_until_or_duration)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return
         if not math.isfinite(value) or value < 0:
             return
@@ -189,7 +263,7 @@ class RuntimeStore:
         now = time.time()
         try:
             maximum = float(max_pause_seconds)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             maximum = MAX_RUNTIME_PAUSE_SECONDS
         if not math.isfinite(maximum) or maximum < 0:
             maximum = MAX_RUNTIME_PAUSE_SECONDS
@@ -231,7 +305,9 @@ class RuntimeStore:
         self._data["device_runtime"] = {
             "schema_version": DEVICE_RUNTIME_SCHEMA_VERSION,
             "devices": devices,
-            "faulted_devices": sorted(device_id for device_id in faulted_devices if device_id in configured),
+            "faulted_devices": sorted(
+                device_id for device_id in faulted_devices if device_id in configured
+            ),
             "quarantined_devices": sorted(
                 device_id for device_id in quarantined_devices if device_id in configured
             ),
@@ -243,16 +319,12 @@ class RuntimeStore:
         raw = self._data.get("device_runtime")
         configured = {device.device_id for device in model.all_devices()}
         if raw is None:
-            self._safety_storage_invalid = False
             return set(), set()
         if not self._device_runtime_envelope_is_valid(raw):
             self._safety_storage_invalid = True
             return set(), configured
-        self._safety_storage_invalid = False
         faulted = self._validated_device_set(raw.get("faulted_devices"), configured)
-        quarantined = self._validated_device_set(
-            raw.get("quarantined_devices"), configured
-        )
+        quarantined = self._validated_device_set(raw.get("quarantined_devices"), configured)
         for device_id in faulted | quarantined:
             device = model.get_device(device_id)
             if device is not None:
@@ -282,8 +354,7 @@ class RuntimeStore:
         if not self._device_runtime_envelope_is_valid(raw):
             self._safety_storage_invalid = True
             return {
-                device_id: ReasonCode.PERSISTED_RUNTIME_INVALID.value
-                for device_id in configured
+                device_id: ReasonCode.PERSISTED_RUNTIME_INVALID.value for device_id in configured
             }
         values = raw.get("fault_reasons", {})
         if not isinstance(values, dict):
@@ -308,14 +379,54 @@ class RuntimeStore:
             "pending_dismissal": self._bounded_string_map(pending_dismissal_fingerprints),
         }
 
+    def save_telemetry_fault(
+        self, latched: bool, reason: str | None, *, emergency_handled: bool = True
+    ) -> None:
+        self._data["telemetry_fault"] = {
+            "latched": bool(latched),
+            "reason": reason[:160] if isinstance(reason, str) else None,
+            "emergency_handled": bool(latched and emergency_handled),
+        }
+
+    def restore_telemetry_fault(self) -> tuple[bool, str | None]:
+        raw = self._data.get("telemetry_fault", {})
+        if not isinstance(raw, dict):
+            self._safety_storage_invalid = True
+            return True, "persisted_runtime_invalid"
+        latched = raw.get("latched", False)
+        reason = raw.get("reason")
+        if not isinstance(latched, bool) or (reason is not None and not isinstance(reason, str)):
+            self._safety_storage_invalid = True
+            return True, "persisted_runtime_invalid"
+        return latched, reason[:160] if isinstance(reason, str) else None
+
+    def restore_telemetry_emergency_handled(self) -> bool:
+        """Legacy latches are ambiguous: do not replay OFF without explicit clear."""
+        latched, _ = self.restore_telemetry_fault()
+        raw = self._data.get('telemetry_fault', {})
+        if not isinstance(raw, dict):
+            return True
+        handled = raw.get('emergency_handled', latched)
+        if not isinstance(handled, bool):
+            self._safety_storage_invalid = True
+            return True
+        return latched and handled
+
     def restore_fault_notification_state(
         self,
         model: PowerModel,
+        *,
+        telemetry_notification_id: str | None = None,
     ) -> tuple[dict[str, str], dict[str, str]]:
         raw = self._data.get("fault_notifications")
-        if not isinstance(raw, dict) or raw.get("schema_version") != FAULT_NOTIFICATION_SCHEMA_VERSION:
+        if (
+            not isinstance(raw, dict)
+            or raw.get("schema_version") != FAULT_NOTIFICATION_SCHEMA_VERSION
+        ):
             return {}, {}
         configured = {device.device_id for device in model.all_devices()}
+        if telemetry_notification_id:
+            configured.add(telemetry_notification_id)
 
         def valid(value: Any) -> dict[str, str]:
             if not isinstance(value, dict):
@@ -356,83 +467,56 @@ class RuntimeStore:
         runtime = engine.runtime
         try:
             runtime.phase = PolicyPhase(raw.get("phase", PolicyPhase.STARTUP.value))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             runtime.phase = PolicyPhase.FAULT
         # Monotonic dwell timestamps are process-local. A host reboot changes
         # their clock origin, so every dwell starts from fresh observations.
         runtime.active_tier = None
         runtime.tier_started_at = None
         runtime.tier_since = {}
-        # Aggregate generations restart from zero with the coordinator. Preserve
-        # the fence itself, but require the first fresh report in this process.
-        pending = raw.get("pending_post_shed_generation")
-        runtime.pending_post_shed_generation = (
-            0
-            if isinstance(pending, int) and not isinstance(pending, bool) and pending >= 0
-            else None
-        )
-        runtime.pending_post_shed_after_reported_at = self._finite_or_none(
-            raw.get("pending_post_shed_after_reported_at")
-        )
-        if (
-            runtime.pending_post_shed_generation is not None
-            and runtime.pending_post_shed_after_reported_at is None
-        ):
-            runtime.pending_post_shed_after_reported_at = time.time()
-        runtime.pending_operation_id = raw.get("pending_operation_id") if isinstance(raw.get("pending_operation_id"), str) else None
-        last_generation = raw.get("last_shed_load_generation")
-        runtime.last_shed_load_generation = (
-            0
-            if isinstance(last_generation, int)
-            and not isinstance(last_generation, bool)
-            and last_generation >= 0
-            else None
-        )
-        restore_pending = raw.get("pending_post_restore_generation")
-        runtime.pending_post_restore_generation = (
-            0
-            if isinstance(restore_pending, int)
-            and not isinstance(restore_pending, bool)
-            and restore_pending >= 0
-            else None
-        )
-        runtime.pending_post_restore_after_reported_at = self._finite_or_none(
-            raw.get("pending_post_restore_after_reported_at")
-        )
-        if (
-            runtime.pending_post_restore_generation is not None
-            and runtime.pending_post_restore_after_reported_at is None
-        ):
-            runtime.pending_post_restore_after_reported_at = time.time()
-        runtime.pending_restore_operation_id = (
-            raw.get("pending_restore_operation_id")
-            if isinstance(raw.get("pending_restore_operation_id"), str)
-            else None
-        )
+        self._restore_shed_fence(runtime, raw)
+        self._restore_restore_fence(runtime, raw)
         # Monotonic restore windows are never restored across process restart.
-        runtime.restore_since = None
-        last_restore_generation = raw.get("last_restore_load_generation")
-        runtime.last_restore_load_generation = (
-            0
-            if isinstance(last_restore_generation, int)
-            and not isinstance(last_restore_generation, bool)
-            and last_restore_generation >= 0
-            else None
-        )
+        engine.reset_restore_window()
         try:
             runtime.last_telemetry_validity = TelemetryValidity(
                 raw.get("last_telemetry_validity", TelemetryValidity.UNKNOWN.value)
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             runtime.last_telemetry_validity = TelemetryValidity.INVALID
         try:
             runtime.last_reason_code = ReasonCode(
                 raw.get("last_reason_code", ReasonCode.FAULT.value)
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             runtime.last_reason_code = ReasonCode.FAULT
         sequence = raw.get("decision_sequence", 0)
         runtime.decision_sequence = sequence if isinstance(sequence, int) and sequence >= 0 else 0
+
+    @staticmethod
+    def _fresh_generation(value: Any) -> int | None:
+        """Keep an old fence, but require a new process-local aggregate report."""
+        return 0 if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+    @staticmethod
+    def _operation_text(value: Any) -> str | None:
+        return value if isinstance(value, str) else None
+
+    def _restore_shed_fence(self, runtime: PolicyRuntime, raw: Mapping[str, Any]) -> None:
+        runtime.pending_post_shed_generation = self._fresh_generation(raw.get("pending_post_shed_generation"))
+        runtime.pending_post_shed_after_reported_at = self._finite_or_none(raw.get("pending_post_shed_after_reported_at"))
+        if runtime.pending_post_shed_generation is not None and runtime.pending_post_shed_after_reported_at is None:
+            runtime.pending_post_shed_after_reported_at = time.time()
+        runtime.pending_operation_id = self._operation_text(raw.get("pending_operation_id"))
+        runtime.last_shed_load_generation = self._fresh_generation(raw.get("last_shed_load_generation"))
+
+    def _restore_restore_fence(self, runtime: PolicyRuntime, raw: Mapping[str, Any]) -> None:
+        runtime.pending_post_restore_generation = self._fresh_generation(raw.get("pending_post_restore_generation"))
+        runtime.pending_post_restore_after_reported_at = self._finite_or_none(raw.get("pending_post_restore_after_reported_at"))
+        if runtime.pending_post_restore_generation is not None and runtime.pending_post_restore_after_reported_at is None:
+            runtime.pending_post_restore_after_reported_at = time.time()
+        runtime.pending_restore_operation_id = self._operation_text(raw.get("pending_restore_operation_id"))
+        runtime.last_restore_load_generation = self._fresh_generation(raw.get("last_restore_load_generation"))
 
     def record_action(self, event: dict[str, Any]) -> None:
         normalized = self._normalize_action_event(event)
@@ -453,7 +537,8 @@ class RuntimeStore:
     def unresolved_actions(self) -> list[dict[str, Any]]:
         history = self._normalize_history(self._data.get("audit_history", []))
         return [
-            event for event in history
+            event
+            for event in history
             if event.get("phase") in {"prepared", "dispatched"}
             or event.get("result") in {"prepared", "dispatched"}
         ][-_MAX_UNRESOLVED_ACTIONS:]
@@ -472,10 +557,11 @@ class RuntimeStore:
 
     @staticmethod
     def _validated_device_set(value: Any, configured: set[str]) -> set[str]:
-        return {
-            item for item in value
-            if isinstance(item, str) and item in configured
-        } if isinstance(value, list) else set()
+        return (
+            {item for item in value if isinstance(item, str) and item in configured}
+            if isinstance(value, list)
+            else set()
+        )
 
     @staticmethod
     def _finite_or_none(value: Any) -> float | None:
@@ -497,8 +583,10 @@ class RuntimeStore:
             return None
         action_id = event.get("action_id")
         action = event.get("action")
-        if not isinstance(action_id, str) or not action_id.strip() or not isinstance(action, str) or not action.strip():
+        if not self._valid_action_identity(action_id, action):
             return None
+        assert isinstance(action_id, str)
+        assert isinstance(action, str)
         normalized: dict[str, Any] = {
             "action_id": action_id[:_MAX_ACTION_FIELD_LENGTH],
             "action": action[:_MAX_ACTION_FIELD_LENGTH],
@@ -506,15 +594,30 @@ class RuntimeStore:
         for key, value in event.items():
             if key in {"action_id", "action"}:
                 continue
-            if isinstance(value, (str, int, float, bool)) or value is None:
-                if isinstance(value, str):
-                    normalized[key] = value[:_MAX_ACTION_FIELD_LENGTH]
-                elif isinstance(value, float) and not math.isfinite(value):
-                    continue
-                else:
-                    normalized[key] = value
+            normalized_value = self._normalized_action_value(value)
+            if normalized_value is not _INVALID_ACTION_VALUE:
+                normalized[key] = normalized_value
         normalized.setdefault("timestamp", time.time())
         return normalized
+
+    @staticmethod
+    def _valid_action_identity(action_id: Any, action: Any) -> bool:
+        return (
+            isinstance(action_id, str)
+            and bool(action_id.strip())
+            and isinstance(action, str)
+            and bool(action.strip())
+        )
+
+    @staticmethod
+    def _normalized_action_value(value: Any) -> Any:
+        if isinstance(value, str):
+            return value[:_MAX_ACTION_FIELD_LENGTH]
+        if isinstance(value, float) and not math.isfinite(value):
+            return _INVALID_ACTION_VALUE
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        return _INVALID_ACTION_VALUE
 
     def _normalize_history(self, value: Any) -> list[dict[str, Any]]:
         if not isinstance(value, list):

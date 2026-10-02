@@ -58,7 +58,7 @@ def test_restore_candidates_reverse_order_and_capacity_gate() -> None:
     assert blocked == []
 
 
-def test_restore_candidates_exclude_climate() -> None:
+def test_restore_candidates_accept_confirmed_off_coupled_climate() -> None:
     hass = MagicMock()
     hass.states.get.side_effect = lambda entity_id: SimpleNamespace(state="off")
     model = PowerModel()
@@ -80,4 +80,4 @@ def test_restore_candidates_exclude_climate() -> None:
         lowest_limit_w=9000,
         current_load=1000,
     )
-    assert candidates == []
+    assert candidates == [device]

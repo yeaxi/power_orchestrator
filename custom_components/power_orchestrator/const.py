@@ -17,7 +17,13 @@ CONF_DEVICE_ENTITY: Final = "entity"
 CONF_DEVICE_EXPECTED_POWER: Final = "expected_power"
 CONF_DEVICE_POWER_SENSOR: Final = "power_sensor"
 CONF_DEVICE_ACTUATORS: Final = "actuators"
+CONF_DEVICE_COMMAND_ENTITY: Final = "command_entity"
+CONF_DEVICE_READBACK_ENTITIES: Final = "readback_entities"
+CONF_DEVICE_EMERGENCY_OFF_ENTITIES: Final = "emergency_off_entities"
 CONF_SHED_PRIORITY: Final = "shed_priority"
+# Optional per-load battery policy: during grid loss the load may keep running
+# while the configured battery charge sensor reports at least this percentage.
+CONF_DEVICE_BATTERY_MIN_SOC: Final = "battery_min_soc"
 CONF_DISCOVERED_DEVICES: Final = "discovered_devices"
 CONF_ADD_CUSTOM_DEVICE: Final = "add_custom_device"
 CONF_ADD_ANOTHER: Final = "add_another"
@@ -65,9 +71,12 @@ STATUS_SAFETY_BLOCKED: Final = "safety_blocked"
 STATUS_OBSERVE: Final = "observe"
 STATUS_FAULT: Final = "fault"
 STATUS_LOAD_RESTORING: Final = "load_restoring"
+STATUS_STARTUP_WAIT: Final = "startup_wait"
 
 # Defaults and safety bounds
 DEFAULT_AVERAGING_PERIOD: Final = 10
+LOAD_TELEMETRY_MAX_AGE_SECONDS: Final = 180.0
+STARTUP_TELEMETRY_GRACE_SECONDS: Final = 30.0
 QUARANTINE_CLEAR_MAX_POWER_W: Final = 1.0
 DEFAULT_PAUSE_PERIOD: Final = 60
 DEFAULT_POLICY_VERSION: Final = "load_shedding_v3"

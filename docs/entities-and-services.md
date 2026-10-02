@@ -28,5 +28,9 @@ Do not call raw `switch.turn_off`, `light.turn_on`, or similar around this integ
 | `power_orchestrator.set_mode` | `mode` | Persist `auto`, `observe`, or `off`. |
 | `power_orchestrator.request_stop` | `device_id`, optional `source` | Request one guarded load stop. `device_id` is the configured id, not a raw entity id. Queues the load for automatic restore when the stop confirms. |
 | `power_orchestrator.clear_quarantine` | `device_id`, optional `source` | Clear a fault only after verified OFF readback and safe telemetry. Never turns a load on. |
+| `power_orchestrator.clear_fault` | none | Explicit reconciliation for retained faults; identified telemetry faults clear automatically after valid inputs return. Never turns a load on. |
+| `power_orchestrator.set_restore_intent` | `device_id`, `source`, `active`, `expires_at`, optional permit/request metadata | Publish or remove an owner's bounded restore permission; does not issue an ON command. |
+| `power_orchestrator.set_request` | compatibility fields for restore intent | Compatibility alias for existing owner automations. |
+| `power_orchestrator.cancel_restore` | `device_id` | Cancel a durable restore ticket without changing device state. |
 
 There is no service that starts a never-shed load. Automatic restore is the only ON path, and it only targets pending loads.

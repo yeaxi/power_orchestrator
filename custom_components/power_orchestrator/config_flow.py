@@ -20,11 +20,15 @@ from .const import (
     CONF_BATTERY_SOC,
     CONF_BATTERY_THRESHOLD,
     CONF_DEVICE_ACTUATORS,
+    CONF_DEVICE_BATTERY_MIN_SOC,
+    CONF_DEVICE_COMMAND_ENTITY,
+    CONF_DEVICE_EMERGENCY_OFF_ENTITIES,
     CONF_DEVICE_ENTITY,
     CONF_DEVICE_EXPECTED_POWER,
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
     CONF_DEVICE_POWER_SENSOR,
+    CONF_DEVICE_READBACK_ENTITIES,
     CONF_DEVICES,
     CONF_DISCOVERED_DEVICES,
     CONF_GRID_LOSS_MODE,
@@ -81,32 +85,46 @@ async def _discover_inputs(hass: Any) -> dict[str, Any]:
         data = getattr(manager, "data", None)
         if not isinstance(data, dict):
             return result
-        for source in data.get("energy_sources", []):
-            if not isinstance(source, dict):
-                continue
-            source_type = source.get("type")
-            if source_type == "grid":
-                candidate = source.get("power_config", {}).get("stat_rate") or source.get(
-                    "stat_rate"
-                )
-                result["grid_power"] = _sensor_entity_id(candidate)
-            elif source_type == "battery":
-                result["battery_soc"] = _sensor_entity_id(source.get("stat_soc"))
-        for device in data.get("device_consumption", []):
-            if not isinstance(device, dict):
-                continue
-            entity_id = _sensor_entity_id(device.get("stat_consumption"))
-            if entity_id is None:
-                continue
-            result["devices"].append(
-                {
-                    "entity_id": entity_id,
-                    "name": device.get("name") or _friendly(hass, entity_id),
-                    "power_sensor": _sensor_entity_id(device.get("stat_rate")),
-                }
-            )
+        result.update(_discovered_energy_sources(data.get("energy_sources", [])))
+        result["devices"] = _discovered_devices(hass, data.get("device_consumption", []))
     except Exception as exc:  # discovery is advisory; forms remain usable
         _LOGGER.debug("Optional load/safety discovery unavailable: %s", exc)
+    return result
+
+
+def _discovered_energy_sources(sources: Any) -> dict[str, str | None]:
+    result: dict[str, str | None] = {"grid_power": None, "battery_soc": None}
+    if not isinstance(sources, list):
+        return result
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        if source.get("type") == "grid":
+            power_config = source.get("power_config", {})
+            configured = power_config.get("stat_rate") if isinstance(power_config, dict) else None
+            result["grid_power"] = _sensor_entity_id(configured or source.get("stat_rate"))
+        if source.get("type") == "battery":
+            result["battery_soc"] = _sensor_entity_id(source.get("stat_soc"))
+    return result
+
+
+def _discovered_devices(hass: Any, devices: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    if not isinstance(devices, list):
+        return result
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        entity_id = _sensor_entity_id(device.get("stat_consumption"))
+        if entity_id is None:
+            continue
+        result.append(
+            {
+                "entity_id": entity_id,
+                "name": device.get("name") or _friendly(hass, entity_id),
+                "power_sensor": _sensor_entity_id(device.get("stat_rate")),
+            }
+        )
     return result
 
 
@@ -182,7 +200,6 @@ def _options_schema_for_entry(entry: Any) -> vol.Schema:
     return vol.Schema(fields)
 
 
-
 def _apply_priority_order(
     devices: list[dict[str, Any]], selected_entities: Any
 ) -> list[dict[str, Any]]:
@@ -206,6 +223,46 @@ def _apply_priority_order(
         device[CONF_PRIORITY] = index
         device[CONF_SHED_PRIORITY] = index
     return ordered
+
+
+def _options_numeric_values(
+    entry: Any, user_input: Mapping[str, Any], mode: str, errors: dict[str, str]
+) -> dict[str, int | float]:
+    specs: dict[str, tuple[Any, float, float]] = {
+        CONF_AVERAGING_PERIOD: (DEFAULT_AVERAGING_PERIOD, 1, 300),
+        CONF_PAUSE_PERIOD: (DEFAULT_PAUSE_PERIOD, 0, 86400),
+    }
+    if mode == GRID_LOSS_MODE_THRESHOLD:
+        specs[CONF_BATTERY_THRESHOLD] = (20, 0, 100)
+    values: dict[str, int | float] = {}
+    for key, (default, minimum, maximum) in specs.items():
+        raw = user_input.get(key, _entry_current(entry, key, default))
+        try:
+            converted = float(raw) if not isinstance(raw, bool) else math.nan
+        except TypeError, ValueError:
+            converted = math.nan
+        if not math.isfinite(converted) or not minimum <= converted <= maximum:
+            errors.setdefault("base", "invalid_numeric_setting")
+            continue
+        values[key] = int(converted) if converted.is_integer() else converted
+    return values
+
+
+def _submitted_thresholds(
+    user_input: Mapping[str, Any], errors: dict[str, str]
+) -> list[dict[str, float]] | None:
+    if CONF_THRESHOLD_COUNT in user_input:
+        thresholds, error = _parse_threshold_input(user_input)
+        if error:
+            errors.setdefault("base", error)
+        return thresholds
+    if CONF_THRESHOLDS not in user_input:
+        return None
+    try:
+        return _validate_threshold_collection(user_input[CONF_THRESHOLDS])
+    except ValueError:
+        errors.setdefault("base", "invalid_thresholds")
+        return None
 
 
 def _prepare_options_submission(
@@ -248,39 +305,11 @@ def _prepare_options_submission(
         errors["base"] = "missing_grid_loss_sensor"
     if mode == GRID_LOSS_MODE_THRESHOLD and battery_soc is None:
         errors["base"] = "missing_battery_soc_sensor"
+    if battery_soc is None and any(CONF_DEVICE_BATTERY_MIN_SOC in device for device in devices):
+        errors["base"] = "missing_battery_soc_sensor"
 
-    numeric_specs: dict[str, tuple[Any, float, float]] = {
-        CONF_AVERAGING_PERIOD: (DEFAULT_AVERAGING_PERIOD, 1, 300),
-        CONF_PAUSE_PERIOD: (DEFAULT_PAUSE_PERIOD, 0, 86400),
-    }
-    if mode == GRID_LOSS_MODE_THRESHOLD:
-        numeric_specs[CONF_BATTERY_THRESHOLD] = (20, 0, 100)
-    values: dict[str, int | float] = {}
-    for key, (default, minimum, maximum) in numeric_specs.items():
-        raw = user_input.get(key, _entry_current(entry, key, default))
-        if isinstance(raw, bool):
-            errors.setdefault("base", "invalid_numeric_setting")
-            continue
-        try:
-            converted = float(raw)
-        except (TypeError, ValueError):
-            errors.setdefault("base", "invalid_numeric_setting")
-            continue
-        if not math.isfinite(converted) or not minimum <= converted <= maximum:
-            errors.setdefault("base", "invalid_numeric_setting")
-            continue
-        values[key] = int(converted) if converted.is_integer() else converted
-
-    submitted_thresholds: list[dict[str, float]] | None = None
-    if CONF_THRESHOLD_COUNT in user_input:
-        submitted_thresholds, threshold_error = _parse_threshold_input(user_input)
-        if threshold_error:
-            errors.setdefault("base", threshold_error)
-    elif CONF_THRESHOLDS in user_input:
-        try:
-            submitted_thresholds = _validate_threshold_collection(user_input[CONF_THRESHOLDS])
-        except ValueError:
-            errors.setdefault("base", "invalid_thresholds")
+    values = _options_numeric_values(entry, user_input, mode, errors)
+    submitted_thresholds = _submitted_thresholds(user_input, errors)
 
     if errors:
         return None, submitted_thresholds, errors
@@ -293,6 +322,8 @@ def _prepare_options_submission(
     normalized.update(values)
     if mode == GRID_LOSS_MODE_SENSOR:
         normalized[CONF_GRID_LOSS_SENSOR] = grid_sensor
+        if battery_soc is not None:
+            normalized[CONF_BATTERY_SOC] = battery_soc
     else:
         normalized[CONF_BATTERY_SOC] = battery_soc
         normalized[CONF_BATTERY_THRESHOLD] = values[CONF_BATTERY_THRESHOLD]
@@ -303,7 +334,7 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
     """Five-step onboarding flow for load shedding and safety sources."""
 
     VERSION = 2
-    MINOR_VERSION = 3
+    MINOR_VERSION = 4
 
     def __init__(self) -> None:
         self._discovered: dict[str, Any] = {}
@@ -480,8 +511,12 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
         power_sensor = _sensor_entity_id(candidate.get("power_sensor")) or ""
         status = f"{candidate_name or 'Custom device'} — measured-power sensor: {power_sensor or 'not selected'}"
         fields: dict[Any, Any] = {
+            vol.Optional(
+                CONF_DEVICE_ID,
+                default=str(candidate.get(CONF_DEVICE_ID, "")),
+            ): selector.TextSelector(),
             vol.Required(CONF_DEVICE_ENTITY): _entity_selector(
-                ["switch", "light", "input_boolean"]
+                ["switch", "light", "input_boolean", "climate", "humidifier"]
             ),
             vol.Optional(CONF_DEVICE_NAME, default=candidate_name): selector.TextSelector(),
             vol.Required(
@@ -496,7 +531,25 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             ),
             vol.Optional(
                 CONF_DEVICE_ACTUATORS, default=list(candidate.get(CONF_DEVICE_ACTUATORS, ()) or ())
-            ): _entity_selector(["switch", "light", "input_boolean", "climate"], multiple=True),
+            ): _entity_selector(
+                ["switch", "light", "input_boolean", "climate", "humidifier"], multiple=True
+            ),
+            _optional_entity_key(
+                CONF_DEVICE_COMMAND_ENTITY,
+                candidate.get(CONF_DEVICE_COMMAND_ENTITY),
+            ): _entity_selector(["switch", "light", "input_boolean", "climate", "humidifier"]),
+            vol.Optional(
+                CONF_DEVICE_READBACK_ENTITIES,
+                default=list(candidate.get(CONF_DEVICE_READBACK_ENTITIES, ()) or ()),
+            ): _entity_selector(
+                ["switch", "light", "input_boolean", "climate", "humidifier"], multiple=True
+            ),
+            vol.Optional(
+                CONF_DEVICE_EMERGENCY_OFF_ENTITIES,
+                default=list(candidate.get(CONF_DEVICE_EMERGENCY_OFF_ENTITIES, ()) or ()),
+            ): _entity_selector(
+                ["switch", "light", "input_boolean", "climate", "humidifier"], multiple=True
+            ),
         }
         if not candidate:
             fields[vol.Optional(CONF_ADD_ANOTHER, default=False)] = bool
@@ -512,7 +565,8 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
     ) -> dict[str, Any]:
         candidate = candidate or {}
         entity = _entity_id(
-            user_input.get(CONF_DEVICE_ENTITY), frozenset({"switch", "light", "input_boolean"})
+            user_input.get(CONF_DEVICE_ENTITY),
+            frozenset({"switch", "light", "input_boolean", "climate", "humidifier"}),
         )
         if entity is None:
             raise ValueError("control entity must be valid")
@@ -524,64 +578,104 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             if CONF_DEVICE_POWER_SENSOR in user_input
             else _sensor_entity_id(candidate.get("power_sensor"))
         )
-        raw_actuators = user_input.get(CONF_DEVICE_ACTUATORS, []) or []
-        actuator_values: list[str] = []
-        if isinstance(raw_actuators, (list, tuple)):
-            for raw_actuator in raw_actuators:
-                actuator = _entity_id(
-                    raw_actuator,
-                    frozenset({"switch", "light", "input_boolean", "climate"}),
-                )
-                if actuator and actuator != entity and actuator not in actuator_values:
-                    actuator_values.append(actuator)
+        actuator_values = self._input_actuators(user_input.get(CONF_DEVICE_ACTUATORS), entity)
+        domains = frozenset({"switch", "light", "input_boolean", "climate", "humidifier"})
+        command = _entity_id(user_input.get(CONF_DEVICE_COMMAND_ENTITY), domains) or next(
+            (item for item in actuator_values if item.startswith("climate.")), entity
+        )
+        readbacks = self._configured_entity_list(
+            user_input.get(CONF_DEVICE_READBACK_ENTITIES),
+            default=[entity if command.startswith("climate.") else command],
+        )
+        emergency = self._configured_entity_list(
+            user_input.get(CONF_DEVICE_EMERGENCY_OFF_ENTITIES),
+            default=[entity] if command != entity else [],
+        )
         return {
-            CONF_DEVICE_ID: _gen_id(),
+            CONF_DEVICE_ID: str(user_input.get(CONF_DEVICE_ID) or _gen_id()).strip(),
             CONF_DEVICE_NAME: name or entity,
             CONF_DEVICE_ENTITY: entity,
             CONF_DEVICE_EXPECTED_POWER: user_input.get(CONF_DEVICE_EXPECTED_POWER, 2000),
             CONF_DEVICE_POWER_SENSOR: power_sensor,
             CONF_DEVICE_ACTUATORS: actuator_values,
+            CONF_DEVICE_COMMAND_ENTITY: command,
+            CONF_DEVICE_READBACK_ENTITIES: readbacks,
+            CONF_DEVICE_EMERGENCY_OFF_ENTITIES: emergency,
         }
+
+    @staticmethod
+    def _input_actuators(value: Any, entity: str) -> list[str]:
+        """Retain the wizard's tolerant legacy actuator-list behavior."""
+        if not isinstance(value, (list, tuple)):
+            return []
+        domains = frozenset({"switch", "light", "input_boolean", "climate", "humidifier"})
+        result: list[str] = []
+        for raw in value:
+            actuator = _entity_id(raw, domains)
+            if actuator and actuator != entity and actuator not in result:
+                result.append(actuator)
+        return result
+
+    @staticmethod
+    def _configured_entity_list(value: Any, *, default: list[str]) -> list[str]:
+        if value in (None, "", []):
+            return default
+        values = [value] if isinstance(value, str) else value
+        if not isinstance(values, (list, tuple)):
+            raise ValueError("entity list must be a collection")
+        domains = frozenset({"switch", "light", "input_boolean", "climate", "humidifier"})
+        normalized = [_entity_id(item, domains) for item in values]
+        if any(item is None for item in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError("entity list must be valid and unique")
+        return [item for item in normalized if item is not None]
 
     async def async_step_devices(self, user_input: dict[str, Any] | None = None) -> Any:
         if self._devices_phase == "selection":
-            if user_input is None:
-                return self._device_selection_form()
-            candidates = {
-                item["entity_id"]: item
-                for item in self._discovered.get("devices", [])
-                if isinstance(item, dict) and item.get("entity_id")
-            }
-            selected = user_input.get(CONF_DISCOVERED_DEVICES, []) or []
-            if isinstance(selected, str):
-                selected = [selected]
-            if any(item not in candidates for item in selected):
-                return self._device_selection_form({"base": "invalid_discovered_devices"})
-            self._pending_discovered = [candidates[item] for item in selected]
-            self._pending_discovered_index = 0
-            self._add_custom_device = bool(user_input.get(CONF_ADD_CUSTOM_DEVICE, False))
-            if self._pending_discovered:
-                self._devices_phase = "discovered"
-                return await self.async_step_devices()
-            if self._add_custom_device:
-                self._devices_phase = "custom"
-                return await self.async_step_devices()
-            return await self.async_step_priority()
+            return await self._devices_selection_step(user_input)
         if self._devices_phase == "discovered":
-            candidate = self._pending_discovered[self._pending_discovered_index]
-            if user_input is None:
-                return self._device_config_form(candidate)
-            try:
-                self._devices.append(self._build_device(user_input, candidate))
-            except ValueError:
-                return self._device_config_form(candidate, {"base": "invalid_devices"})
-            self._pending_discovered_index += 1
-            if self._pending_discovered_index < len(self._pending_discovered):
-                return await self.async_step_devices()
-            if self._add_custom_device:
-                self._devices_phase = "custom"
-                return await self.async_step_devices()
-            return await self.async_step_priority()
+            return await self._devices_discovered_step(user_input)
+        return await self._devices_custom_step(user_input)
+
+    async def _devices_selection_step(self, user_input: dict[str, Any] | None) -> Any:
+        if user_input is None:
+            return self._device_selection_form()
+        candidates = {
+            item["entity_id"]: item
+            for item in self._discovered.get("devices", [])
+            if isinstance(item, dict) and item.get("entity_id")
+        }
+        selected = user_input.get(CONF_DISCOVERED_DEVICES, []) or []
+        selected = [selected] if isinstance(selected, str) else selected
+        if any(item not in candidates for item in selected):
+            return self._device_selection_form({"base": "invalid_discovered_devices"})
+        self._pending_discovered = [candidates[item] for item in selected]
+        self._pending_discovered_index = 0
+        self._add_custom_device = bool(user_input.get(CONF_ADD_CUSTOM_DEVICE, False))
+        if self._pending_discovered:
+            self._devices_phase = "discovered"
+            return await self.async_step_devices()
+        if self._add_custom_device:
+            self._devices_phase = "custom"
+            return await self.async_step_devices()
+        return await self.async_step_priority()
+
+    async def _devices_discovered_step(self, user_input: dict[str, Any] | None) -> Any:
+        candidate = self._pending_discovered[self._pending_discovered_index]
+        if user_input is None:
+            return self._device_config_form(candidate)
+        try:
+            self._devices.append(self._build_device(user_input, candidate))
+        except ValueError:
+            return self._device_config_form(candidate, {"base": "invalid_devices"})
+        self._pending_discovered_index += 1
+        if self._pending_discovered_index < len(self._pending_discovered):
+            return await self.async_step_devices()
+        if self._add_custom_device:
+            self._devices_phase = "custom"
+            return await self.async_step_devices()
+        return await self.async_step_priority()
+
+    async def _devices_custom_step(self, user_input: dict[str, Any] | None) -> Any:
         if user_input is None:
             return self._device_config_form()
         try:
@@ -644,41 +738,41 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             self._pause_period = user_input.get(CONF_PAUSE_PERIOD, DEFAULT_PAUSE_PERIOD)
             return await self.async_step_grid_loss()
 
-        selected_entities = user_input.get(CONF_PRIORITY_ORDER)
-        if selected_entities is not None:
-            if isinstance(selected_entities, str):
-                selected_entities = [selected_entities]
-            by_entity = {
-                device.get(CONF_DEVICE_ENTITY): device
-                for device in self._devices
-                if device.get(CONF_DEVICE_ENTITY)
-            }
-            if (
-                not isinstance(selected_entities, list)
-                or len(selected_entities) != len(by_entity)
-                or len(set(selected_entities)) != len(selected_entities)
-                or set(selected_entities) != set(by_entity)
-            ):
-                return self._priority_form({"base": "invalid_priority_order"})
-            self._devices = [by_entity[entity_id] for entity_id in selected_entities]
-        else:
-            legacy_ids = [
-                user_input.get(self._priority_field(index)) for index in range(len(self._devices))
-            ]
-            by_id = {device.get(CONF_DEVICE_ID): device for device in self._devices}
-            if (
-                len(legacy_ids) != len(by_id)
-                or len(set(legacy_ids)) != len(legacy_ids)
-                or set(legacy_ids) != set(by_id)
-            ):
-                return self._priority_form({"base": "invalid_priority_order"})
-            self._devices = [by_id[device_id] for device_id in legacy_ids]
-
+        ordered = self._ordered_priority_devices(user_input)
+        if ordered is None:
+            return self._priority_form({"base": "invalid_priority_order"})
+        self._devices = ordered
         for index, device in enumerate(self._devices, start=1):
             device[CONF_PRIORITY] = index
             device[CONF_SHED_PRIORITY] = index
         self._pause_period = user_input.get(CONF_PAUSE_PERIOD, DEFAULT_PAUSE_PERIOD)
         return await self.async_step_grid_loss()
+
+    def _priority_candidates(self, user_input: dict[str, Any]) -> tuple[Any, dict[Any, Any]]:
+        selected = user_input.get(CONF_PRIORITY_ORDER)
+        if selected is not None:
+            if isinstance(selected, str):
+                selected = [selected]
+            by_key = {
+                device.get(CONF_DEVICE_ENTITY): device
+                for device in self._devices
+                if device.get(CONF_DEVICE_ENTITY)
+            }
+            return selected, by_key
+        selected = [user_input.get(self._priority_field(index)) for index in range(len(self._devices))]
+        return selected, {device.get(CONF_DEVICE_ID): device for device in self._devices}
+
+    def _ordered_priority_devices(self, user_input: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """Validate one complete permutation before changing either priority."""
+        selected, by_key = self._priority_candidates(user_input)
+        if (
+            not isinstance(selected, list)
+            or len(selected) != len(by_key)
+            or len(set(selected)) != len(selected)
+            or set(selected) != set(by_key)
+        ):
+            return None
+        return [by_key[key] for key in selected]
 
     def _battery_info(self) -> str:
         soc = self._discovered.get(CONF_BATTERY_SOC)

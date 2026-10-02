@@ -20,6 +20,29 @@ from .states import logical_device_state
 MAX_SHED_REJECTION_DETAILS = 12
 
 
+def _shed_rejection_reason(device: ManagedDevice, quarantined: set[str]) -> str | None:
+    if device.is_on is False:
+        return "off"
+    if device.is_on is not True:
+        return "state_unavailable"
+    if device.device_id in quarantined:
+        return "quarantined"
+    if device.power_sensor_id is not None and not device.measured_power_valid:
+        return f"power_{device.measured_power_reason}"
+    if device.power_sensor_id is not None and device.measured_power <= QUARANTINE_CLEAR_MAX_POWER_W:
+        return "inactive_power"
+    return None
+
+
+def _rejection_detail(device: ManagedDevice, reason: str) -> dict[str, Any]:
+    return {
+        "device_id": device.device_id,
+        "name": device.name[:80],
+        "reason": reason,
+        "measured_power_w": device.measured_power if device.measured_power_valid else None,
+    }
+
+
 @dataclass(frozen=True)
 class ShedRejections:
     """Bounded, state-safe projection of why no load could be shed."""
@@ -42,36 +65,13 @@ def shed_candidates(
     counts: dict[str, int] = {}
     details: list[dict[str, Any]] = []
     for device in model.get_shed_devices():
-        reason: str | None = None
-        if device.is_on is False:
-            reason = "off"
-        elif device.is_on is not True:
-            reason = "state_unavailable"
-        elif device.device_id in quarantined:
-            reason = "quarantined"
-        elif device.power_sensor_id is not None and not device.measured_power_valid:
-            reason = f"power_{device.measured_power_reason}"
-        elif (
-            device.power_sensor_id is not None
-            and device.measured_power <= QUARANTINE_CLEAR_MAX_POWER_W
-        ):
-            reason = "inactive_power"
-
+        reason = _shed_rejection_reason(device, quarantined)
         if reason is None:
             candidates.append(device)
             continue
         counts[reason] = counts.get(reason, 0) + 1
         if len(details) < MAX_SHED_REJECTION_DETAILS:
-            details.append(
-                {
-                    "device_id": device.device_id,
-                    "name": device.name[:80],
-                    "reason": reason,
-                    "measured_power_w": (
-                        device.measured_power if device.measured_power_valid else None
-                    ),
-                }
-            )
+            details.append(_rejection_detail(device, reason))
 
     total = sum(counts.values())
     if candidates:
@@ -106,26 +106,30 @@ def restore_candidates(
     """Return pending-restore loads eligible for one automatic restore, reverse shed order.
 
     Fail-closed: the load must be in the durable pending queue, confirmed OFF,
-    not faulted/quarantined/paused, non-climate, and
+    not faulted/quarantined/paused, and
     ``current_load + expected_power`` must be strictly below the lowest tier.
     """
     candidates: list[ManagedDevice] = []
     for device_id in reversed(planner_shed):
         device = model.get_device(device_id)
-        if device is None:
-            continue
-        if device.device_id in faulted or device.device_id in quarantined:
-            continue
-        if logical_device_state(hass, device) is not False:
-            continue
-        if device.pause_active:
-            continue
-        if any(
-            entity_id.split(".", 1)[0] == "climate" for entity_id in device.control_entity_ids
+        if device is not None and _restore_eligible(
+            hass, device, faulted, quarantined, lowest_limit_w, current_load
         ):
-            continue
-        projected = current_load + max(0.0, float(device.expected_power))
-        if projected >= lowest_limit_w:
-            continue
-        candidates.append(device)
+            candidates.append(device)
     return candidates
+
+
+def _restore_eligible(
+    hass: HomeAssistant,
+    device: ManagedDevice | None,
+    faulted: set[str],
+    quarantined: set[str],
+    lowest_limit_w: float,
+    current_load: float,
+) -> bool:
+    if device is None or device.device_id in faulted or device.device_id in quarantined:
+        return False
+    if logical_device_state(hass, device) is not False or device.pause_active:
+        return False
+    projected = current_load + max(0.0, float(device.expected_power))
+    return projected < lowest_limit_w

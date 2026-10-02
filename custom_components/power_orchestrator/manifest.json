@@ -1,8 +1,12 @@
 {
   "domain": "power_orchestrator",
   "name": "Power Orchestrator",
-  "after_dependencies": ["energy"],
-  "codeowners": ["@yeaxi"],
+  "after_dependencies": [
+    "energy"
+  ],
+  "codeowners": [
+    "@yeaxi"
+  ],
   "config_flow": true,
   "documentation": "https://yeaxi.github.io/power_orchestrator/",
   "integration_type": "service",
@@ -11,5 +15,5 @@
   "quality_scale": "platinum",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.6.0"
+  "version": "0.7.4"
 }

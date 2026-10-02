@@ -61,7 +61,7 @@ class PowerOrchestratorSensorBase(CoordinatorEntity, SensorEntity):  # type: ign
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "Power Orchestrator",
             "manufacturer": "Power Orchestrator",
-            "model": "v0.6.0",
+            "model": "v0.7.4",
         }
 
     @property
@@ -100,6 +100,8 @@ class PowerOrchestratorStatusSensor(PowerOrchestratorSensorBase):
             "load_sensor_valid": self._coordinator.load_sensor_valid,
             "load_sensor_reason": self._coordinator.load_sensor_reason,
             "startup_safe": self._coordinator.startup_safe,
+            "telemetry_fault_latched": (self._coordinator.data or {}).get("telemetry_fault_latched"),
+            "telemetry_fault_reason": (self._coordinator.data or {}).get("telemetry_fault_reason"),
             "faulted_devices": list((self._coordinator.data or {}).get("faulted_devices", ())),
             "quarantined_devices": list(
                 (self._coordinator.data or {}).get("quarantined_devices", ())
@@ -125,6 +127,7 @@ class PowerOrchestratorStatusSensor(PowerOrchestratorSensorBase):
             "pending_restore_names": list(
                 (self._coordinator.data or {}).get("pending_restore_names", ())
             ),
+            "restore_intents": list((self._coordinator.data or {}).get("restore_intents", ())),
         }
 
 

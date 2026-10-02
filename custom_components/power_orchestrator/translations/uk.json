@@ -42,6 +42,32 @@
           "description": "Audit label явного запиту оператора."
         }
       }
+    },
+    "set_request": {
+      "name": "Задати потребу в роботі",
+      "description": "Зберегти строковий запит або скасувати потребу без автоматичного відновлення.",
+      "fields": {
+        "device_id": {
+          "name": "Пристрій",
+          "description": "Configured logical device identifier."
+        },
+        "source": {
+          "name": "Джерело запиту",
+          "description": "Caller owning this request."
+        },
+        "active": {
+          "name": "Потреба активна",
+          "description": "False cancels restoration even when already off."
+        },
+        "expires_at": {
+          "name": "Строк завершення",
+          "description": "ISO 8601 timestamp with timezone, within 24 hours."
+        },
+        "permit_entity": {
+          "name": "Датчик дозволу",
+          "description": "Binary sensor that must currently be on."
+        }
+      }
     }
   },
   "config": {
@@ -90,21 +116,29 @@
         "data": {
           "discovered_devices": "Пристрої для керування",
           "add_custom_device": "Додати власний пристрій",
+          "device_id": "Стабільний ID пристрою (необов'язково)",
           "entity": "Entity керування on/off",
           "name": "Дружня назва (порожньо — зберегти назву discovery)",
           "expected_power": "Очікувана потужність увімкненого пристрою (Вт)",
           "power_sensor": "Сенсор потужності (автоматично знайдений, якщо доступний; можна замінити)",
           "actuators": "Додаткові logical actuators (необов'язково)",
+          "command_entity": "Entity штатної команди (необов'язково)",
+          "readback_entities": "Обов'язкові readback entities (необов'язково)",
+          "emergency_off_entities": "Резервні entities аварійного OFF (необов'язково)",
           "add_another": "Додати ще один власний пристрій"
         },
         "data_description": {
           "discovered_devices": "Лише candidates logical loads. Оберіть candidates, прив’язані до реальних керованих entities; невибрані ігноруються, а вимірювальний сенсор напряму не перемикається.",
           "add_custom_device": "Якщо увімкнено, після discovery відкриється форма ручного mapping, де можна додати switch, light або input_boolean.",
+          "device_id": "Стабільний ID для сервісів restore intent і cancel restore. Залиште порожнім для автоматичної генерації.",
           "entity": "Фактична entity керування on/off, яку інтеграція може викликати. Це physical service target; дозволені switch, light або input_boolean.",
           "name": "Дружня назва для entities, пріоритетів, повідомлень і логів. Залиште порожньою, щоб зберегти назву discovery або Home Assistant.",
           "expected_power": "Очікуване навантаження у ватах для оцінки ефекту shedding. Це лише планова telemetry і вона ніколи не дозволяє ввімкнення.",
           "power_sensor": "Сенсор фактичної потужності пристрою для telemetry та readback. Доступні невід’ємні значення ніколи не дозволяють ввімкнення.",
           "actuators": "Необов'язкові додаткові entities тієї самої logical load group, наприклад climate разом зі switch. Кожен actuator має надати causal readback; partial, unknown або unavailable стан групи працює fail-closed і не підтверджує ON чи OFF.",
+          "command_entity": "Entity для штатних shed і restore команд. Стан climate та humidifier відновлюється через сервіс відповідного домену.",
+          "readback_entities": "Entities, кожна з яких має повідомити новий причинний стан, перш ніж команда буде підтверджена.",
+          "emergency_off_entities": "Резервні entities, які одноразово використовуються в новому аварійному інциденті, якщо штатна команда не підтвердила OFF.",
           "add_another": "Керує лише циклом форми власних пристроїв. На runtime не впливає; увімкніть, щоб налаштувати ще один custom device перед призначенням пріоритетів."
         }
       },
@@ -139,8 +173,8 @@
           "battery_threshold": "Поріг розряду батареї (%)"
         },
         "data_description": {
-          "grid_loss_sensor": "Використовується лише в режимі бінарного сенсора. Для нормальної роботи він має бути доступним і мати стан ON; OFF, unknown, unavailable або відсутній input запускає emergency stop необов'язкових пристроїв.",
-          "battery_soc": "Використовується лише в battery-threshold mode. Сенсор має бути доступним і повертати значення у відсотках; unavailable, unknown або invalid input запускає safety stop.",
+          "grid_loss_sensor": "Використовується лише в режимі бінарного сенсора. Доступний стан ON підтверджує нормальне живлення; достовірний OFF дозволяє аварійне відключення. Невідомі, недоступні або відсутні дані призупиняють залежне керування та викликають повідомлення без команд приладам.",
+          "battery_soc": "Використовується лише в battery-threshold mode. Доступне значення у відсотках перевіряється за порогом. Невідомі, недоступні або невалідні дані призупиняють залежне керування та викликають повідомлення без команд приладам.",
           "battery_threshold": "Відсоток SoC, на рівні або нижче якого джерело безпеки вважається втраченим."
         }
       },
@@ -202,10 +236,10 @@
           "averaging_period": "Вікно для розрахунку середнього навантаження. Воно не подовжує незалежний ліміт доступності safety-входів.",
           "pause_period": "Скільки секунд пристрій залишається на паузі після shed-вимкнення. Аварійні safety-вимкнення не затримуються цим таймером.",
           "grid_loss_mode": "Авторитетне джерело safety-стану. Лише доступне валідне джерело дозволяє звичайні shedding-рішення.",
-          "grid_loss_sensor": "Binary-сенсор у відповідному режимі; він має бути доступним і мати стан ON. OFF, відсутній, недоступний або unknown стан запускає safety-відключення.",
-          "battery_soc": "Процентний сенсор у режимі порогу батареї. Він має бути доступним, валідним і строго вищим за заданий поріг.",
+          "grid_loss_sensor": "Бінарний сенсор у відповідному режимі. Доступний ON підтверджує живлення; достовірний OFF дозволяє аварійне відключення. Невідомі, недоступні або відсутні дані призупиняють залежне керування та викликають повідомлення без команд приладам.",
+          "battery_soc": "Процентний сенсор у режимі порогу батареї. Він має бути доступним, валідним і строго вищим за заданий поріг. Також потрібен пристроям із battery_min_soc: під час втрати мережі такий пристрій працює, поки заряд не нижчий за його мінімум.",
           "battery_threshold": "Відсоток SoC, на рівні або нижче якого джерело вважається втраченим і діє safety shedding.",
-          "devices": "Структурований мапінг кожного фізичного керування: стабільний device_id, entity switch/light/input_boolean, очікувані вати, необов'язковий сенсор виміряної потужності та унікальний пріоритет. Невалідні мапінги відхиляються, а не пропускаються мовчки.",
+          "devices": "Структурований мапінг кожного фізичного керування: стабільний device_id, entity switch/light/input_boolean, очікувані вати, необов'язковий сенсор виміряної потужності та унікальний пріоритет. Невалідні мапінги відхиляються, а не пропускаються мовчки. Необов'язковий battery_min_soc (відсоток, більше 0 і не більше 100) дозволяє пристрою працювати під час втрати мережі, поки заряд батареї не нижчий за це значення; після зупинки через низький заряд його вмикає власник.",
           "priority_order": "Порядок у native reorderable list є порядком shedding: перший entity перевіряється першим."
         }
       },
@@ -313,6 +347,9 @@
     "quarantine_clear_failed": {
       "message": "Запит очищення quarantine завершився помилкою."
     },
+    "fault_clear_failed": {
+      "message": "Перед очищенням помилки потрібна свіжа й безпечна телеметрія."
+    },
     "evaluation_failed": {
       "message": "Оцінювання Power Orchestrator завершилося помилкою."
     },
@@ -337,6 +374,10 @@
     "reconfiguration_required": {
       "title": "Power Orchestrator requires reconfiguration",
       "description": "No user-derived overload threshold list could be migrated. Reconfigure the integration and provide at least one threshold before Auto mode can act."
+    },
+    "telemetry_unavailable": {
+      "title": "Power Orchestrator: телеметрія недоступна",
+      "description": "Помилка телеметрії: {reason}. Прилади зберігають свій поточний стан. Моніторинг відновиться, а ця помилка автоматично очиститься після повернення достовірних даних."
     }
   }
 }

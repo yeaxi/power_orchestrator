@@ -14,6 +14,11 @@ Usual causes:
 
 An averaging window cannot make a bad sensor valid. Invalid load or unavailable safety telemetry also creates a persistent notification and never calls device services.
 
+Telemetry faults clear automatically when current required inputs are valid and
+fresh. This also clears their saved latch and removes the active HA notification;
+there is no timeout that turns telemetry loss into permission to switch loads off.
+Recovery does not remove actuator quarantine or storage/action faults.
+
 ## A load is faulted or quarantined
 
 Do not clear it with a raw Home Assistant service call. Check the real actuator state and measured power. Then use `power_orchestrator.clear_quarantine` only after that evidence is valid.

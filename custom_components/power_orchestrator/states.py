@@ -52,7 +52,7 @@ def actuator_state_on(entity_id: str, state: Any) -> bool | None:
     if raw in {STATE_UNAVAILABLE, STATE_UNKNOWN, None}:
         return None
     domain = entity_id.split(".", 1)[0]
-    if domain in {"switch", "light", "input_boolean"}:
+    if domain in {"switch", "light", "input_boolean", "humidifier"}:
         if raw == STATE_ON:
             return True
         if raw == STATE_OFF:
@@ -81,10 +81,10 @@ def ordinary_shedding_power_eligible(device: ManagedDevice) -> bool:
 
 
 def logical_device_state(hass: HomeAssistant, device: ManagedDevice) -> bool | None:
-    """Reduce a logical device's members to one on/off/unknown state."""
+    """Reduce the required readback members to one on/off/unknown state."""
     states = [
         actuator_state_on(entity_id, hass.states.get(entity_id))
-        for entity_id in device.control_entity_ids
+        for entity_id in device.readback_entities
     ]
     if not states or any(value is None for value in states):
         return None
@@ -96,15 +96,29 @@ def logical_device_state(hass: HomeAssistant, device: ManagedDevice) -> bool | N
 
 
 def logical_device_reported_at(hass: HomeAssistant, device: ManagedDevice) -> float | None:
-    """Return the newest causal report timestamp across a device's members."""
+    """Return the oldest required report timestamp across readback members."""
     timestamps = [
         state_reported_timestamp(hass.states.get(entity_id))
-        for entity_id in device.control_entity_ids
+        for entity_id in device.readback_entities
     ]
-    valid = [timestamp for timestamp in timestamps if timestamp is not None]
-    return max(valid) if valid else None
+    if not timestamps or any(timestamp is None for timestamp in timestamps):
+        return None
+    return min(timestamp for timestamp in timestamps if timestamp is not None)
+
+
+def logical_device_report_timestamps(
+    hass: HomeAssistant, device: ManagedDevice
+) -> dict[str, float | None]:
+    """Return each required member's report timestamp for causal fencing."""
+    return {
+        entity_id: state_reported_timestamp(hass.states.get(entity_id))
+        for entity_id in device.readback_entities
+    }
 
 
 def logical_device_confirmed_off(hass: HomeAssistant, device: ManagedDevice) -> bool:
     """Return whether a logical device is confirmed fully OFF."""
-    return logical_device_state(hass, device) is False
+    return (
+        logical_device_state(hass, device) is False
+        and actuator_state_on(device.command_entity, hass.states.get(device.command_entity)) is False
+    )

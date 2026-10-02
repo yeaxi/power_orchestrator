@@ -45,7 +45,7 @@ Restore runs when all of these are true:
 - aggregate load plus the candidate's expected power stays strictly below the lowest threshold
 - that safe capacity has held for 60 continuous seconds
 - a newer aggregate report is available after the previous restore
-- the load is confirmed OFF, not faulted or quarantined, and not a `climate` actuator
+- the logical load is confirmed OFF, not faulted or quarantined, and has a compatible captured restore snapshot and valid owner intent
 
 Restore turns on at most one pending load per evaluation cycle, in reverse actual shed order.
 

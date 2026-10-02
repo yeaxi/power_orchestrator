@@ -14,7 +14,7 @@ The integration does **not** implement:
 
 These are removed from the runtime, config-flow, service, and persisted configuration contracts. Legacy persisted fields are accepted only long enough to be removed by the versioned migration.
 
-Automatic restore is always available in Auto. It restores at most one pending load per evaluation cycle, never runs during an active shed or emergency, never runs while a post-action fence is pending, requires a continuous 60-second safe-capacity window below the lowest user threshold, restores in reverse actual shed order, excludes `climate` actuators, and confirms the ON transition with the same causal readback used for stops.
+Automatic restore requires Auto and an active owner intent with a durable ticket. It restores at most one pending load per evaluation cycle, never runs during an active shed or emergency, never runs while a post-action fence is pending, requires a continuous 60-second safe-capacity window below the lowest user threshold, restores in reverse actual shed order, requires a compatible captured actuator snapshot, and confirms the ON transition with causal readback.
 
 ## Safety boundaries
 
@@ -38,6 +38,20 @@ Before a normal decision, the coordinator validates:
 - optional measured-power sensors, including units and source-reported availability.
 
 Unknown, unavailable, contradictory, non-finite, negative, or incorrectly-unitized aggregate/device telemetry fails closed for normal decisions. It never becomes a synthetic `0 W` value or grants permission for a normal physical action. Invalid load or unavailable safety telemetry creates a persistent notification and never calls device services.
+
+Telemetry loss of any duration preserves device state and blocks commands that
+depend on the missing evidence. Aggregate reports expire after 180 seconds.
+Fresh valid required inputs automatically clear an identified telemetry fault,
+its persisted latch and active reason, and its HA notification. Recovery resumes
+monitoring without a separate timer or manual `clear_fault`; it never performs ON
+or grants a legacy telemetry-loss restore ticket. Missing-data time does not count
+toward continuous overload dwell. Actuator quarantine, unknown persisted faults,
+storage/action faults, and post-action causal fences remain independent.
+
+Prepared OFF actions revalidate evidence after persistence. Only actions rejected
+before dispatch can be retried under current confirmed supply loss. Invalidation
+during recovery notification or persistence is reconciled before publication,
+without a second physical-action cycle.
 
 An unavailable safety source selects `safety_blocked`, not grid loss. A confirmed OFF grid source in Auto selects the emergency stop path for known-on loads.
 
