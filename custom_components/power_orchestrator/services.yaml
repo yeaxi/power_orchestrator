@@ -51,3 +51,94 @@ clear_quarantine:
       required: false
       selector:
         text: {}
+
+set_request:
+  name: Set current load request (deprecated)
+  description: "Compatibility alias for set_restore_intent. It never performs normal ON/OFF and never creates a restore ticket."
+  fields:
+    device_id:
+      required: true
+      selector:
+        text: {}
+    source:
+      required: true
+      selector:
+        text: {}
+    active:
+      required: true
+      selector:
+        boolean: {}
+    expires_at:
+      required: true
+      selector:
+        text: {}
+    permit_entity:
+      required: true
+      selector:
+        entity:
+          domain: binary_sensor
+
+set_restore_intent:
+  name: Set restore intent
+  description: "Persist or clear one source-specific, bounded restore intent. This service never changes a device and cannot create a restore ticket."
+  fields:
+    device_id:
+      required: true
+      selector:
+        text: {}
+    source:
+      required: true
+      selector:
+        text: {}
+    active:
+      required: true
+      selector:
+        boolean: {}
+    ttl:
+      required: false
+      default: 86400
+      selector:
+        number:
+          min: 1
+          max: 86400
+          unit_of_measurement: s
+    permit_entity:
+      required: false
+      selector:
+        entity:
+          domain: binary_sensor
+    request_entity:
+      description: Optional input_text JSON producer state; must be paired with request_data.
+      required: false
+      selector:
+        entity:
+          domain: input_text
+    request_data:
+      description: Desired-state field projection (1..16 scalar fields), excluding command/readback bookkeeping.
+      required: false
+      selector:
+        object: {}
+    expires_at:
+      description: Optional UTC Unix timestamp or timezone-aware ISO date. The lease ends at the earlier of this deadline and TTL.
+      required: false
+      selector:
+        text: {}
+    expected_intent:
+      description: Optional exact source lease snapshot including revision; an empty object expects no lease. A mismatch discards the stale update without commands.
+      required: false
+      selector:
+        object: {}
+
+cancel_restore:
+  name: Cancel pending restore
+  description: "Delete a controller-created restore ticket without changing the physical device."
+  fields:
+    device_id:
+      required: true
+      selector:
+        text: {}
+
+clear_fault:
+  name: Clear telemetry fault
+  description: "Telemetry-loss faults clear automatically when valid required data return. Manually reconcile a retained telemetry-state fault only with fresh safe telemetry; this never turns a device on."
+  fields: {}

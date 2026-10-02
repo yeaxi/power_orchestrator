@@ -226,10 +226,7 @@ async def test_restore_dwell_resets_on_overload(hass, monkeypatch):
     _patch_restore_dwell(monkeypatch, coordinator, 3600.0)
     await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
     await hass.async_block_till_done()
-    coordinator.restore_pending_restore(["boiler"])
-    # Device must be confirmed OFF to be a restore candidate.
-    hass.states.async_set(ACTUATOR, "off")
-    await hass.async_block_till_done()
+    await _shed_the_boiler(hass)
 
     hass.states.async_set(LOAD_SENSOR, "2000", {"unit_of_measurement": "W"})
     await hass.async_block_till_done()
@@ -538,7 +535,7 @@ async def test_invalid_load_and_unavailable_safety_notify_without_device_service
     assert coordinator._telemetry_notification_active is True
     notifications = async_get_persistent_notifications(hass)
     assert any(
-        "telemetry blocked" in str(item.get("title", "")).lower()
+        "telemetry unavailable" in str(item.get("title", "")).lower()
         for item in notifications.values()
     )
 
@@ -624,8 +621,8 @@ async def test_pending_queue_survives_reload_and_then_restores(hass, monkeypatch
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
-async def test_grid_loss_queues_multiple_and_restores_reverse_order(hass, monkeypatch):
-    """Grid-loss all-stop queues multiple loads and restores them in reverse stop order."""
+async def test_grid_loss_queues_multiple_and_preserves_ticket_order(hass, monkeypatch):
+    """Grid-loss all-stop queues multiple durable tickets in stop order."""
     _install_integration(hass)
     assert await async_setup_component(
         hass,
@@ -686,8 +683,8 @@ async def test_grid_loss_queues_multiple_and_restores_reverse_order(hass, monkey
 
     assert hass.states.get(ACTUATOR).state == "off"
     assert hass.states.get(ACTUATOR_B).state == "off"
-    # Emergency stops reverse shed order: dryer then boiler.
-    assert coordinator.data["pending_restore_ids"] == ["dryer", "boiler"]
+    # The installed 0.7 policy retains durable tickets in shedding order.
+    assert coordinator.data["pending_restore_ids"] == ["boiler", "dryer"]
 
     # Raise aggregate first so grid recovery cannot restore under residual headroom.
     hass.states.async_set(LOAD_SENSOR, "7000", {"unit_of_measurement": "W"})
@@ -696,16 +693,17 @@ async def test_grid_loss_queues_multiple_and_restores_reverse_order(hass, monkey
     await hass.async_block_till_done()
     assert hass.states.get(ACTUATOR).state == "off"
     assert hass.states.get(ACTUATOR_B).state == "off"
-    assert coordinator.data["pending_restore_ids"] == ["dryer", "boiler"]
+    assert coordinator.data["pending_restore_ids"] == ["boiler", "dryer"]
 
     hass.states.async_set(LOAD_SENSOR, "1000", {"unit_of_measurement": "W"})
     await hass.async_block_till_done()
-    # Reverse actual stop order restores boiler first.
-    assert hass.states.get(ACTUATOR).state == "on"
-    assert hass.states.get(ACTUATOR_B).state == "off"
-    assert coordinator.data["pending_restore_ids"] == ["dryer"]
+    # Restore reverses the actual stop order: dryer before boiler.
+    assert hass.states.get(ACTUATOR).state == "off"
+    assert hass.states.get(ACTUATOR_B).state == "on"
+    assert coordinator.data["pending_restore_ids"] == ["boiler"]
 
     hass.states.async_set(LOAD_SENSOR, "1100", {"unit_of_measurement": "W"})
     await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR).state == "on"
     assert hass.states.get(ACTUATOR_B).state == "on"
     assert coordinator.data["pending_restore_ids"] == []

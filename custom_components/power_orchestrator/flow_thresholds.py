@@ -38,7 +38,7 @@ def _threshold_defaults(value: Any) -> list[dict[str, float]]:
             try:
                 limit = float(raw.get("power_limit", raw.get("limit_w")))
                 duration = float(raw.get("duration_s", raw.get("time_s")))
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 continue
             if math.isfinite(limit) and math.isfinite(duration) and limit > 0 and duration >= 0:
                 result.append({"power_limit": limit, "duration_s": duration})
@@ -60,7 +60,7 @@ def _parse_threshold_input(
         return None, "invalid_thresholds"
     try:
         count = int(raw_count)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None, "invalid_thresholds"
     if count != raw_count or not 1 <= count <= MAX_CUSTOM_THRESHOLDS:
         return None, "invalid_thresholds"
@@ -78,7 +78,7 @@ def _parse_threshold_input(
             return None, "invalid_thresholds"
         try:
             limit, dwell = validate_threshold_pair(float(power), float(duration), previous)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None, "invalid_thresholds"
         parsed.append({"power_limit": limit, "duration_s": dwell})
         previous = limit
@@ -152,7 +152,7 @@ def _parse_threshold_step(
             float(raw_duration),
             previous,
         )
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None, "invalid_thresholds"
     return {"power_limit": limit, "duration_s": duration}, None
 
@@ -163,9 +163,7 @@ def _threshold_add_allowed(
     """Prevent an add-another request that cannot produce a valid next step."""
     if not user_input.get(CONF_ADD_THRESHOLD, False):
         return True
-    return (
-        pair["power_limit"] < MAX_POLICY_POWER_W and len(collected) + 1 < MAX_CUSTOM_THRESHOLDS
-    )
+    return pair["power_limit"] < MAX_POLICY_POWER_W and len(collected) + 1 < MAX_CUSTOM_THRESHOLDS
 
 
 def _validate_threshold_collection(value: Any) -> list[dict[str, float]]:
@@ -183,7 +181,7 @@ def _validate_threshold_collection(value: Any) -> list[dict[str, float]]:
                 float(raw.get("duration_s", raw.get("time_s"))),
                 previous,
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             raise ValueError("invalid thresholds") from None
         parsed.append({"power_limit": limit, "duration_s": duration})
         previous = limit

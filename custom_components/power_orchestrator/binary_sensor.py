@@ -54,7 +54,7 @@ class PowerOrchestratorGridOkSensor(CoordinatorEntity, BinarySensorEntity):  # t
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "Power Orchestrator",
             "manufacturer": "Power Orchestrator",
-            "model": "v0.6.0",
+            "model": "v0.7.4",
         }
 
     @property
@@ -83,7 +83,7 @@ class _DiagnosticSensorBase(CoordinatorEntity, BinarySensorEntity):  # type: ign
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "Power Orchestrator",
             "manufacturer": "Power Orchestrator",
-            "model": "v0.6.0",
+            "model": "v0.7.4",
         }
 
     @property
@@ -93,6 +93,8 @@ class _DiagnosticSensorBase(CoordinatorEntity, BinarySensorEntity):  # type: ign
     @property
     def available(self) -> bool:
         return True
+
+
 class PowerOrchestratorFaultSensor(_DiagnosticSensorBase):
     """True when at least one logical device has a persistent fault."""
 
@@ -125,7 +127,10 @@ class PowerOrchestratorActionJournalHealthySensor(_DiagnosticSensorBase):
     @property
     def is_on(self) -> bool:
         data = self._power_coordinator.data or {}
-        return not (data.get("action_journal_invalid", False) or data.get("journal_persistence_blocked", False))
+        return not (
+            data.get("action_journal_invalid", False)
+            or data.get("journal_persistence_blocked", False)
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

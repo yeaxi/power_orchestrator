@@ -97,7 +97,9 @@ class ThresholdTier:
             or self.limit_w <= 0
             or self.duration_s < 0
         ):
-            raise ValueError("threshold values must be finite, positive limit, non-negative duration")
+            raise ValueError(
+                "threshold values must be finite, positive limit, non-negative duration"
+            )
 
 
 @dataclass(frozen=True)
@@ -139,7 +141,10 @@ class PolicyConfig:
 def derive_thresholds_from_mapping(data: Mapping[str, Any]) -> tuple[ThresholdTier, ...] | None:
     """Preserve valid thresholds, convert legacy named fields, or derive from max_load."""
     raw_thresholds = data.get(CONF_THRESHOLDS)
-    if isinstance(raw_thresholds, (list, tuple)) and 1 <= len(raw_thresholds) <= MAX_CUSTOM_THRESHOLDS:
+    if (
+        isinstance(raw_thresholds, (list, tuple))
+        and 1 <= len(raw_thresholds) <= MAX_CUSTOM_THRESHOLDS
+    ):
         parsed = _parse_threshold_list(raw_thresholds)
         if parsed is not None:
             return parsed
@@ -161,7 +166,9 @@ def derive_thresholds_from_mapping(data: Mapping[str, Any]) -> tuple[ThresholdTi
     return None
 
 
-def _parse_threshold_list(raw_thresholds: list[Any] | tuple[Any, ...]) -> tuple[ThresholdTier, ...] | None:
+def _parse_threshold_list(
+    raw_thresholds: list[Any] | tuple[Any, ...],
+) -> tuple[ThresholdTier, ...] | None:
     parsed: list[ThresholdTier] = []
     previous = 0.0
     try:
@@ -180,7 +187,7 @@ def _parse_threshold_list(raw_thresholds: list[Any] | tuple[Any, ...]) -> tuple[
                 )
             )
             previous = limit
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     return tuple(parsed)
 
@@ -188,9 +195,19 @@ def _parse_threshold_list(raw_thresholds: list[Any] | tuple[Any, ...]) -> tuple[
 def _legacy_named_thresholds(data: Mapping[str, Any]) -> tuple[ThresholdTier, ...] | None:
     """Convert legacy sustained/fast/critical fields when any are present."""
     keys = (
-        (CONF_SHED_SUSTAINED_LIMIT, CONF_SHED_SUSTAINED_DURATION, "sustained", ReasonCode.SHED_SUSTAINED_OVERLOAD),
+        (
+            CONF_SHED_SUSTAINED_LIMIT,
+            CONF_SHED_SUSTAINED_DURATION,
+            "sustained",
+            ReasonCode.SHED_SUSTAINED_OVERLOAD,
+        ),
         (CONF_SHED_FAST_LIMIT, CONF_SHED_FAST_DURATION, "fast", ReasonCode.SHED_FAST_OVERLOAD),
-        (CONF_SHED_CRITICAL_LIMIT, CONF_SHED_CRITICAL_DURATION, "critical", ReasonCode.SHED_CRITICAL_OVERLOAD),
+        (
+            CONF_SHED_CRITICAL_LIMIT,
+            CONF_SHED_CRITICAL_DURATION,
+            "critical",
+            ReasonCode.SHED_CRITICAL_OVERLOAD,
+        ),
     )
     if not any(limit_key in data for limit_key, _, _, _ in keys):
         return None
@@ -199,8 +216,12 @@ def _legacy_named_thresholds(data: Mapping[str, Any]) -> tuple[ThresholdTier, ..
     for limit_key, duration_key, tier_id, reason in keys:
         if limit_key not in data:
             continue
-        limit = _finite_number(data.get(limit_key), minimum=previous + 1e-9, maximum=MAX_POLICY_POWER_W)
-        duration = _finite_number(data.get(duration_key, 0.0), minimum=0.0, maximum=MAX_POLICY_DURATION_S)
+        limit = _finite_number(
+            data.get(limit_key), minimum=previous + 1e-9, maximum=MAX_POLICY_POWER_W
+        )
+        duration = _finite_number(
+            data.get(duration_key, 0.0), minimum=0.0, maximum=MAX_POLICY_DURATION_S
+        )
         if limit is None or duration is None:
             return None
         try:
@@ -222,7 +243,7 @@ def _finite_number(
         return None
     try:
         converted = float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if not math.isfinite(converted) or converted < minimum or converted > maximum:
         return None
@@ -292,10 +313,44 @@ class PolicyEngine:
         self.policy = policy
         self.runtime = runtime or PolicyRuntime()
         self.last_decision = PolicyDecision(False, None, ReasonCode.SAFETY_BLOCKED)
+        self._restore_capacity: tuple[float, float] | None = None
 
     def reset_restore_window(self) -> None:
         """Clear the in-process safe-capacity restore timer."""
         self.runtime.restore_since = None
+        self._restore_capacity = None
+
+    def observe_report(self, load_w: float, *, now: float) -> None:
+        """Invalidate timers from every report; never schedule a historical command."""
+        if isinstance(load_w, bool) or not math.isfinite(load_w) or load_w < 0:
+            self.runtime.tier_since.clear()
+            self.reset_restore_window()
+            return
+        self._update_exceeded_tiers(load_w, now=now)
+        if self._restore_capacity is not None:
+            expected_w, limit_w = self._restore_capacity
+            if load_w + expected_w >= limit_w:
+                self.reset_restore_window()
+
+    def _restore_window_elapsed(self, capacity: tuple[float, float], *, now: float) -> float:
+        if self._restore_capacity != capacity:
+            self.reset_restore_window()
+        if self.runtime.restore_since is None:
+            self.runtime.restore_since = now
+        self._restore_capacity = capacity
+        return now - self.runtime.restore_since
+
+    def restore_window_matured(
+        self, *, candidate_expected_w: float, lowest_limit_w: float, now: float
+    ) -> bool:
+        """Read-only permission for every physical adapter boundary, including awaits."""
+        since = self.runtime.restore_since
+        return (
+            self._restore_capacity == (candidate_expected_w, lowest_limit_w)
+            and since is not None
+            and math.isfinite(now)
+            and now - since >= _const.RESTORE_SAFE_CAPACITY_DWELL_S
+        )
 
     def observe_load(self, load_w: float, *, now: float) -> PolicyDecision:
         """Advance overload dwell timers from one newly reported aggregate value."""
@@ -303,14 +358,7 @@ class PolicyEngine:
             return self.observe_invalid_load(ReasonCode.TELEMETRY_INVALID, now=now)
 
         self.runtime.last_telemetry_validity = TelemetryValidity.VALID
-        exceeded: list[ThresholdTier] = []
-        for tier in self.policy.thresholds:
-            if load_w > tier.limit_w:
-                exceeded.append(tier)
-                self.runtime.tier_since.setdefault(tier.tier_id, now)
-            else:
-                self.runtime.tier_since.pop(tier.tier_id, None)
-
+        exceeded = self._update_exceeded_tiers(load_w, now=now)
         active = exceeded[-1] if exceeded else None
         matured = [
             tier
@@ -318,39 +366,48 @@ class PolicyEngine:
             if now - self.runtime.tier_since[tier.tier_id] >= tier.duration_s
         ]
         trigger = matured[-1] if matured else None
-
         self.runtime.active_tier = active.tier_id if active else None
-        self.runtime.tier_started_at = (
-            self.runtime.tier_since.get(active.tier_id) if active else None
-        )
+        self.runtime.tier_started_at = self.runtime.tier_since.get(active.tier_id) if active else None
         if active is None:
             self.runtime.tier_since.clear()
+        decision = self._load_decision(active, trigger, now=now)
+        self.runtime.decision_sequence += 1
+        self.last_decision = decision
+        return decision
 
+    def _update_exceeded_tiers(self, load_w: float, *, now: float) -> list[ThresholdTier]:
+        """Update each independent dwell timer only from reported load."""
+        exceeded: list[ThresholdTier] = []
+        for tier in self.policy.thresholds:
+            if load_w > tier.limit_w:
+                exceeded.append(tier)
+                self.runtime.tier_since.setdefault(tier.tier_id, now)
+            else:
+                self.runtime.tier_since.pop(tier.tier_id, None)
+        return exceeded
+
+    def _load_decision(
+        self, active: ThresholdTier | None, trigger: ThresholdTier | None, *, now: float
+    ) -> PolicyDecision:
+        """Choose shedding or monitoring without advancing timers a second time."""
         if trigger is not None:
             self.reset_restore_window()
             self.runtime.phase = PolicyPhase.SHEDDING
             self.runtime.last_reason_code = trigger.reason_code
             elapsed = now - self.runtime.tier_since.get(trigger.tier_id, now)
-            decision = PolicyDecision(
+            return PolicyDecision(
                 True,
                 active.tier_id if active else trigger.tier_id,
                 trigger.reason_code,
                 max(0.0, elapsed),
             )
-        else:
-            self.runtime.phase = (
-                PolicyPhase.WAITING_LOAD_RECONCILIATION
-                if self.runtime.pending_post_shed_generation is not None
-                else PolicyPhase.MONITORING
-            )
-            self.runtime.last_reason_code = ReasonCode.NORMAL_MONITORING
-            decision = PolicyDecision(
-                False, active.tier_id if active else None, ReasonCode.NORMAL_MONITORING
-            )
-
-        self.runtime.decision_sequence += 1
-        self.last_decision = decision
-        return decision
+        self.runtime.phase = (
+            PolicyPhase.WAITING_LOAD_RECONCILIATION
+            if self.runtime.pending_post_shed_generation is not None
+            else PolicyPhase.MONITORING
+        )
+        self.runtime.last_reason_code = ReasonCode.NORMAL_MONITORING
+        return PolicyDecision(False, active.tier_id if active else None, ReasonCode.NORMAL_MONITORING)
 
     def observe_invalid_load(self, reason_code: ReasonCode, *, now: float) -> PolicyDecision:
         """Fail closed on invalid input and reset dwell timers."""
@@ -443,9 +500,7 @@ class PolicyEngine:
             self.reset_restore_window()
             return PolicyDecision(False, None, ReasonCode.RESTORE_BLOCKED_OVERLOAD)
 
-        if self.runtime.restore_since is None:
-            self.runtime.restore_since = now
-        elapsed = now - self.runtime.restore_since
+        elapsed = self._restore_window_elapsed((candidate_expected_w, lowest_limit_w), now=now)
         triggered = elapsed >= _const.RESTORE_SAFE_CAPACITY_DWELL_S
         return PolicyDecision(
             triggered,

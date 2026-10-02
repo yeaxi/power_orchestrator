@@ -88,6 +88,7 @@ def coordinator(
 ):
     hass = hass or MagicMock()
     hass.services.async_call = AsyncMock()
+    hass.services.has_service = MagicMock(return_value=False)
     hass.bus.async_fire = MagicMock()
     if store is None:
         store = MagicMock()
@@ -160,6 +161,7 @@ def test_battery_threshold_uses_semantically_available_percent_input() -> None:
 @pytest.mark.asyncio
 async def test_invalid_load_blocks_without_physical_command() -> None:
     coordinator_instance = coordinator()
+    coordinator_instance._startup_telemetry_deadline = 0.0
     coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
         state("on") if entity_id == "binary_sensor.grid" else state("unknown")
     )
@@ -174,6 +176,7 @@ async def test_invalid_load_blocks_without_physical_command() -> None:
 @pytest.mark.asyncio
 async def test_unavailable_grid_source_is_not_reported_as_confirmed_grid_loss() -> None:
     coordinator_instance = coordinator()
+    coordinator_instance._startup_telemetry_deadline = 0.0
     coordinator_instance.hass.states.get.side_effect = lambda entity_id: (
         state("unavailable")
         if entity_id == "binary_sensor.grid"

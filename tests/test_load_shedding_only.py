@@ -50,6 +50,10 @@ async def test_persisted_mode_is_restored_only_when_safety_storage_is_valid(
     runtime_store.resolve_unified_mode.return_value = MODE_AUTO
     runtime_store.restore_device_runtime.return_value = (set(), set())
     runtime_store.restore_pending_restore.return_value = []
+    runtime_store.restore_telemetry_fault.return_value = (False, None)
+    runtime_store.restore_telemetry_emergency_handled.return_value = False
+    runtime_store.restore_requests.return_value = {}
+    runtime_store.restore_restore_tickets.return_value = {}
     runtime_store.restore_fault_reasons.return_value = {}
     runtime_store.restore_fault_notification_state.return_value = ({}, {})
     runtime_store.unresolved_actions.return_value = []
@@ -99,6 +103,10 @@ async def test_setup_resolves_unified_mode_from_legacy_observe_execution() -> No
     runtime_store.unresolved_actions.return_value = []
     runtime_store.action_journal_invalid = False
     runtime_store.restore_pending_restore.return_value = []
+    runtime_store.restore_telemetry_fault.return_value = (False, None)
+    runtime_store.restore_telemetry_emergency_handled.return_value = False
+    runtime_store.restore_requests.return_value = {}
+    runtime_store.restore_restore_tickets.return_value = {}
     coordinator = MagicMock()
     coordinator.async_config_entry_first_refresh = AsyncMock()
     coordinator._save_runtime_snapshot = MagicMock()

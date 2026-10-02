@@ -4,6 +4,11 @@ Turns optional Home Assistant loads off when whole-house power stays too high, t
 
 It does not start new loads, prioritize solar, or use forecasts.
 
+Missing or stale telemetry preserves device state, blocks dependent commands, and
+notifies you. Fresh valid inputs automatically clear the telemetry fault and resume
+monitoring. Recovery never turns a device on or replays a telemetry-loss restore
+ticket; confirmed supply loss and measured overload retain their separate rules.
+
 Docs: [yeaxi.github.io/power_orchestrator](https://yeaxi.github.io/power_orchestrator/)
 
 ## Requirements

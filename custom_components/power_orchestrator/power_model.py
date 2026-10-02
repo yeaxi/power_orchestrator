@@ -8,6 +8,54 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _entity_members(value: Any) -> tuple[str, ...]:
+    """Keep the legacy runtime parser's permissive collection semantics."""
+    if isinstance(value, str):
+        value = (value,)
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(member for member in value if isinstance(member, str) and member)
+
+
+def _finite_timestamp(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    converted = float(value)
+    return converted if math.isfinite(converted) else None
+
+
+def _legacy_integer(value: Any, minimum: int, default: int | None) -> int | None:
+    if value is None and default is None:
+        return None
+    try:
+        return max(minimum, int(float(value)))
+    except TypeError, ValueError:
+        return default
+
+
+def _optional_text(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def parse_battery_min_soc(value: Any) -> float | None:
+    """Return a valid per-load minimum battery charge (0 < value <= 100), else None."""
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        converted = float(value)
+    except ValueError:
+        return None
+    if not math.isfinite(converted) or not 0 < converted <= 100:
+        return None
+    return converted
+
+
+def _required_text(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"device record is missing {label}")
+    return value
+
+
 @dataclass
 class ManagedDevice:
     """A logical optional load that the controller may switch off."""
@@ -20,6 +68,12 @@ class ManagedDevice:
     priority: int = 1
     shed_priority: int | None = None
     actuator_entity_ids: tuple[str, ...] = ()
+    command_entity_id: str | None = None
+    readback_entity_ids: tuple[str, ...] = ()
+    emergency_off_entity_ids: tuple[str, ...] = ()
+    # None keeps the grid-loss all-stop. A value lets the load run on battery
+    # while charge is at least this percentage; its owner decides resumption.
+    battery_min_soc: float | None = None
 
     # Runtime state is always reconciled from Home Assistant telemetry.
     is_on: bool | None = None
@@ -31,8 +85,37 @@ class ManagedDevice:
 
     @property
     def control_entity_ids(self) -> tuple[str, ...]:
-        """Return every physical member of this logical load exactly once."""
+        """Compatibility projection of every configured physical member."""
         return tuple(dict.fromkeys((self.entity_id, *self.actuator_entity_ids)))
+
+    @property
+    def command_entity(self) -> str:
+        """Return the single normal command target for this logical load."""
+        if self.command_entity_id:
+            return self.command_entity_id
+        climate = next(
+            (entity for entity in self.actuator_entity_ids if entity.startswith("climate.")),
+            None,
+        )
+        return climate or self.entity_id
+
+    @property
+    def readback_entities(self) -> tuple[str, ...]:
+        """Return required readback members, falling back to legacy configuration."""
+        if self.readback_entity_ids:
+            return tuple(dict.fromkeys(self.readback_entity_ids))
+        if self.command_entity.startswith("climate.") and self.entity_id != self.command_entity:
+            return (self.entity_id,)
+        return self.control_entity_ids
+
+    @property
+    def emergency_off_entities(self) -> tuple[str, ...]:
+        """Return fallback OFF targets used only after the normal command fails."""
+        if self.emergency_off_entity_ids:
+            return tuple(dict.fromkeys(self.emergency_off_entity_ids))
+        if self.entity_id != self.command_entity:
+            return (self.entity_id,)
+        return ()
 
     @property
     def pause_active(self) -> bool:
@@ -50,6 +133,10 @@ class ManagedDevice:
             "priority": self.priority,
             "shed_priority": self.shed_priority,
             "actuators": list(self.actuator_entity_ids),
+            "command_entity": self.command_entity,
+            "readback_entities": list(self.readback_entities),
+            "emergency_off_entities": list(self.emergency_off_entities),
+            "battery_min_soc": self.battery_min_soc,
             "is_on": self.is_on,
             "measured_power": self.measured_power if self.measured_power_valid else None,
             "measured_power_valid": self.measured_power_valid,
@@ -64,63 +151,27 @@ class ManagedDevice:
         Unknown legacy policy fields are deliberately ignored.  In particular,
         the runtime model contains only device state and shedding metadata; no activation policy.
         """
-        raw_actuators = data.get("actuators", ())
-        if isinstance(raw_actuators, str):
-            raw_actuators = (raw_actuators,)
-        if not isinstance(raw_actuators, (list, tuple)):
-            raw_actuators = ()
-        actuators = tuple(
-            value for value in raw_actuators if isinstance(value, str) and value
-        )
-
-        def finite_timestamp(value: Any) -> float | None:
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                return None
-            converted = float(value)
-            return converted if math.isfinite(converted) else None
-
-        expected_raw = data.get("expected_power", 0)
-        try:
-            expected_power = int(float(expected_raw))
-        except (TypeError, ValueError):
-            expected_power = 0
-        expected_power = max(0, min(expected_power, 50000))
-
-        priority_raw = data.get("priority", 1)
-        try:
-            priority = max(1, int(float(priority_raw)))
-        except (TypeError, ValueError):
-            priority = 1
-        shed_raw = data.get("shed_priority")
-        try:
-            shed_priority = max(1, int(float(shed_raw))) if shed_raw is not None else None
-        except (TypeError, ValueError):
-            shed_priority = None
-
-        entity_id = data.get("entity")
-        device_id = data.get("device_id")
-        name = data.get("name")
-        if not isinstance(entity_id, str) or not entity_id:
-            raise ValueError("device record is missing device_id")
-        if not isinstance(device_id, str) or not device_id:
-            raise ValueError("device record is missing device_id")
-        if not isinstance(name, str) or not name:
-            raise ValueError("device record is missing name")
+        expected_power = min(_legacy_integer(data.get("expected_power", 0), 0, 0) or 0, 50000)
+        priority = _legacy_integer(data.get("priority", 1), 1, 1) or 1
+        shed_priority = _legacy_integer(data.get("shed_priority"), 1, None)
+        entity_id = _required_text(data.get("entity"), "device_id")
+        device_id = _required_text(data.get("device_id"), "device_id")
+        name = _required_text(data.get("name"), "name")
 
         return cls(
             device_id=device_id,
             name=name,
             entity_id=entity_id,
             expected_power=expected_power,
-            power_sensor_id=(
-                data.get("power_sensor")
-                if isinstance(data.get("power_sensor"), str)
-                else None
-            ),
+            power_sensor_id=_optional_text(data.get("power_sensor")),
             priority=priority,
             shed_priority=shed_priority,
-            actuator_entity_ids=actuators,
-            pause_until=finite_timestamp(data.get("pause_until")),
+            actuator_entity_ids=_entity_members(data.get("actuators", ())),
+            command_entity_id=_optional_text(data.get("command_entity")),
+            readback_entity_ids=_entity_members(data.get("readback_entities", ())),
+            emergency_off_entity_ids=_entity_members(data.get("emergency_off_entities", ())),
+            battery_min_soc=parse_battery_min_soc(data.get("battery_min_soc")),
+            pause_until=_finite_timestamp(data.get("pause_until")),
         )
 
 
@@ -141,9 +192,7 @@ class PowerModel:
         return sorted(
             self._devices.values(),
             key=lambda device: (
-                device.shed_priority
-                if device.shed_priority is not None
-                else device.priority,
+                device.shed_priority if device.shed_priority is not None else device.priority,
                 device.device_id,
             ),
         )

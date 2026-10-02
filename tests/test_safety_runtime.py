@@ -37,6 +37,7 @@ def _coordinator(
 ) -> PowerOrchestratorCoordinator:
     hass = MagicMock()
     hass.services.async_call = AsyncMock()
+    hass.services.has_service = MagicMock(return_value=False)
     hass.bus.async_fire = MagicMock()
     store = MagicMock()
     store.async_save = AsyncMock()
@@ -111,7 +112,7 @@ async def test_available_unchanged_aggregate_state_remains_usable_after_window()
     coordinator.hass.states.get.side_effect = lambda entity_id: (
         grid_state if entity_id == "binary_sensor.grid" else load_state
     )
-    clock = [1000.0]
+    clock = [100.0]
     with patch("power_orchestrator.coordinator.time.time", side_effect=lambda: clock[0]):
         await coordinator._evaluate()
         clock[0] += coordinator._averaging_period + 1
