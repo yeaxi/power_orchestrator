@@ -135,13 +135,13 @@ async def test_malformed_restore_storage_blocks_auto_after_setup_and_reload(hass
     entry = _entry()
     entry.add_to_hass(hass)
     key = f"{STORAGE_KEY}_{entry.entry_id}"
+    hass_storage[key] = {
+        "version": STORAGE_VERSION,
+        "minor_version": 1,
+        "key": key,
+        "data": {"mode": "auto", field: "malformed"},
+    }
     for _ in range(2):
-        hass_storage[key] = {
-            "version": STORAGE_VERSION,
-            "minor_version": 1,
-            "key": key,
-            "data": {"mode": "auto", field: "malformed"},
-        }
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
         coordinator = entry.runtime_data.coordinator

@@ -56,12 +56,15 @@ class RuntimeStore:
             self._action_journal_invalid = False
             return
         self._data = copy.deepcopy(raw)
+        invalid = self._data.get("safety_storage_invalid", False)
+        self._safety_storage_invalid = not isinstance(invalid, bool) or invalid
         self._migrate_device_runtime_payload()
         self._action_journal_invalid = bool(self._data.get("action_journal_invalid"))
         self._data["audit_history"] = self._normalize_history(self._data.get("audit_history", []))
 
     async def async_save(self) -> None:
         self._data["storage_version"] = STORAGE_VERSION
+        self._data["safety_storage_invalid"] = self._safety_storage_invalid
         await self._store.async_save(self._data)
 
     def snapshot(self) -> dict[str, Any]:
@@ -316,12 +319,10 @@ class RuntimeStore:
         raw = self._data.get("device_runtime")
         configured = {device.device_id for device in model.all_devices()}
         if raw is None:
-            self._safety_storage_invalid = False
             return set(), set()
         if not self._device_runtime_envelope_is_valid(raw):
             self._safety_storage_invalid = True
             return set(), configured
-        self._safety_storage_invalid = False
         faulted = self._validated_device_set(raw.get("faulted_devices"), configured)
         quarantined = self._validated_device_set(raw.get("quarantined_devices"), configured)
         for device_id in faulted | quarantined:

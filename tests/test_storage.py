@@ -39,6 +39,43 @@ async def test_empty_store_and_mode_round_trip() -> None:
     restored = RuntimeStore(FakeStore(backend._data))
     await restored.async_load()
     assert restored.restore_mode() == "auto"
+    assert restored.safety_storage_invalid is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    "malformed",
+    {"safety_storage_invalid": "malformed"},
+    {"telemetry_fault": "malformed"},
+    {"restore_intents": "malformed"},
+    {"restore_tickets": "malformed"},
+])
+async def test_storage_fault_survives_normal_snapshot_and_restart(payload) -> None:
+    """Normal writes and valid readers cannot silently repair a storage fault."""
+    backend = FakeStore(payload)
+    store = RuntimeStore(backend)
+    await store.async_load()
+    model = make_model()
+    store.restore_device_runtime(model)
+    store.restore_telemetry_fault()
+    store.restore_requests(model)
+    store.restore_restore_tickets(model)
+    assert store.safety_storage_invalid is True
+
+    store.set_mode("off")
+    store.save_device_runtime(model)
+    store.save_telemetry_fault(False, None)
+    store.save_requests({})
+    store.save_restore_tickets({})
+    await store.async_save()
+
+    restored = RuntimeStore(FakeStore(backend._data))
+    await restored.async_load()
+    restored.restore_device_runtime(model)
+    restored.restore_telemetry_fault()
+    restored.restore_requests(model)
+    restored.restore_restore_tickets(model)
+    assert restored.safety_storage_invalid is True
 
 
 @pytest.mark.asyncio
