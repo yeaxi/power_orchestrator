@@ -602,6 +602,9 @@ def _restore_runtime_state(
     store.restore_policy_runtime(coordinator._policy_engine, model)
     coordinator.restore_requests(store.restore_requests(model))
     coordinator.restore_restore_tickets(store.restore_restore_tickets(model))
+    coordinator._safety_storage_invalid = (
+        coordinator._safety_storage_invalid or store.safety_storage_invalid
+    )
 
 
 def _restored_mode(

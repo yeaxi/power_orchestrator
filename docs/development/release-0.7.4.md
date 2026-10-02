@@ -12,6 +12,9 @@ including after restart. Recovery does not turn appliances on, clear actuator or
 storage faults, remove causal fences, or replay legacy telemetry-loss tickets.
 Confirmed supply loss and measured overload keep their independent rules.
 
+Malformed persisted restore intents or tickets also keep the safety gate blocked
+after setup and reload, including a later request to switch to Auto.
+
 The installed baseline includes durable restore intents/tickets, causal report
 listeners, actuator command/readback mapping, startup telemetry grace, and optional
 battery minimums. Existing public tests now exercise those contracts: config-entry

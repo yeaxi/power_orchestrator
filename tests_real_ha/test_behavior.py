@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 from homeassistant.config_entries import ConfigEntryState
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.setup import async_setup_component
 from power_orchestrator.const import (
     CONF_ADD_THRESHOLD,
@@ -35,6 +36,8 @@ from power_orchestrator.const import (
     DOMAIN,
     GRID_LOSS_MODE_SENSOR,
     GRID_LOSS_MODE_THRESHOLD,
+    STORAGE_KEY,
+    STORAGE_VERSION,
 )
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -121,6 +124,35 @@ async def _shed_the_boiler(hass) -> None:
     await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
     await hass.async_block_till_done()
     assert hass.states.get(ACTUATOR).state == "off"
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+@pytest.mark.parametrize("field", ["restore_tickets", "restore_intents"])
+async def test_malformed_restore_storage_blocks_auto_after_setup_and_reload(hass, hass_storage, field):
+    """Every persisted restoration reader contributes to the durable command gate."""
+    _install_integration(hass)
+    await _prepare_entities(hass)
+    entry = _entry()
+    entry.add_to_hass(hass)
+    key = f"{STORAGE_KEY}_{entry.entry_id}"
+    for _ in range(2):
+        hass_storage[key] = {
+            "version": STORAGE_VERSION,
+            "minor_version": 1,
+            "key": key,
+            "data": {"mode": "auto", field: "malformed"},
+        }
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        coordinator = entry.runtime_data.coordinator
+        assert coordinator.safety_storage_invalid is True
+        assert coordinator.mode == "off"
+        with pytest.raises(HomeAssistantError):
+            await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
+        assert coordinator.physical_commands_allowed is False
+        assert hass.states.get(ACTUATOR).state == "on"
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
