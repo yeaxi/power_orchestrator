@@ -65,6 +65,10 @@ async def test_persisted_mode_is_restored_only_when_safety_storage_is_valid(
 
     with (
         patch("power_orchestrator.Store"),
+        patch(
+            "power_orchestrator.async_get_integration",
+            new=AsyncMock(return_value=SimpleNamespace(version="test")),
+        ),
         patch("power_orchestrator.RuntimeStore", return_value=runtime_store),
         patch("power_orchestrator.PowerOrchestratorCoordinator", return_value=coordinator),
         patch("power_orchestrator._register_services", new=AsyncMock()),
@@ -113,6 +117,10 @@ async def test_setup_resolves_unified_mode_from_legacy_observe_execution() -> No
 
     with (
         patch("power_orchestrator.Store"),
+        patch(
+            "power_orchestrator.async_get_integration",
+            new=AsyncMock(return_value=SimpleNamespace(version="test")),
+        ),
         patch("power_orchestrator.RuntimeStore", return_value=runtime_store),
         patch("power_orchestrator.PowerOrchestratorCoordinator", return_value=coordinator),
         patch("power_orchestrator._register_services", new=AsyncMock()),

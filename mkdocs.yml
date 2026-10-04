@@ -3,6 +3,11 @@ site_url: https://yeaxi.github.io/power_orchestrator/
 repo_url: https://github.com/yeaxi/power_orchestrator
 edit_uri: edit/main/docs/
 
+# Agent policy and private evidence references are repository-local.
+exclude_docs: |
+  agents/
+  adr/
+
 theme:
   name: material
   features:
@@ -33,6 +38,8 @@ nav:
   - Development:
       - Contributing: development/contributing.md
       - Git workflow: development/git-workflow.md
+      - Agent workflow and evidence: development/agent-environment.md
+      - Retrospective implementation: development/retro-improvements.md
       - Release: development/release.md
       - Verification: development/verification.md
 

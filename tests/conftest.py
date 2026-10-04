@@ -9,7 +9,7 @@ while integration tests use the plugin-provided ``hass`` fixture together with
 
 import pytest
 
-pytest_plugins = ("pytest_homeassistant_custom_component",)
+pytest_plugins = ("pytest_homeassistant_custom_component.plugins",)
 
 
 @pytest.fixture(autouse=True)

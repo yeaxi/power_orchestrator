@@ -54,7 +54,7 @@ class PowerOrchestratorGridOkSensor(CoordinatorEntity, BinarySensorEntity):  # t
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "Power Orchestrator",
             "manufacturer": "Power Orchestrator",
-            "model": "v0.7.4",
+            "model": "v0.7.5",
         }
 
     @property
@@ -83,7 +83,7 @@ class _DiagnosticSensorBase(CoordinatorEntity, BinarySensorEntity):  # type: ign
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "Power Orchestrator",
             "manufacturer": "Power Orchestrator",
-            "model": "v0.7.4",
+            "model": "v0.7.5",
         }
 
     @property

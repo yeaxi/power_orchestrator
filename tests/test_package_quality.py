@@ -1,6 +1,7 @@
 """Package metadata and resource quality gates."""
 from __future__ import annotations
 
+import ast
 import json
 import re
 import tomllib
@@ -113,16 +114,26 @@ def test_pyproject_and_ci_define_the_local_quality_gate():
 
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
     assert "requirements-ci.txt" in workflow
-    assert "compileall" in workflow
-    assert "json.tool" in workflow
-    assert "yaml.safe_load" in workflow
-    assert "ruff check" in workflow
-    assert "mypy" in workflow
-    assert "coverage run" in workflow
-    assert "coverage report" in workflow
+    assert "python scripts/local_checks.py --suite quality" in workflow
+    assert "python scripts/local_checks.py --suite real-ha" in workflow
+    runner = (ROOT / "scripts/local_checks.py").read_text()
+    commands = {
+        tuple(arg.value for arg in node.args if isinstance(arg, ast.Constant))
+        for node in ast.walk(ast.parse(runner))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "run"
+    }
+    for prefix in (
+        ("compileall",),
+        ("ruff", "check"),
+        ("mypy",),
+        ("coverage", "run", "--branch"),
+        ("coverage", "report"),
+    ):
+        assert any(command[: len(prefix)] == prefix for command in commands), prefix
+    assert "yaml.safe_load" in runner
     assert 'python-version: "3.14.2"' in workflow
-    assert "pytest_real_ha.ini" in workflow
-    assert "tests_real_ha" in workflow
+    assert "pytest_real_ha.ini" in runner
+    assert "tests_real_ha" in runner
 
 
 def test_release_pipeline_publishes_the_asset_hacs_downloads():

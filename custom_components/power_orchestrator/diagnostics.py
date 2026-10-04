@@ -56,6 +56,10 @@ def _bounded_runtime_data(coordinator: Any) -> dict[str, Any]:
         "quarantined_devices_count",
         "safety_fault_reason",
         "pending_restore_count",
+        "telemetry_fault_latched",
+        "safety_storage_invalid",
+        "grid_safety_source_available",
+        "restore_commands_allowed",
     )
     projected = {key: raw[key] for key in keys if key in raw}
     projected.setdefault("faulted_devices_count", _count(raw, "faulted_devices"))

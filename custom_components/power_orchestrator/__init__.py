@@ -18,6 +18,7 @@ from homeassistant.core import Event, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.storage import Store
+from homeassistant.loader import async_get_integration
 
 from .const import (
     CONF_AVERAGING_PERIOD,
@@ -472,6 +473,7 @@ def _register_entry_update_listener(entry: Any) -> None:
 
 
 async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    integration = await async_get_integration(hass, DOMAIN)
     data = dict(entry.data or {})
     data.update(dict(entry.options or {}))
     model = _build_model(data)
@@ -503,6 +505,7 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
             battery_threshold=data.get(CONF_BATTERY_THRESHOLD),
             battery_soc_sensor=data.get(CONF_BATTERY_SOC),
             entry_id=entry.entry_id,
+            integration_version=integration.version,
             policy=policy,
         ),
     )

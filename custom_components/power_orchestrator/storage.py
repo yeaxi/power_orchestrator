@@ -20,6 +20,7 @@ from .const import (
     MODES,
     STORAGE_VERSION,
 )
+from .journal import normalize_input_snapshot
 from .policy import PolicyEngine, PolicyPhase, PolicyRuntime, ReasonCode, TelemetryValidity
 from .power_model import PowerModel
 from .requests import RestoreIntent, RestoreTicket
@@ -403,10 +404,10 @@ class RuntimeStore:
     def restore_telemetry_emergency_handled(self) -> bool:
         """Legacy latches are ambiguous: do not replay OFF without explicit clear."""
         latched, _ = self.restore_telemetry_fault()
-        raw = self._data.get('telemetry_fault', {})
+        raw = self._data.get("telemetry_fault", {})
         if not isinstance(raw, dict):
             return True
-        handled = raw.get('emergency_handled', latched)
+        handled = raw.get("emergency_handled", latched)
         if not isinstance(handled, bool):
             self._safety_storage_invalid = True
             return True
@@ -503,20 +504,40 @@ class RuntimeStore:
         return value if isinstance(value, str) else None
 
     def _restore_shed_fence(self, runtime: PolicyRuntime, raw: Mapping[str, Any]) -> None:
-        runtime.pending_post_shed_generation = self._fresh_generation(raw.get("pending_post_shed_generation"))
-        runtime.pending_post_shed_after_reported_at = self._finite_or_none(raw.get("pending_post_shed_after_reported_at"))
-        if runtime.pending_post_shed_generation is not None and runtime.pending_post_shed_after_reported_at is None:
+        runtime.pending_post_shed_generation = self._fresh_generation(
+            raw.get("pending_post_shed_generation")
+        )
+        runtime.pending_post_shed_after_reported_at = self._finite_or_none(
+            raw.get("pending_post_shed_after_reported_at")
+        )
+        if (
+            runtime.pending_post_shed_generation is not None
+            and runtime.pending_post_shed_after_reported_at is None
+        ):
             runtime.pending_post_shed_after_reported_at = time.time()
         runtime.pending_operation_id = self._operation_text(raw.get("pending_operation_id"))
-        runtime.last_shed_load_generation = self._fresh_generation(raw.get("last_shed_load_generation"))
+        runtime.last_shed_load_generation = self._fresh_generation(
+            raw.get("last_shed_load_generation")
+        )
 
     def _restore_restore_fence(self, runtime: PolicyRuntime, raw: Mapping[str, Any]) -> None:
-        runtime.pending_post_restore_generation = self._fresh_generation(raw.get("pending_post_restore_generation"))
-        runtime.pending_post_restore_after_reported_at = self._finite_or_none(raw.get("pending_post_restore_after_reported_at"))
-        if runtime.pending_post_restore_generation is not None and runtime.pending_post_restore_after_reported_at is None:
+        runtime.pending_post_restore_generation = self._fresh_generation(
+            raw.get("pending_post_restore_generation")
+        )
+        runtime.pending_post_restore_after_reported_at = self._finite_or_none(
+            raw.get("pending_post_restore_after_reported_at")
+        )
+        if (
+            runtime.pending_post_restore_generation is not None
+            and runtime.pending_post_restore_after_reported_at is None
+        ):
             runtime.pending_post_restore_after_reported_at = time.time()
-        runtime.pending_restore_operation_id = self._operation_text(raw.get("pending_restore_operation_id"))
-        runtime.last_restore_load_generation = self._fresh_generation(raw.get("last_restore_load_generation"))
+        runtime.pending_restore_operation_id = self._operation_text(
+            raw.get("pending_restore_operation_id")
+        )
+        runtime.last_restore_load_generation = self._fresh_generation(
+            raw.get("last_restore_load_generation")
+        )
 
     def record_action(self, event: dict[str, Any]) -> None:
         normalized = self._normalize_action_event(event)
@@ -528,6 +549,10 @@ class RuntimeStore:
             if previous.get("action_id") == action_id:
                 merged = dict(previous)
                 merged.update(normalized)
+                # Decision evidence belongs to the first phase, not the latest outcome.
+                for key in ("decision_reason", "input_snapshot"):
+                    if key in previous:
+                        merged[key] = previous[key]
                 history[index] = merged
                 self._data["audit_history"] = self._normalize_history(history)
                 return
@@ -593,6 +618,11 @@ class RuntimeStore:
         }
         for key, value in event.items():
             if key in {"action_id", "action"}:
+                continue
+            if key == "input_snapshot":
+                snapshot = normalize_input_snapshot(value)
+                if snapshot is not None:
+                    normalized[key] = snapshot
                 continue
             normalized_value = self._normalized_action_value(value)
             if normalized_value is not _INVALID_ACTION_VALUE:
