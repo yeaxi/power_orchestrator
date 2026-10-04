@@ -29,46 +29,8 @@ jobs:
           cache-dependency-path: requirements-ci.txt
       - name: Install pinned dependencies
         run: python -m pip install -r requirements-ci.txt
-      - name: Compile Python sources
-        run: python -m compileall -q custom_components scripts tests tests_real_ha
-      - name: Run Ruff
-        run: python -m ruff check custom_components scripts tests tests_real_ha
-      - name: Run mypy
-        run: python -m mypy custom_components/power_orchestrator
-      - name: Validate JSON resources
-        run: |
-          shopt -s nullglob
-          for path in hacs.json \
-            custom_components/power_orchestrator/*.json \
-            custom_components/power_orchestrator/translations/*.json; do
-            python -m json.tool "$path" >/dev/null
-            echo "JSON OK: $path"
-          done
-      - name: Validate YAML resources
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import yaml
-
-          paths = sorted(
-              {
-                  *Path("custom_components/power_orchestrator").glob("*.yaml"),
-                  *Path(".github").glob("*.yml"),
-                  *Path(".github/workflows").glob("*.yml"),
-                  *Path(".github/ISSUE_TEMPLATE").glob("*.yml"),
-                  Path("mkdocs.yml"),
-              }
-          )
-          for path in paths:
-              yaml.safe_load(path.read_text())
-              print(f"YAML OK: {path}")
-          PY
-      - name: Run tests
-        run: python -m coverage run --branch -m pytest tests/ -q --junitxml=junit-unit.xml
-      - name: Coverage report
-        run: |
-          python -m coverage report
-          python -m coverage xml
+      - name: Run shared local quality gate
+        run: python scripts/local_checks.py --suite quality
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -96,7 +58,7 @@ jobs:
       - name: Install pinned dependencies
         run: python -m pip install -r requirements-ci.txt
       - name: Run real Home Assistant suite
-        run: python -m pytest -c pytest_real_ha.ini tests_real_ha -q --junitxml=junit-real-ha.xml
+        run: python scripts/local_checks.py --suite real-ha
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@v7

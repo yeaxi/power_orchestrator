@@ -49,6 +49,12 @@ Run only after approval for installation. This does not replace local tests.
 3. Confirm the package contains no credentials, tokens, or connection strings.
 4. Leave mode in `observe`.
 
+After restart, validate a fresh process diagnostics snapshot with
+`python3 scripts/runtime_evidence.py readiness /tmp/po-snapshot.json --expected-version <release>`.
+Use the loaded manifest and runtime safety projection, not device-registry model
+text. Snapshot format and fail-closed requirements are in
+[Agent workflow and evidence](agent-environment.md#runtime-readiness-from-saved-diagnostics).
+
 **Expectation:** Home Assistant or HACS accepts the package, the config flow is available, and no physical service calls run during installation.
 
 ## 4. Config flow walkthrough
@@ -164,6 +170,10 @@ For each approved session, record:
 - rollback decision and approval.
 
 Never include passwords, API keys, tokens, cookies, connection strings, or private credentials.
+
+Use the bounded, allowlisted incident export in
+[Agent workflow and evidence](agent-environment.md#preserve-incident-evidence).
+Record capture windows, returned counts and retention gaps alongside the export.
 
 ## 11. Current local verification status
 

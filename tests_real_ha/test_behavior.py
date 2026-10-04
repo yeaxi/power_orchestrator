@@ -12,7 +12,9 @@ These exercise the actual load-shedding behavior end-to-end against a real
 
 from __future__ import annotations
 
+import json
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -153,6 +155,82 @@ async def test_malformed_restore_storage_blocks_auto_after_setup_and_reload(hass
         assert hass.states.get(ACTUATOR).state == "on"
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_emergency_journal_retains_cause_before_dispatch_and_after_reload(hass, monkeypatch):
+    """A cause captured before I/O survives command completion and ordinary reload."""
+    entry = await _setup_loaded(hass)
+    coordinator = entry.runtime_data.coordinator
+    await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
+    prepared = []
+    original_save = coordinator._store.async_save
+
+    async def capture_prepared():
+        prepared.extend(
+            record
+            for record in coordinator._store.audit_history()
+            if record.get("action") == "turn_off" and record.get("phase") == "prepared"
+        )
+        await original_save()
+
+    monkeypatch.setattr(coordinator._store, "async_save", capture_prepared)
+    hass.states.async_set(GRID_SENSOR, "off")
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "force_evaluate", {}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTUATOR).state == "off"
+    assert len(prepared) == 1
+    record = prepared[0]
+    assert record["decision_reason"] == "grid_loss"
+    assert record["input_snapshot"]["load_w"] == 3000
+    assert record["input_snapshot"]["safety_state"] == "off"
+    assert record["input_snapshot"]["integration_version"] == json.loads(
+        (REPO / "custom_components/power_orchestrator/manifest.json").read_text()
+    )["version"]
+    assert record["input_snapshot"]["thresholds"] == [{"limit_w": 5000.0, "duration_s": 0.0}]
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    terminal = next(
+        item
+        for item in entry.runtime_data.coordinator._store.audit_history()
+        if item["action_id"] == record["action_id"]
+    )
+    assert terminal["phase"] == "confirmed"
+    assert terminal["decision_reason"] == record["decision_reason"]
+    assert terminal["input_snapshot"] == record["input_snapshot"]
+    assert terminal["outcome_reason"] == "confirmed"
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+@pytest.mark.parametrize("failure", ["service_error", "relay_readback_timeout"])
+async def test_failed_emergency_keeps_cause_and_records_independent_outcome(hass, monkeypatch, failure):
+    entry = await _setup_loaded(hass)
+    coordinator = entry.runtime_data.coordinator
+    module = sys.modules[type(coordinator).__module__]
+
+    async def fail_command(*args):
+        raise RuntimeError("Synthetic service failure")
+
+    if failure == "service_error":
+        monkeypatch.setattr(module, "async_issue_off", fail_command)
+    else:
+
+        async def fail_readback(*args, **kwargs):
+            return False
+
+        monkeypatch.setattr(coordinator, "_confirm_device_state", fail_readback)
+    await hass.services.async_call(DOMAIN, "set_mode", {"mode": "auto"}, blocking=True)
+    hass.states.async_set(GRID_SENSOR, "off")
+    await hass.async_block_till_done()
+    record = next(
+        item for item in coordinator._store.audit_history() if item.get("action") == "turn_off"
+    )
+    assert record["phase"] == "failed"
+    assert record["decision_reason"] == "grid_loss"
+    assert record["outcome_reason"] == failure
+    assert record["input_snapshot"]["safety_state"] == "off"
+    assert hass.states.get(ACTUATOR).state == ("on" if failure == "service_error" else "off")
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")

@@ -7,16 +7,21 @@ Git is the safety checkpoint and rollback path. Changes land through GitHub pull
 ```bash
 git status --short --branch
 git log -3 --oneline --decorate
+python3 scripts/preflight.py --baseline origin/main
 ```
 
 Prefer a clean tree. Do not mix unrelated edits into one checkpoint.
+
+The preflight is read-only and uses local refs. If the baseline is not an ancestor
+of HEAD, select the correct isolated worktree before changing code. Runtime and
+release correspondence require separate evidence; see [Agent workflow](agent-environment.md).
 
 ## Before committing
 
 Run the narrowest relevant tests, then inspect the tree:
 
 ```bash
-python -m pytest tests/test_package_quality.py -q
+python scripts/local_checks.py
 
 git diff --check
 git diff --stat

@@ -21,6 +21,50 @@ class FakeStore:
         self._data = data
 
 
+@pytest.mark.asyncio
+async def test_action_cause_snapshot_survives_terminal_merge_and_restart():
+    backend = FakeStore()
+    store = RuntimeStore(backend)
+    await store.async_load()
+    snapshot = {
+        "captured_at": 123.0,
+        "load_w": None,
+        "load_valid": False,
+        "safety_state": "unavailable",
+        "thresholds": [{"limit_w": 5000, "duration_s": 0}],
+        "password": "DO_NOT_PERSIST",
+        "entity_id": "switch.private",
+    }
+    base = {"action_id": "incident", "action": "turn_off"}
+    store.record_action(
+        {**base, "phase": "prepared", "decision_reason": "grid_loss", "input_snapshot": snapshot}
+    )
+    store.record_action(
+        {
+            **base,
+            "phase": "failed",
+            "reason": "readback_failure",
+            "decision_reason": "normal_monitoring",
+            "input_snapshot": {"load_w": 9999},
+            "outcome_reason": "readback_failure",
+        }
+    )
+    store.record_action(
+        {"action_id": "legacy", "action": "turn_off", "reason": "normal_monitoring"}
+    )
+    await store.async_save()
+    restored = RuntimeStore(backend)
+    await restored.async_load()
+    current, legacy = restored.audit_history()
+    assert current["decision_reason"] == "grid_loss"
+    assert current["outcome_reason"] == "readback_failure"
+    assert current["input_snapshot"]["load_w"] is None
+    assert current["input_snapshot"]["thresholds"] == [{"limit_w": 5000, "duration_s": 0}]
+    assert "DO_NOT_PERSIST" not in str(current)
+    assert "switch.private" not in str(current)
+    assert "decision_reason" not in legacy
+
+
 def make_model() -> PowerModel:
     model = PowerModel()
     model.add_device(ManagedDevice("d1", "One", "switch.one", expected_power=1000))

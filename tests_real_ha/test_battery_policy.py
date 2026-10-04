@@ -96,12 +96,8 @@ class BatteryPolicyTests(unittest.IsolatedAsyncioTestCase):
 
     def set_supply(self, grid: str, soc: str | float):
         self.hass.states.async_set(GRID, grid, force_update=True)
-        self.hass.states.async_set(
-            SOC, str(soc), {"unit_of_measurement": "%"}, force_update=True
-        )
-        self.hass.states.async_set(
-            LOAD, "1200", {"unit_of_measurement": "W"}, force_update=True
-        )
+        self.hass.states.async_set(SOC, str(soc), {"unit_of_measurement": "%"}, force_update=True)
+        self.hass.states.async_set(LOAD, "1200", {"unit_of_measurement": "W"}, force_update=True)
 
     async def start(self, data=None, *, soc: str | float = 80):
         from homeassistant.helpers.storage import Store
@@ -163,6 +159,15 @@ class BatteryPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state(DEHUMIDIFIER), "off")
         self.assertEqual(self.coordinator.data["pending_restore_ids"], ["boiler"])
         self.assertEqual(self.coordinator.data["faulted_devices"], [])
+        rows = [
+            row
+            for row in self.coordinator._store.audit_history()
+            if row.get("decision_reason") == "battery_minimum"
+        ]
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(row["input_snapshot"]["battery_charge"], 39.9)
+            self.assertEqual(row["input_snapshot"]["battery_min_soc"], 40)
 
     async def test_a_load_turned_back_on_below_the_minimum_is_stopped_again(self):
         await self.start(soc=30)
@@ -274,7 +279,9 @@ class BatteryPolicyConfigTests(unittest.TestCase):
 
         data = entry_data()
         data["devices"][1]["battery_min_soc"] = "high"
-        prepared, _, errors = _prepare_options_submission(SimpleNamespace(data=data, options={}), {})
+        prepared, _, errors = _prepare_options_submission(
+            SimpleNamespace(data=data, options={}), {}
+        )
         self.assertIsNone(prepared)
         self.assertEqual(errors, {"base": "invalid_devices"})
 
@@ -285,7 +292,9 @@ class BatteryPolicyConfigTests(unittest.TestCase):
 
         data = entry_data()
         del data["battery_soc"]
-        prepared, _, errors = _prepare_options_submission(SimpleNamespace(data=data, options={}), {})
+        prepared, _, errors = _prepare_options_submission(
+            SimpleNamespace(data=data, options={}), {}
+        )
         self.assertIsNone(prepared)
         self.assertEqual(errors, {"base": "missing_battery_soc_sensor"})
 

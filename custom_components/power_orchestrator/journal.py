@@ -7,15 +7,68 @@ the coordinator only decides *what* to record, not the record/event shape.
 from __future__ import annotations
 
 import logging
+import math
 import time
 import uuid
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-from .const import EVENT_SCHEMA_VERSION
+from .const import EVENT_SCHEMA_VERSION, MAX_CUSTOM_THRESHOLDS
 
 _LOGGER = logging.getLogger(__name__)
+
+_SNAPSHOT_FIELDS = {
+    "captured_at",
+    "integration_version",
+    "policy_version",
+    "load_w",
+    "load_valid",
+    "load_reason",
+    "load_reported_at",
+    "load_age_s",
+    "load_max_age_s",
+    "safety_state",
+    "safety_available",
+    "safety_ok",
+    "safety_reported_at",
+    "battery_threshold",
+    "battery_charge",
+    "battery_min_soc",
+    "mode",
+}
+
+
+def normalize_input_snapshot(value: Any) -> dict[str, Any] | None:
+    """Keep bounded evidence fields; arbitrary nested data and identities are dropped."""
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, Any] = {}
+    for key in _SNAPSHOT_FIELDS:
+        if key not in value:
+            continue
+        item = value[key]
+        if isinstance(item, str):
+            result[key] = item[:128]
+        elif item is None or isinstance(item, bool):
+            result[key] = item
+        elif isinstance(item, (int, float)) and math.isfinite(item):
+            result[key] = item
+    thresholds = value.get("thresholds")
+    if isinstance(thresholds, list):
+        result["thresholds"] = [
+            {key: tier[key] for key in ("limit_w", "duration_s")}
+            for tier in thresholds[:MAX_CUSTOM_THRESHOLDS]
+            if isinstance(tier, dict)
+            and all(
+                isinstance(tier.get(key), (int, float))
+                and not isinstance(tier[key], bool)
+                and math.isfinite(tier[key])
+                and tier[key] >= 0
+                for key in ("limit_w", "duration_s")
+            )
+        ]
+    return result
 
 
 def new_action_id(prefix: str) -> str:

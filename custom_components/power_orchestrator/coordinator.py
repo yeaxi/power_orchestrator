@@ -71,6 +71,7 @@ from .states import (
     logical_device_reported_at,
     logical_device_state,
     state_is_available,
+    state_reported_timestamp,
 )
 from .storage import RuntimeStore
 from .telemetry import SafetySource, read_load_sensor, read_load_state
@@ -106,6 +107,7 @@ class CoordinatorConfig:
     battery_threshold: float | None = None
     battery_soc_sensor: str | None = None
     entry_id: str = DOMAIN
+    integration_version: str | None = None
 
 
 class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # type: ignore[misc]
@@ -140,6 +142,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             battery_threshold=config.battery_threshold,
         )
         self._entry_id = config.entry_id
+        self._integration_version = config.integration_version
         self._policy = config.policy
         self._policy_engine = PolicyEngine(self._policy)
         self._last_policy_decision = self._policy_engine.last_decision
@@ -953,7 +956,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 continue
             restore_state = capture_restore_state(self.hass, device)
             self._ensure_manual_intent(device.device_id)
-            if await self._command_off(device, emergency=True, source="grid_loss"):
+            if await self._command_off(
+                device, emergency=True, source="grid_loss", decision_reason=reason_code.value
+            ):
                 self._grid_loss_deferred_off.discard(device.device_id)
                 self._grid_loss_expected_off.add(device.device_id)
                 self._pause_device(device)
@@ -1043,7 +1048,9 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 continue
             restore_state = capture_restore_state(self.hass, device)
             self._ensure_manual_intent(device.device_id)
-            if await self._command_off(device, emergency=True, source="emergency"):
+            if await self._command_off(
+                device, emergency=True, source="emergency", decision_reason=cause
+            ):
                 self._pause_device(device)
                 self._create_restore_ticket(device, cause=cause, restore_state=restore_state)
             else:
@@ -1101,7 +1108,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return
         restore_state = capture_restore_state(self.hass, device)
         self._ensure_manual_intent(device.device_id)
-        if not await self._command_off(device, source="policy"):
+        if not await self._command_off(device, source="policy", decision_reason=reason):
             self._status = STATUS_SAFETY_BLOCKED
             if self._last_operation_result == "rejected":
                 self._last_action = "Load shedding deferred; OFF permission changed before dispatch"
@@ -1209,6 +1216,42 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             "manual_on_reshed",
         } or not self._battery_permits(device)
 
+    def _action_input_snapshot(self, device: ManagedDevice) -> dict[str, Any]:
+        """Capture decision evidence without mutating policy or accepting a new sample."""
+        now = time.time()
+        reading = read_load_sensor(self.hass, self._load_sensor, now=now)
+        source = self.hass.states.get(self._safety_source.entity_id or "")
+        available = self.grid_safety_source_available
+        raw_state = source.state if source else "unknown"
+        safety_state: str | float = (
+            raw_state
+            if raw_state in {"on", "off", "unknown", "unavailable"}
+            else (float(raw_state) if available else "invalid")
+        )
+        return {
+            "captured_at": now,
+            "integration_version": self._integration_version,
+            "policy_version": self._policy.policy_version,
+            "mode": self._mode,
+            "load_w": reading.value if reading.valid else None,
+            "load_valid": reading.valid,
+            "load_reason": reading.reason,
+            "load_reported_at": reading.reported_at,
+            "load_age_s": now - reading.reported_at if reading.reported_at is not None else None,
+            "load_max_age_s": LOAD_TELEMETRY_MAX_AGE_SECONDS,
+            "safety_state": safety_state,
+            "safety_available": available,
+            "safety_ok": self.grid_ok,
+            "safety_reported_at": state_reported_timestamp(source),
+            "battery_threshold": self._battery_threshold,
+            "battery_charge": self._battery_charge(),
+            "battery_min_soc": device.battery_min_soc,
+            "thresholds": [
+                {"limit_w": tier.limit_w, "duration_s": tier.duration_s}
+                for tier in self._policy.thresholds
+            ],
+        }
+
     async def _command_off(
         self,
         device: ManagedDevice,
@@ -1218,6 +1261,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         source: str = "planner",
         actor_id: str | None = None,
         context_id: str | None = None,
+        decision_reason: str | None = None,
     ) -> bool:
         """Issue a bounded OFF command and require causal readback."""
         action_id = action_id or self._new_action_id("stop")
@@ -1249,6 +1293,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             "actor_id": actor_id,
             "context_id": context_id,
             "emergency": emergency,
+            "decision_reason": decision_reason or source,
+            "input_snapshot": self._action_input_snapshot(device),
         }
         self._record_action({**base, "phase": "prepared", "result": "prepared"})
         if not await self._persist_runtime_if_dirty():
@@ -1261,6 +1307,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                     "phase": "rejected",
                     "result": "rejected",
                     "reason": "off_permission_withdrawn",
+                    "outcome_reason": "off_permission_withdrawn",
                 }
             )
             return False
@@ -1300,6 +1347,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                         "phase": "failed",
                         "result": "failed",
                         "reason": ReasonCode.RELAY_READBACK_TIMEOUT.value,
+                        "outcome_reason": ReasonCode.RELAY_READBACK_TIMEOUT.value,
                     }
                 )
                 return False
@@ -1312,6 +1360,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                     "phase": "confirmed",
                     "result": "confirmed",
                     "reason": ReasonCode.NORMAL_MONITORING.value,
+                    "outcome_reason": "confirmed",
                 }
             )
             return True
@@ -1321,7 +1370,13 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._last_operation_result = "failed"
             self._safety_fault_reason = reason
             self._record_action(
-                {**base, "phase": "failed", "result": "failed", "reason": str(exc)[:160]}
+                {
+                    **base,
+                    "phase": "failed",
+                    "result": "failed",
+                    "reason": str(exc)[:160],
+                    "outcome_reason": "service_error",
+                }
             )
             _LOGGER.error("Failed to switch off %s: %s", device.name, exc)
             return False
@@ -1457,6 +1512,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             "actor_id": actor_id,
             "context_id": context_id,
             "emergency": False,
+            "decision_reason": ReasonCode.RESTORE_HEADROOM_AVAILABLE.value,
+            "input_snapshot": self._action_input_snapshot(device),
         }
         self._record_action({**base, "phase": "prepared", "result": "prepared"})
         if not await self._persist_runtime_if_dirty():
@@ -1480,6 +1537,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                         "phase": "rejected",
                         "result": "rejected",
                         "reason": "restore_permission_withdrawn",
+                        "outcome_reason": "restore_permission_withdrawn",
                     }
                 )
                 self._policy_engine.reset_restore_window()
@@ -1502,6 +1560,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                         "phase": "failed",
                         "result": "failed",
                         "reason": ReasonCode.RELAY_READBACK_TIMEOUT.value,
+                        "outcome_reason": ReasonCode.RELAY_READBACK_TIMEOUT.value,
                     }
                 )
                 return False
@@ -1515,6 +1574,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                     "phase": "confirmed",
                     "result": "confirmed",
                     "reason": ReasonCode.RESTORE_HEADROOM_AVAILABLE.value,
+                    "outcome_reason": "confirmed",
                 }
             )
             return True
@@ -1523,7 +1583,15 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self._latch_device_fault(device, reason)
             self._last_operation_result = "failed"
             self._safety_fault_reason = reason
-            self._record_action({**base, "phase": "failed", "result": "failed", "reason": reason})
+            self._record_action(
+                {
+                    **base,
+                    "phase": "failed",
+                    "result": "failed",
+                    "reason": reason,
+                    "outcome_reason": "service_error",
+                }
+            )
             _LOGGER.error("Failed to switch on %s: %s", device.name, exc)
             return False
 
@@ -1876,6 +1944,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 source=source,
                 actor_id=actor_id,
                 context_id=context_id,
+                decision_reason="requested_stop",
             )
             if stopped:
                 self._pause_device(device)
@@ -2211,6 +2280,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             "available_capacity": self.available_capacity,
             "last_action": self._last_action,
             "grid_ok": self.grid_ok,
+            "grid_safety_source_available": self.grid_safety_source_available,
+            "safety_storage_invalid": self._safety_storage_invalid,
             "load_sensor_valid": self._load_sensor_valid,
             "load_sensor_reason": self._load_sensor_reason,
             "mode": self._mode,

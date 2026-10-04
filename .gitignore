@@ -37,6 +37,7 @@ site/
 # Project-specific AGENTS.md is part of the tracked project context
 
 # Credential-bearing and local backup artifacts
+.scratch/
 *.pem
 *.key
 *.p12

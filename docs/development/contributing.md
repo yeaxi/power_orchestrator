@@ -24,18 +24,18 @@ version appears in `hacs.json` and in the hassfest image tag in
 
 ## Local gates
 
-Commands in `.github/workflows/ci.yml` are the source of truth.
+CI and local work use the same runner, `scripts/local_checks.py`.
 
 ```bash
-python -m compileall -q custom_components tests tests_real_ha
-python -m ruff check custom_components tests tests_real_ha
-python -m mypy custom_components/power_orchestrator
-python -m coverage run --branch -m pytest tests/ -q
-python -m coverage report
-python -m pytest -c pytest_real_ha.ini tests_real_ha -q
+python scripts/preflight.py --baseline origin/main
+python scripts/local_checks.py
 ```
 
 Coverage fails under 75% (`pyproject.toml`).
+
+For focused lifecycle and asynchronous safety regressions, use
+`python scripts/local_checks.py --suite safety`. Environment isolation and saved
+runtime evidence are documented in [Agent workflow and evidence](agent-environment.md).
 
 Two more gates run on GitHub and need Docker or GitHub API access, so they are not
 part of the local loop: hassfest and HACS validation
