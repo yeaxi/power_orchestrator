@@ -171,4 +171,3 @@ class RuntimeRecovery:
             if device_id in configured and not ticket.expired(now)
         }
         self.coordinator._restore_transactions.hydrate(validated_tickets)
-

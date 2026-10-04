@@ -74,6 +74,10 @@ with pytest-homeassistant-custom-component 0.13.365, passed 114 focused tests an
 all 67 real-HA tests plus 19 subtests. This is compatibility evidence, not evidence
 from that home.
 
+Two local deterministic builds produced the same flat HACS asset: 35 files,
+98,578 bytes, SHA-256
+`6622f8f489b59c7108ddcf380276d8cb82061094a0d99568ba4f4c2149408569`.
+
 ## Release and installation boundary
 
 Publish only through the existing reviewed-main tag pipeline. Install the
