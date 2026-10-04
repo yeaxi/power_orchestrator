@@ -47,6 +47,16 @@ the same runner with `--suite safety`, and
 `/private/tmp/po-retro-docs/bin/python -m mkdocs build --strict -d /tmp/po-retro-docs-site`.
 See [Agent workflow and evidence](agent-environment.md) for portable invocations.
 
+Follow-up for 0.7.5: 249 unit tests and 67 real-HA tests passed, each with
+19 subtests. The eight capture regressions cover byte limits, failed readers,
+blocked stdin transfer, full stdin delivery, timeout, private rotation and remote
+log bound rejection. Existing battery-policy coverage now asserts actual charge
+and the per-device minimum in both confirmed stop records. Two independent
+Standards/Spec reviews found and resolved the capture deadline and missing battery
+context; no actionable findings remain in their follow-up. The strict docs build
+passed. Private `.scratch` evidence is retained locally, excluded from the public
+branch's changes and history, and ignored for future staging.
+
 ## Boundaries
 
 Changes add evidence and local tooling; they do not change action admission,
