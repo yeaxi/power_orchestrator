@@ -131,6 +131,7 @@ class RuntimeStore:
             self._safety_storage_invalid = True
             return {}
         restored: dict[tuple[str, str], RestoreIntent] = {}
+        now = time.time()
         try:
             for item in raw:
                 if not isinstance(item, dict):
@@ -141,6 +142,7 @@ class RuntimeStore:
                 intent = RestoreIntent.from_dict(
                     {key: value for key, value in item.items() if key != "device_id"}
                 )
+                intent.validate_recovery(now)
                 restored[(device_id, intent.source)] = intent
         except TypeError, ValueError:
             self._safety_storage_invalid = True
@@ -153,11 +155,13 @@ class RuntimeStore:
             self._safety_storage_invalid = True
             return {}
         restored: dict[tuple[str, str], RestoreIntent] = {}
+        now = time.time()
         try:
             for device_id, value in raw.items():
                 if not isinstance(device_id, str) or model.get_device(device_id) is None:
                     continue
                 intent = RestoreIntent.from_dict(value)
+                intent.validate_recovery(now)
                 if intent.active:
                     restored[(device_id, intent.source)] = intent
         except TypeError, ValueError:
@@ -177,9 +181,11 @@ class RuntimeStore:
             self._safety_storage_invalid = True
             return {}
         restored: dict[str, RestoreTicket] = {}
+        now = time.time()
         try:
             for item in raw:
                 ticket = RestoreTicket.from_dict(item)
+                ticket.validate_recovery(now)
                 if model.get_device(ticket.device_id) is not None:
                     restored[ticket.device_id] = ticket
         except TypeError, ValueError:

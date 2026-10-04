@@ -44,10 +44,16 @@ async def async_issue_off(hass: HomeAssistant, entity_id: str) -> None:
     await hass.services.async_call(domain, "turn_off", {"entity_id": entity_id}, blocking=True)
 
 
-async def async_issue_emergency_fallback(hass: HomeAssistant, entity_ids: Iterable[str]) -> None:
-    """Issue each configured fallback OFF once, in declared order."""
+async def async_issue_emergency_fallback(
+    hass: HomeAssistant, entity_ids: Iterable[str], *,
+    permitted: Callable[[], bool] | None = None,
+) -> bool:
+    """Issue fallback OFF once per member, rechecking permission after awaits."""
     for entity_id in dict.fromkeys(entity_ids):
+        if permitted is not None and not permitted():
+            return False
         await async_issue_off(hass, entity_id)
+    return True
 
 
 async def async_issue_restore(

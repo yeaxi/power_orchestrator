@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import time
+
+import pytest
 from types import SimpleNamespace
 
 from power_orchestrator.const import GRID_LOSS_MODE_SENSOR, GRID_LOSS_MODE_THRESHOLD
@@ -63,3 +65,20 @@ def test_safety_source_battery_mode_threshold() -> None:
 def test_safety_source_unconfigured() -> None:
     assert SafetySource(mode=GRID_LOSS_MODE_SENSOR, grid_sensor=None).configured is False
     assert SafetySource(mode=GRID_LOSS_MODE_THRESHOLD, battery_soc_sensor="sensor.soc").configured is False
+
+
+@pytest.mark.parametrize(("age", "valid"), [(-3600, False), (-0.001, False), (0, True), (300, True), (300.001, False)])
+def test_native_load_report_must_be_between_now_and_maximum_age(age, valid):
+    from datetime import datetime, timezone
+    from homeassistant.core import State
+    from power_orchestrator.telemetry import read_load_state
+
+    now = 1700000000.0
+    state = State(
+        "sensor.load", "1000", {"unit_of_measurement": "W"},
+        last_reported=datetime.fromtimestamp(now - age, timezone.utc),
+    )
+    reading = read_load_state(state, now=now, max_age=300)
+    assert reading.valid is valid
+    assert reading.reason == ("ok" if valid else "stale")
+    assert reading.value == (1000 if valid else 0)

@@ -7,14 +7,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-
-def _entity_members(value: Any) -> tuple[str, ...]:
-    """Keep the legacy runtime parser's permissive collection semantics."""
-    if isinstance(value, str):
-        value = (value,)
-    if not isinstance(value, (list, tuple)):
-        return ()
-    return tuple(member for member in value if isinstance(member, str) and member)
+from .device_configuration import model_configuration
+from .device_configuration import parse_battery_min_soc as parse_battery_min_soc
 
 
 def _finite_timestamp(value: Any) -> float | None:
@@ -22,38 +16,6 @@ def _finite_timestamp(value: Any) -> float | None:
         return None
     converted = float(value)
     return converted if math.isfinite(converted) else None
-
-
-def _legacy_integer(value: Any, minimum: int, default: int | None) -> int | None:
-    if value is None and default is None:
-        return None
-    try:
-        return max(minimum, int(float(value)))
-    except TypeError, ValueError:
-        return default
-
-
-def _optional_text(value: Any) -> str | None:
-    return value if isinstance(value, str) else None
-
-
-def parse_battery_min_soc(value: Any) -> float | None:
-    """Return a valid per-load minimum battery charge (0 < value <= 100), else None."""
-    if value is None or isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        return None
-    try:
-        converted = float(value)
-    except ValueError:
-        return None
-    if not math.isfinite(converted) or not 0 < converted <= 100:
-        return None
-    return converted
-
-
-def _required_text(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"device record is missing {label}")
-    return value
 
 
 @dataclass
@@ -151,26 +113,8 @@ class ManagedDevice:
         Unknown legacy policy fields are deliberately ignored.  In particular,
         the runtime model contains only device state and shedding metadata; no activation policy.
         """
-        expected_power = min(_legacy_integer(data.get("expected_power", 0), 0, 0) or 0, 50000)
-        priority = _legacy_integer(data.get("priority", 1), 1, 1) or 1
-        shed_priority = _legacy_integer(data.get("shed_priority"), 1, None)
-        entity_id = _required_text(data.get("entity"), "device_id")
-        device_id = _required_text(data.get("device_id"), "device_id")
-        name = _required_text(data.get("name"), "name")
-
         return cls(
-            device_id=device_id,
-            name=name,
-            entity_id=entity_id,
-            expected_power=expected_power,
-            power_sensor_id=_optional_text(data.get("power_sensor")),
-            priority=priority,
-            shed_priority=shed_priority,
-            actuator_entity_ids=_entity_members(data.get("actuators", ())),
-            command_entity_id=_optional_text(data.get("command_entity")),
-            readback_entity_ids=_entity_members(data.get("readback_entities", ())),
-            emergency_off_entity_ids=_entity_members(data.get("emergency_off_entities", ())),
-            battery_min_soc=parse_battery_min_soc(data.get("battery_min_soc")),
+            **model_configuration(data),
             pause_until=_finite_timestamp(data.get("pause_until")),
         )
 

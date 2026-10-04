@@ -9,7 +9,7 @@ import math
 import time
 import uuid
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -56,19 +56,22 @@ from .policy import (
     ReasonCode,
 )
 from .power_model import ManagedDevice, PowerModel
-from .readback import confirm_device_state
+from .readback import CausalReadback
 from .requests import (
     MAX_INTENT_TTL_S,
     RestoreIntent,
     RestoreIntentRegistry,
     RestoreTicket,
 )
+from .restore_transactions import RestoreTransactions, TransitionResult
+from .runtime_recovery import (
+    RECOVERABLE_TELEMETRY_REASONS as _RECOVERABLE_TELEMETRY_REASONS,
+)
+from .runtime_recovery import RuntimeRecovery
 from .selection import restore_candidates, shed_candidates, shed_rejection_summary
 from .states import (
     actuator_state_on,
     logical_device_confirmed_off,
-    logical_device_report_timestamps,
-    logical_device_reported_at,
     logical_device_state,
     state_is_available,
     state_reported_timestamp,
@@ -83,15 +86,7 @@ _TELEMETRY_NOTIFICATION_MESSAGE = (
     "Telemetry fault: {reason}. Managed devices keep their current state. "
     "Monitoring and the fault recover automatically when valid telemetry returns."
 )
-_RECOVERABLE_TELEMETRY_REASONS = frozenset(
-    {
-        "safety_telemetry_unavailable",
-        "load_unavailable",
-        "load_unsupported_unit",
-        "load_invalid_value",
-        "load_stale",
-    }
-)
+
 
 
 @dataclass(frozen=True)
@@ -147,8 +142,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         self._policy_engine = PolicyEngine(self._policy)
         self._last_policy_decision = self._policy_engine.last_decision
 
-        self._pending_restore: list[str] = []
-        self._restore_tickets: dict[str, RestoreTicket] = {}
+        self._restore_transactions = RestoreTransactions(
+            record=self._record_action, persist=self._persist_runtime_if_dirty,
+            persistence_failed=self._action_persistence_failed,
+        )
         self._intents = RestoreIntentRegistry()
         self._stopping = False
         self._mode = MODE_OBSERVE
@@ -235,6 +232,22 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             and not self._safety_storage_invalid
             and not self._reconfiguration_required
         )
+
+    @property
+    def _restore_tickets(self) -> dict[str, RestoreTicket]:
+        return self._restore_transactions.tickets
+
+    @_restore_tickets.setter
+    def _restore_tickets(self, tickets: dict[str, RestoreTicket]) -> None:
+        self._restore_transactions.hydrate(tickets)
+
+    @property
+    def _pending_restore(self) -> list[str]:
+        return self._restore_transactions.pending
+
+    @_pending_restore.setter
+    def _pending_restore(self, pending: list[str]) -> None:
+        self._restore_transactions.pending = pending
 
     @property
     def restore_commands_allowed(self) -> bool:
@@ -755,9 +768,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                     device,
                     emergency=grid_unsafe,
                     source="manual_on_reshed",
+                    on_confirmed=lambda: self._pause_device(device),
                 ):
-                    self._pause_device(device)
-                    self._policy_engine.reset_restore_window()
                     self._record_action(
                         {
                             "action_id": action_id,
@@ -957,16 +969,13 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             restore_state = capture_restore_state(self.hass, device)
             self._ensure_manual_intent(device.device_id)
             if await self._command_off(
-                device, emergency=True, source="grid_loss", decision_reason=reason_code.value
+                device, emergency=True, source="grid_loss", decision_reason=reason_code.value,
+                on_confirmed=lambda: self._commit_stop(
+                    device, cause=reason_code.value, restore_state=restore_state
+                ),
             ):
                 self._grid_loss_deferred_off.discard(device.device_id)
                 self._grid_loss_expected_off.add(device.device_id)
-                self._pause_device(device)
-                self._create_restore_ticket(
-                    device,
-                    cause=reason_code.value,
-                    restore_state=restore_state,
-                )
             else:
                 failed.append(device.name)
                 if self._last_operation_result == "rejected":
@@ -1014,8 +1023,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
     async def _stop_on_low_battery(self, device: ManagedDevice) -> bool:
         """Stop a battery-policy load without a restore ticket; its owner resumes it."""
-        if await self._command_off(device, emergency=True, source="battery_minimum"):
-            self._pause_device(device)
+        if await self._command_off(
+            device, emergency=True, source="battery_minimum",
+            on_confirmed=lambda: self._pause_device(device),
+        ):
             return True
         if self._last_operation_result == "rejected":
             return False
@@ -1048,12 +1059,12 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 continue
             restore_state = capture_restore_state(self.hass, device)
             self._ensure_manual_intent(device.device_id)
-            if await self._command_off(
-                device, emergency=True, source="emergency", decision_reason=cause
+            if not await self._command_off(
+                device, emergency=True, source="emergency", decision_reason=cause,
+                on_confirmed=lambda: self._commit_stop(
+                    device, cause=cause, restore_state=restore_state
+                ),
             ):
-                self._pause_device(device)
-                self._create_restore_ticket(device, cause=cause, restore_state=restore_state)
-            else:
                 self._faults.latch(
                     device.device_id,
                     self._safety_fault_reason or ReasonCode.RELAY_READBACK_TIMEOUT.value,
@@ -1108,7 +1119,12 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             return
         restore_state = capture_restore_state(self.hass, device)
         self._ensure_manual_intent(device.device_id)
-        if not await self._command_off(device, source="policy", decision_reason=reason):
+        if not await self._command_off(
+            device, source="policy", decision_reason=reason,
+            on_confirmed=lambda: self._commit_stop(
+                device, cause=reason, restore_state=restore_state, decision=decision
+            ),
+        ):
             self._status = STATUS_SAFETY_BLOCKED
             if self._last_operation_result == "rejected":
                 self._last_action = "Load shedding deferred; OFF permission changed before dispatch"
@@ -1122,22 +1138,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             await self._persist_runtime_if_dirty()
             return
 
-        self._pause_device(device)
         operation_id = self._last_operation_id or "unknown"
-        self._create_restore_ticket(
-            device,
-            cause=reason,
-            restore_state=restore_state,
-            operation_id=operation_id,
-        )
-        self._policy_engine.append_shed(
-            operation_id=operation_id,
-            load_generation=self._load_generation,
-            reason_code=decision.reason_code,
-        )
-        self._policy_engine.set_post_shed_fence(
-            self._last_confirmed_reported_at.get(device.device_id)
-        )
         self._last_action = (
             f"Load shedding: switched off {device.name} at {load_w:.0f} W ({reason})"
         )
@@ -1168,23 +1169,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
     async def _confirm_device_state(
         self,
         device: ManagedDevice,
-        expected_state: str,
-        *,
-        operation_id: int,
+        readback: CausalReadback,
         command_issued_at: float,
-        pre_reported_at: float | None,
-        pre_reported_by_entity: Mapping[str, float | None] | None = None,
     ) -> bool:
-        """Wait within a fixed bound for a causal logical state report."""
-        del operation_id
-        confirmed_at = await confirm_device_state(
-            self.hass,
-            device,
-            expected_state,
-            command_issued_at=command_issued_at,
-            pre_reported_at=pre_reported_at,
-            pre_reported_by_entity=pre_reported_by_entity,
-        )
+        """Publish the report timestamp from the device's bounded observation."""
+        confirmed_at = await readback.wait(command_issued_at)
         if confirmed_at is None:
             return False
         self._last_confirmed_reported_at[device.device_id] = confirmed_at
@@ -1262,6 +1251,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         actor_id: str | None = None,
         context_id: str | None = None,
         decision_reason: str | None = None,
+        on_confirmed: Callable[[], None] | None = None,
     ) -> bool:
         """Issue a bounded OFF command and require causal readback."""
         action_id = action_id or self._new_action_id("stop")
@@ -1296,90 +1286,42 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             "decision_reason": decision_reason or source,
             "input_snapshot": self._action_input_snapshot(device),
         }
-        self._record_action({**base, "phase": "prepared", "result": "prepared"})
-        if not await self._persist_runtime_if_dirty():
-            return False
-        if not self._off_dispatch_permitted(device, emergency=emergency, source=source):
-            self._last_operation_result = "rejected"
-            self._record_action(
-                {
-                    **base,
-                    "phase": "rejected",
-                    "result": "rejected",
-                    "reason": "off_permission_withdrawn",
-                    "outcome_reason": "off_permission_withdrawn",
-                }
-            )
-            return False
-        self._record_action({**base, "phase": "dispatched", "result": "dispatched"})
-        try:
-            pre_reported_at = logical_device_reported_at(self.hass, device)
-            pre_reported_by_entity = logical_device_report_timestamps(self.hass, device)
+        async def dispatch() -> TransitionResult:
+            if not self._off_dispatch_permitted(device, emergency=emergency, source=source):
+                return TransitionResult.REJECTED
+            readback = CausalReadback(self.hass, device, STATE_OFF)
             command_issued_at = time.time()
             await async_issue_off(self.hass, device.command_entity)
-            confirmed = await self._confirm_device_state(
-                device,
-                STATE_OFF,
-                operation_id=operation_id,
-                command_issued_at=command_issued_at,
-                pre_reported_at=pre_reported_at,
-                pre_reported_by_entity=pre_reported_by_entity,
-            )
+            confirmed = await self._confirm_device_state(device, readback, command_issued_at)
             if not confirmed and emergency and device.emergency_off_entities:
+                # Revalidate after readback awaits before a second physical call.
+                if not self._off_dispatch_permitted(device, emergency=emergency, source=source):
+                    return TransitionResult.FAILED
+                fallback_readback = CausalReadback(self.hass, device, STATE_OFF)
                 fallback_issued_at = time.time()
-                fallback_previous = logical_device_report_timestamps(self.hass, device)
-                await async_issue_emergency_fallback(self.hass, device.emergency_off_entities)
-                confirmed = await self._confirm_device_state(
-                    device,
-                    STATE_OFF,
-                    operation_id=operation_id,
-                    command_issued_at=fallback_issued_at,
-                    pre_reported_at=pre_reported_at,
-                    pre_reported_by_entity=fallback_previous,
-                )
-            if not confirmed:
-                self._latch_device_fault(device, ReasonCode.RELAY_READBACK_TIMEOUT.value)
-                self._last_operation_result = "failed"
-                self._safety_fault_reason = ReasonCode.RELAY_READBACK_TIMEOUT.value
-                self._record_action(
-                    {
-                        **base,
-                        "phase": "failed",
-                        "result": "failed",
-                        "reason": ReasonCode.RELAY_READBACK_TIMEOUT.value,
-                        "outcome_reason": ReasonCode.RELAY_READBACK_TIMEOUT.value,
-                    }
-                )
-                return False
-            device.is_on = False
-            self._last_operation_result = "confirmed"
-            self._policy_engine.reset_restore_window()
-            self._record_action(
-                {
-                    **base,
-                    "phase": "confirmed",
-                    "result": "confirmed",
-                    "reason": ReasonCode.NORMAL_MONITORING.value,
-                    "outcome_reason": "confirmed",
-                }
-            )
-            return True
-        except Exception as exc:  # pragma: no cover - defensive command boundary
-            reason = str(exc)[:160]
-            self._latch_device_fault(device, reason)
-            self._last_operation_result = "failed"
-            self._safety_fault_reason = reason
-            self._record_action(
-                {
-                    **base,
-                    "phase": "failed",
-                    "result": "failed",
-                    "reason": str(exc)[:160],
-                    "outcome_reason": "service_error",
-                }
-            )
-            _LOGGER.error("Failed to switch off %s: %s", device.name, exc)
-            return False
+                if not await async_issue_emergency_fallback(
+                    self.hass, device.emergency_off_entities,
+                    permitted=lambda: self._off_dispatch_permitted(
+                        device, emergency=emergency, source=source
+                    ),
+                ):
+                    return TransitionResult.FAILED
+                confirmed = await self._confirm_device_state(device, fallback_readback, fallback_issued_at)
+            return TransitionResult.CONFIRMED if confirmed else TransitionResult.FAILED
+
+        def complete(result: TransitionResult, reason: str) -> None:
+            self._last_operation_result = result.value
+            if result == TransitionResult.CONFIRMED:
+                device.is_on = False
+                self._policy_engine.reset_restore_window()
+                if on_confirmed is not None:
+                    on_confirmed()
+            elif result == TransitionResult.FAILED:
+                self._latch_device_fault(device, reason)
+                self._safety_fault_reason = reason
+
+        result = await self._restore_transactions.execute(base, dispatch=dispatch, complete=complete)
+        return result == TransitionResult.CONFIRMED
 
     def _restore_candidate_snapshot(self, current_load: float) -> list[ManagedDevice]:
         """Return pending-restore loads eligible for one automatic restore, in order."""
@@ -1435,13 +1377,6 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             await self._persist_runtime_if_dirty()
             return True
         operation_id = self._last_operation_id or "unknown"
-        self._remove_pending_restore(device.device_id)
-        self._policy_engine.append_restore(
-            operation_id=operation_id, load_generation=self._load_generation
-        )
-        self._policy_engine.set_post_restore_fence(
-            self._last_confirmed_reported_at.get(device.device_id)
-        )
         self._last_action = f"Automatic restore: switched on {device.name} at {current_load:.0f} W"
         self._record_action(
             {
@@ -1515,85 +1450,37 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             "decision_reason": ReasonCode.RESTORE_HEADROOM_AVAILABLE.value,
             "input_snapshot": self._action_input_snapshot(device),
         }
-        self._record_action({**base, "phase": "prepared", "result": "prepared"})
-        if not await self._persist_runtime_if_dirty():
-            return False
-        self._record_action({**base, "phase": "dispatched", "result": "dispatched"})
-        try:
-            pre_reported_at = logical_device_reported_at(self.hass, device)
-            pre_reported_by_entity = logical_device_report_timestamps(self.hass, device)
+        async def dispatch() -> TransitionResult:
+            readback = CausalReadback(self.hass, device, STATE_ON)
             command_issued_at = time.time()
             dispatched = await async_issue_restore(
-                self.hass,
-                device,
-                ticket.restore_state,
+                self.hass, device, ticket.restore_state,
                 permitted=lambda: self._restore_dispatch_permitted(device, ticket),
             )
             if not dispatched:
-                self._last_operation_result = "rejected"
-                self._record_action(
-                    {
-                        **base,
-                        "phase": "rejected",
-                        "result": "rejected",
-                        "reason": "restore_permission_withdrawn",
-                        "outcome_reason": "restore_permission_withdrawn",
-                    }
-                )
-                self._policy_engine.reset_restore_window()
-                return False
-            confirmed = await self._confirm_device_state(
-                device,
-                STATE_ON,
-                operation_id=operation_id,
-                command_issued_at=command_issued_at,
-                pre_reported_at=pre_reported_at,
-                pre_reported_by_entity=pre_reported_by_entity,
-            )
-            if not confirmed:
-                self._latch_device_fault(device, ReasonCode.RELAY_READBACK_TIMEOUT.value)
-                self._last_operation_result = "failed"
-                self._safety_fault_reason = ReasonCode.RELAY_READBACK_TIMEOUT.value
-                self._record_action(
-                    {
-                        **base,
-                        "phase": "failed",
-                        "result": "failed",
-                        "reason": ReasonCode.RELAY_READBACK_TIMEOUT.value,
-                        "outcome_reason": ReasonCode.RELAY_READBACK_TIMEOUT.value,
-                    }
-                )
-                return False
-            device.is_on = True
-            self._last_observed_state[device.device_id] = True
-            self._last_operation_result = "confirmed"
+                return TransitionResult.REJECTED
+            confirmed = await self._confirm_device_state(device, readback, command_issued_at)
+            return TransitionResult.CONFIRMED if confirmed else TransitionResult.FAILED
+
+        def complete(result: TransitionResult, reason: str) -> None:
+            self._last_operation_result = result.value
             self._policy_engine.reset_restore_window()
-            self._record_action(
-                {
-                    **base,
-                    "phase": "confirmed",
-                    "result": "confirmed",
-                    "reason": ReasonCode.RESTORE_HEADROOM_AVAILABLE.value,
-                    "outcome_reason": "confirmed",
-                }
-            )
-            return True
-        except Exception as exc:  # pragma: no cover - defensive command boundary
-            reason = str(exc)[:160]
-            self._latch_device_fault(device, reason)
-            self._last_operation_result = "failed"
-            self._safety_fault_reason = reason
-            self._record_action(
-                {
-                    **base,
-                    "phase": "failed",
-                    "result": "failed",
-                    "reason": reason,
-                    "outcome_reason": "service_error",
-                }
-            )
-            _LOGGER.error("Failed to switch on %s: %s", device.name, exc)
-            return False
+            if result == TransitionResult.CONFIRMED:
+                device.is_on = True
+                self._last_observed_state[device.device_id] = True
+                self._remove_pending_restore(device.device_id)
+                self._policy_engine.append_restore(
+                    operation_id=str(operation_id), load_generation=self._load_generation
+                )
+                self._policy_engine.set_post_restore_fence(
+                    self._last_confirmed_reported_at.get(device.device_id)
+                )
+            elif result == TransitionResult.FAILED:
+                self._latch_device_fault(device, reason)
+                self._safety_fault_reason = reason
+
+        result = await self._restore_transactions.execute(base, dispatch=dispatch, complete=complete)
+        return result == TransitionResult.CONFIRMED
 
     def _restore_dispatch_permitted(self, device: ManagedDevice, ticket: RestoreTicket) -> bool:
         """Fresh synchronous permission at each adapter service boundary."""
@@ -1602,6 +1489,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
             self.restore_commands_allowed
             and ticket.cause not in _RECOVERABLE_TELEMETRY_REASONS
             and self._restore_tickets.get(device.device_id) is ticket
+            and ticket.restore_state.get("entity_id") == device.command_entity
+            and ticket.restore_state.get("domain") == device.command_entity.split(".", 1)[0]
             and not ticket.expired(time.time())
             and not self._faults.is_flagged(device.device_id)
             and not device.pause_active
@@ -1883,14 +1772,7 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
 
     def _reconcile_intents(self) -> None:
         """Prune expired intents and orphan tickets without physical commands."""
-        now = time.time()
-        changed = self._intents.prune(now)
-        for device_id in tuple(self._restore_tickets):
-            ticket = self._restore_tickets[device_id]
-            if ticket.expired(now) or not self._intents.active_sources(device_id, now):
-                self._remove_pending_restore(device_id)
-                changed = True
-        if changed:
+        if self._restore_transactions.reconcile(self._intents, now=time.time()):
             self._journal_dirty = True
 
     async def async_cancel_restore(self, device_id: str) -> bool:
@@ -1945,14 +1827,10 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
                 actor_id=actor_id,
                 context_id=context_id,
                 decision_reason="requested_stop",
+                on_confirmed=lambda: self._commit_stop(
+                    device, cause="requested_stop", restore_state=restore_state
+                ),
             )
-            if stopped:
-                self._pause_device(device)
-                self._create_restore_ticket(
-                    device,
-                    cause="requested_stop",
-                    restore_state=restore_state,
-                )
             if not await self._persist_runtime_if_dirty() and not stopped:
                 raise RuntimeError("OFF intent could not be persisted")
             return stopped
@@ -2061,53 +1939,27 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         """Run one serialized evaluation immediately."""
         self.async_set_updated_data(await self._async_update_data())
 
+    async def async_recover_runtime(
+        self, data: Mapping[str, Any], *, reconfiguration_required: bool = False
+    ) -> None:
+        """Hydrate durable state and persist its selected mode without evaluating."""
+        await RuntimeRecovery(self).async_recover(data, reconfiguration_required)
+
     def restore_telemetry_fault(
         self, latched: bool, reason: str | None, *, emergency_handled: bool = True
     ) -> None:
-        """Restore legacy telemetry state without replaying its former OFF action."""
-        self._persisted_telemetry_fault = (latched, reason, latched and emergency_handled)
-        self._telemetry_fault_latched = latched
-        self._telemetry_fault_reason = reason if latched else None
-        self._telemetry_emergency_handled = latched and emergency_handled
-        if latched:
-            if reason in _RECOVERABLE_TELEMETRY_REASONS:
-                self._pending_report_fault = reason
-            else:
-                self._safety_storage_invalid = True
+        """Compatibility hook; normal setup uses async_recover_runtime."""
+        RuntimeRecovery(self).restore_telemetry_fault(latched, reason, emergency_handled=emergency_handled)
 
     def restore_fault_notification_state(
-        self,
-        sent: Mapping[str, str] | None,
-        pending: Mapping[str, str] | None,
+        self, sent: Mapping[str, str] | None, pending: Mapping[str, str] | None
     ) -> None:
-        self._fault_notification_fingerprints = {
-            str(key): str(value)[:160]
-            for key, value in (sent or {}).items()
-            if isinstance(key, str) and isinstance(value, str)
-        }
-        self._fault_notification_pending_fingerprints = {
-            str(key): str(value)[:160]
-            for key, value in (pending or {}).items()
-            if isinstance(key, str) and isinstance(value, str)
-        }
-        telemetry_id = f"{NOTIFY_TELEMETRY_ID}_{self._entry_id}"
-        self._telemetry_notification_active = telemetry_id in self._fault_notification_fingerprints
+        """Compatibility hook for validated notification state."""
+        RuntimeRecovery(self).restore_fault_notification_state(sent, pending)
 
     def restore_action_journal(self, unresolved: list[dict[str, Any]] | None) -> None:
-        """Treat unfinished physical actions as ambiguous and quarantine them."""
-        if not isinstance(unresolved, list):
-            self._action_journal_invalid = True
-            return
-        for record in unresolved:
-            if not isinstance(record, dict):
-                self._action_journal_invalid = True
-                continue
-            device_id = record.get("device_id")
-            if isinstance(device_id, str) and self._model.get_device(device_id) is not None:
-                self._faults.quarantined.add(device_id)
-                self._faults.faulted.add(device_id)
-                self._faults.reasons[device_id] = ReasonCode.PERSISTED_RUNTIME_INVALID.value
-        self._action_journal_invalid = bool(unresolved)
+        """Compatibility hook for unfinished physical actions."""
+        RuntimeRecovery(self).restore_action_journal(unresolved)
 
     def restore_device_runtime(
         self,
@@ -2117,24 +1969,11 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         fault_reasons: Mapping[str, str] | None = None,
         storage_invalid: bool = False,
     ) -> None:
-        """Restore validated persisted fault/quarantine sets."""
-        configured = {device.device_id for device in self._model.all_devices()}
-        self._safety_storage_invalid = bool(storage_invalid)
-        self._faults.faulted.update(
-            device_id for device_id in faulted_devices if device_id in configured
+        """Compatibility hook for validated fault and quarantine state."""
+        RuntimeRecovery(self).restore_device_runtime(
+            faulted_devices, quarantined_devices, fault_reasons=fault_reasons,
+            storage_invalid=storage_invalid,
         )
-        self._faults.quarantined.update(
-            device_id for device_id in quarantined_devices if device_id in configured
-        )
-        self._faults.reasons = {
-            device_id: reason[:160]
-            for device_id, reason in (fault_reasons or {}).items()
-            if device_id in configured and isinstance(reason, str) and reason.strip()
-        }
-        for device_id in self._faults.faulted | self._faults.quarantined:
-            device = self._model.get_device(device_id)
-            if device is not None:
-                device.is_on = None
 
     def restore_pending_restore(self, device_ids: list[str]) -> None:
         """Discard unsafe legacy bare restore IDs during the 0.7 migration."""
@@ -2143,15 +1982,8 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         self._restore_tickets = {}
 
     def restore_restore_tickets(self, tickets: Mapping[str, RestoreTicket]) -> None:
-        """Restore validated tickets in their persisted shedding order."""
-        configured = {device.device_id for device in self._model.all_devices()}
-        now = time.time()
-        self._restore_tickets = {
-            device_id: ticket
-            for device_id, ticket in tickets.items()
-            if device_id in configured and not ticket.expired(now)
-        }
-        self._pending_restore = list(self._restore_tickets)
+        """Compatibility hook for validated durable tickets."""
+        RuntimeRecovery(self).restore_restore_tickets(tickets)
 
     def _create_restore_ticket(
         self,
@@ -2162,24 +1994,45 @@ class PowerOrchestratorCoordinator(DataUpdateCoordinator[dict[str, Any]]):  # ty
         operation_id: str | None = None,
     ) -> None:
         now = time.time()
-        ticket = RestoreTicket(
-            device_id=device.device_id,
-            cause=cause,
+        self._restore_transactions.create(
+            device.device_id, cause=cause,
             operation_id=operation_id or self._last_operation_id or "unknown",
-            created_at=now,
-            expires_at=now + MAX_INTENT_TTL_S,
-            restore_state=dict(restore_state),
-            intent_sources=self._intents.active_sources(device.device_id, now),
+            restore_state=restore_state,
+            intent_sources=self._intents.active_sources(device.device_id, now), now=now,
         )
-        if device.device_id in self._pending_restore:
-            self._pending_restore.remove(device.device_id)
-        self._pending_restore.append(device.device_id)
-        self._restore_tickets[device.device_id] = ticket
+        self._journal_dirty = True
 
     def _remove_pending_restore(self, device_id: str) -> None:
-        if device_id in self._pending_restore:
-            self._pending_restore.remove(device_id)
-        self._restore_tickets.pop(device_id, None)
+        self._restore_transactions.remove(device_id)
+        self._journal_dirty = True
+
+    def _action_persistence_failed(self, device_id: str, reason: str) -> None:
+        """Quarantine an ambiguous transaction without a compensating command."""
+        device = self._model.get_device(device_id)
+        if device is not None:
+            self._latch_device_fault(device, reason)
+        self._last_operation_result = "failed"
+        self._safety_fault_reason = reason
+        self._policy_engine.reset_restore_window()
+
+    def _commit_stop(
+        self, device: ManagedDevice, *, cause: str,
+        restore_state: Mapping[str, Any], decision: PolicyDecision | None = None,
+    ) -> None:
+        """Stage owned ticket, pause and optional shed fence in the terminal snapshot."""
+        self._pause_device(device)
+        operation_id = self._last_operation_id or "unknown"
+        self._create_restore_ticket(
+            device, cause=cause, restore_state=restore_state, operation_id=operation_id
+        )
+        if decision is not None:
+            self._policy_engine.append_shed(
+                operation_id=operation_id, load_generation=self._load_generation,
+                reason_code=decision.reason_code,
+            )
+            self._policy_engine.set_post_shed_fence(
+                self._last_confirmed_reported_at.get(device.device_id)
+            )
 
     def _pending_restore_names(self) -> list[str]:
         names: list[str] = []

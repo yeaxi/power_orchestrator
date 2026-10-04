@@ -95,27 +95,6 @@ def logical_device_state(hass: HomeAssistant, device: ManagedDevice) -> bool | N
     return None
 
 
-def logical_device_reported_at(hass: HomeAssistant, device: ManagedDevice) -> float | None:
-    """Return the oldest required report timestamp across readback members."""
-    timestamps = [
-        state_reported_timestamp(hass.states.get(entity_id))
-        for entity_id in device.readback_entities
-    ]
-    if not timestamps or any(timestamp is None for timestamp in timestamps):
-        return None
-    return min(timestamp for timestamp in timestamps if timestamp is not None)
-
-
-def logical_device_report_timestamps(
-    hass: HomeAssistant, device: ManagedDevice
-) -> dict[str, float | None]:
-    """Return each required member's report timestamp for causal fencing."""
-    return {
-        entity_id: state_reported_timestamp(hass.states.get(entity_id))
-        for entity_id in device.readback_entities
-    }
-
-
 def logical_device_confirmed_off(hass: HomeAssistant, device: ManagedDevice) -> bool:
     """Return whether a logical device is confirmed fully OFF."""
     return (

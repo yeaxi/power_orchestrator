@@ -233,7 +233,7 @@ async def test_confirmed_stop_is_durable_and_saved_before_command() -> None:
     coordinator_instance.hass.services.async_call = AsyncMock(side_effect=service_call)
 
     assert await coordinator_instance.async_request_stop("d1", source="test") is True
-    assert backend.events == ["save", "service", "save"]
+    assert backend.events == ["save", "save", "service", "save"]
 
     fresh_store = RuntimeStore(backend)
     await fresh_store.async_load()
@@ -245,9 +245,10 @@ async def test_confirmed_stop_is_durable_and_saved_before_command() -> None:
 
 
 @pytest.mark.asyncio
-async def test_journal_persistence_failure_is_retained_and_retried() -> None:
+async def test_terminal_persistence_failure_quarantines_without_retrying_stop() -> None:
     backend = CopyingStoreBackend()
-    backend.fail_on = {2}
+    # Prepare and dispatch are durable; terminal and immediate retry fail.
+    backend.fail_on = {3, 4}
     runtime_store = RuntimeStore(backend)
     coordinator_instance = coordinator(store=runtime_store)
     device = coordinator_instance._model.get_device("d1")
@@ -256,10 +257,14 @@ async def test_journal_persistence_failure_is_retained_and_retried() -> None:
     set_valid_stop_states(coordinator_instance)
     coordinator_instance._confirm_device_state = AsyncMock(return_value=True)
 
-    assert await coordinator_instance.async_request_stop("d1", source="test") is True
-    assert device.is_on is False
+    with pytest.raises(RuntimeError, match="could not be persisted"):
+        await coordinator_instance.async_request_stop("d1", source="test")
+    assert device.is_on is None
     assert coordinator_instance._journal_dirty is True
     assert coordinator_instance._journal_persistence_blocked is True
+    assert "d1" in coordinator_instance._faults.quarantined
+    assert coordinator_instance._pending_restore == []
+    assert backend.data["audit_history"][0]["phase"] == "dispatched"
 
     backend.fail_on.clear()
     assert await coordinator_instance._persist_runtime_if_dirty() is True
@@ -268,8 +273,12 @@ async def test_journal_persistence_failure_is_retained_and_retried() -> None:
 
     fresh_store = RuntimeStore(backend)
     await fresh_store.async_load()
-    assert fresh_store.audit_history()[0]["phase"] == "confirmed"
+    assert fresh_store.audit_history()[0]["phase"] == "failed"
+    assert fresh_store.audit_history()[0]["outcome_reason"] == "action_persistence_failed"
     assert fresh_store.unresolved_actions() == []
+    assert fresh_store.restore_device_runtime(coordinator_instance._model) == ({"d1"}, {"d1"})
+    assert fresh_store.restore_restore_tickets(coordinator_instance._model) == {}
+    assert coordinator_instance.hass.services.async_call.await_count == 1
 
 
 @pytest.mark.asyncio

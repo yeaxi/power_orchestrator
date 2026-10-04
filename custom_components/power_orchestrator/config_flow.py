@@ -48,15 +48,18 @@ from .const import (
     GRID_LOSS_MODE_THRESHOLD,
     MAX_CUSTOM_THRESHOLDS,
 )
+from .device_configuration import normalize_devices, wizard_device
 from .flow_helpers import (
     _entity_id,
     _entity_selector,
     _entry_current,
     _friendly,
     _gen_id,
-    _normalize_options_devices,
     _optional_entity_key,
     _sensor_entity_id,
+)
+from .flow_helpers import (
+    _normalize_options_devices as _normalize_options_devices,
 )
 from .flow_thresholds import (
     _next_threshold_default,
@@ -131,7 +134,7 @@ def _discovered_devices(hass: Any, devices: Any) -> list[dict[str, Any]]:
 def _options_schema_for_entry(entry: Any) -> vol.Schema:
     raw_devices = _entry_current(entry, CONF_DEVICES, [])
     try:
-        current_devices = _normalize_options_devices(raw_devices)
+        current_devices = normalize_devices(raw_devices, strict=True)
     except ValueError:
         current_devices = []
     control_entities = [
@@ -283,8 +286,8 @@ def _prepare_options_submission(
         errors["base"] = "invalid_grid_loss_mode"
 
     try:
-        devices = _normalize_options_devices(
-            user_input.get(CONF_DEVICES, _entry_current(entry, CONF_DEVICES, []))
+        devices = normalize_devices(
+            user_input.get(CONF_DEVICES, _entry_current(entry, CONF_DEVICES, [])), strict=True
         )
         devices = _apply_priority_order(devices, user_input.get(CONF_PRIORITY_ORDER))
     except ValueError:
@@ -578,56 +581,12 @@ class PowerOrchestratorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             if CONF_DEVICE_POWER_SENSOR in user_input
             else _sensor_entity_id(candidate.get("power_sensor"))
         )
-        actuator_values = self._input_actuators(user_input.get(CONF_DEVICE_ACTUATORS), entity)
-        domains = frozenset({"switch", "light", "input_boolean", "climate", "humidifier"})
-        command = _entity_id(user_input.get(CONF_DEVICE_COMMAND_ENTITY), domains) or next(
-            (item for item in actuator_values if item.startswith("climate.")), entity
+        return wizard_device(
+            user_input,
+            device_id=str(user_input.get(CONF_DEVICE_ID) or _gen_id()),
+            name=name or entity,
+            power_sensor=power_sensor,
         )
-        readbacks = self._configured_entity_list(
-            user_input.get(CONF_DEVICE_READBACK_ENTITIES),
-            default=[entity if command.startswith("climate.") else command],
-        )
-        emergency = self._configured_entity_list(
-            user_input.get(CONF_DEVICE_EMERGENCY_OFF_ENTITIES),
-            default=[entity] if command != entity else [],
-        )
-        return {
-            CONF_DEVICE_ID: str(user_input.get(CONF_DEVICE_ID) or _gen_id()).strip(),
-            CONF_DEVICE_NAME: name or entity,
-            CONF_DEVICE_ENTITY: entity,
-            CONF_DEVICE_EXPECTED_POWER: user_input.get(CONF_DEVICE_EXPECTED_POWER, 2000),
-            CONF_DEVICE_POWER_SENSOR: power_sensor,
-            CONF_DEVICE_ACTUATORS: actuator_values,
-            CONF_DEVICE_COMMAND_ENTITY: command,
-            CONF_DEVICE_READBACK_ENTITIES: readbacks,
-            CONF_DEVICE_EMERGENCY_OFF_ENTITIES: emergency,
-        }
-
-    @staticmethod
-    def _input_actuators(value: Any, entity: str) -> list[str]:
-        """Retain the wizard's tolerant legacy actuator-list behavior."""
-        if not isinstance(value, (list, tuple)):
-            return []
-        domains = frozenset({"switch", "light", "input_boolean", "climate", "humidifier"})
-        result: list[str] = []
-        for raw in value:
-            actuator = _entity_id(raw, domains)
-            if actuator and actuator != entity and actuator not in result:
-                result.append(actuator)
-        return result
-
-    @staticmethod
-    def _configured_entity_list(value: Any, *, default: list[str]) -> list[str]:
-        if value in (None, "", []):
-            return default
-        values = [value] if isinstance(value, str) else value
-        if not isinstance(values, (list, tuple)):
-            raise ValueError("entity list must be a collection")
-        domains = frozenset({"switch", "light", "input_boolean", "climate", "humidifier"})
-        normalized = [_entity_id(item, domains) for item in values]
-        if any(item is None for item in normalized) or len(set(normalized)) != len(normalized):
-            raise ValueError("entity list must be valid and unique")
-        return [item for item in normalized if item is not None]
 
     async def async_step_devices(self, user_input: dict[str, Any] | None = None) -> Any:
         if self._devices_phase == "selection":

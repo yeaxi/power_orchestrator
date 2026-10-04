@@ -48,15 +48,15 @@ from .const import (
     DOMAIN,
     GRID_LOSS_MODE_SENSOR,
     MAX_RUNTIME_PAUSE_SECONDS,
-    MODE_OBSERVE,
-    MODE_OFF,
     MODES,
     STORAGE_KEY,
     STORAGE_VERSION,
 )
 from .coordinator import CoordinatorConfig, PowerOrchestratorCoordinator
+from .device_configuration import entity_id, normalize_devices
+from .device_configuration import safe_number as _safe_number
 from .policy import PolicyConfig, derive_thresholds_from_mapping, strip_legacy_policy_fields
-from .power_model import ManagedDevice, PowerModel, parse_battery_min_soc
+from .power_model import ManagedDevice, PowerModel
 from .report_events import async_track_reports
 from .runtime import PowerOrchestratorRuntimeData
 from .storage import RuntimeStore
@@ -78,8 +78,6 @@ _REGISTERED_SERVICES = (
 )
 _RECONFIGURATION_ISSUE_ID = "reconfiguration_required"
 _REPAIR_ISSUE_IDS_KEY = f"{DOMAIN}_repair_issue_ids"
-_ALLOWED_CONTROL_DOMAINS = frozenset({"switch", "light", "input_boolean", "climate", "humidifier"})
-_ALLOWED_ACTUATOR_DOMAINS = _ALLOWED_CONTROL_DOMAINS
 
 
 def _translated_error(
@@ -283,136 +281,13 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
 
 def _valid_entity_id(value: Any, domains: frozenset[str]) -> str | None:
-    if not isinstance(value, str) or value.count(".") != 1:
-        return None
-    domain, object_id = value.split(".", 1)
-    if domain not in domains or not object_id:
-        return None
-    return value
-
-
-def _safe_number(value: Any, *, default: float, minimum: float, maximum: float) -> float:
-    if isinstance(value, bool):
-        return default
-    try:
-        converted = float(value)
-    except TypeError, ValueError:
-        return default
-    if not math.isfinite(converted) or not minimum <= converted <= maximum:
-        return default
-    return converted
-
-
-def _normalize_entity_list(value: Any) -> list[str]:
-    if isinstance(value, str):
-        value = (value,)
-    if not isinstance(value, (list, tuple)):
-        return []
-    result: list[str] = []
-    for item in value:
-        valid = _valid_entity_id(item, _ALLOWED_ACTUATOR_DOMAINS)
-        if valid and valid not in result:
-            result.append(valid)
-    return result
-
-
-def _runtime_device_identity(raw: Mapping[str, Any]) -> tuple[str, str] | None:
-    device_id = raw.get(CONF_DEVICE_ID)
-    entity_id = _valid_entity_id(raw.get(CONF_DEVICE_ENTITY), _ALLOWED_CONTROL_DOMAINS)
-    if not isinstance(device_id, str) or not device_id.strip() or entity_id is None:
-        return None
-    return device_id.strip(), entity_id
-
-
-def _runtime_device_actuators(
-    raw: Mapping[str, Any], entity_id: str, seen_entities: set[str]
-) -> list[str]:
-    result: list[str] = []
-    for actuator in _normalize_entity_list(raw.get(CONF_DEVICE_ACTUATORS)):
-        if actuator not in {entity_id, *result, *seen_entities}:
-            result.append(actuator)
-    return result
-
-
-def _runtime_device_io(
-    raw: Mapping[str, Any], entity_id: str, actuators: list[str]
-) -> tuple[str, list[str], list[str]]:
-    command = _valid_entity_id(raw.get(CONF_DEVICE_COMMAND_ENTITY), _ALLOWED_ACTUATOR_DOMAINS)
-    command = command or next(
-        (entity for entity in actuators if entity.startswith("climate.")), entity_id
-    )
-    readbacks = _normalize_entity_list(raw.get(CONF_DEVICE_READBACK_ENTITIES))
-    readbacks = readbacks or [entity_id if command.startswith("climate.") else command]
-    emergency = _normalize_entity_list(raw.get(CONF_DEVICE_EMERGENCY_OFF_ENTITIES))
-    emergency = emergency or ([entity_id] if command != entity_id else [])
-    return command, readbacks, emergency
-
-
-def _runtime_device_record(
-    raw: Mapping[str, Any], index: int, seen_entities: set[str]
-) -> dict[str, Any] | None:
-    identity = _runtime_device_identity(raw)
-    if identity is None:
-        return None
-    device_id, entity_id = identity
-    actuators = _runtime_device_actuators(raw, entity_id, seen_entities)
-    command, readbacks, emergency = _runtime_device_io(raw, entity_id, actuators)
-    priority = int(
-        _safe_number(
-            raw.get(CONF_PRIORITY, index + 1), default=index + 1, minimum=1, maximum=100000
-        )
-    )
-    name = raw.get(CONF_DEVICE_NAME)
-    battery_min_soc = parse_battery_min_soc(raw.get(CONF_DEVICE_BATTERY_MIN_SOC))
-    return {
-        CONF_DEVICE_ID: device_id,
-        CONF_DEVICE_NAME: name.strip() if isinstance(name, str) and name.strip() else entity_id,
-        CONF_DEVICE_ENTITY: entity_id,
-        CONF_DEVICE_EXPECTED_POWER: int(
-            math.ceil(
-                _safe_number(
-                    raw.get(CONF_DEVICE_EXPECTED_POWER), default=1, minimum=1, maximum=50000
-                )
-            )
-        ),
-        CONF_DEVICE_POWER_SENSOR: _valid_entity_id(
-            raw.get(CONF_DEVICE_POWER_SENSOR), frozenset({"sensor"})
-        ),
-        CONF_PRIORITY: priority,
-        CONF_SHED_PRIORITY: int(
-            _safe_number(
-                raw.get(CONF_SHED_PRIORITY, priority), default=priority, minimum=1, maximum=100000
-            )
-        ),
-        CONF_DEVICE_ACTUATORS: actuators,
-        CONF_DEVICE_COMMAND_ENTITY: command,
-        CONF_DEVICE_READBACK_ENTITIES: readbacks,
-        CONF_DEVICE_EMERGENCY_OFF_ENTITIES: emergency,
-        **({CONF_DEVICE_BATTERY_MIN_SOC: battery_min_soc} if battery_min_soc is not None else {}),
-    }
+    """Compatibility adapter for callers of the old integration helper."""
+    return entity_id(value, domains)
 
 
 def _normalize_devices(raw_devices: Any) -> list[dict[str, Any]]:
-    """Normalize only fields needed for load shedding."""
-    if not isinstance(raw_devices, list):
-        return []
-    normalized: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    seen_entities: set[str] = set()
-    for index, raw in enumerate(raw_devices):
-        if not isinstance(raw, Mapping):
-            continue
-        device = _runtime_device_record(raw, index, seen_entities)
-        if device is None:
-            continue
-        device_id = device[CONF_DEVICE_ID]
-        entity_id = device[CONF_DEVICE_ENTITY]
-        if device_id in seen_ids or entity_id in seen_entities:
-            continue
-        normalized.append(device)
-        seen_ids.add(device_id)
-        seen_entities.update((entity_id, *device[CONF_DEVICE_ACTUATORS]))
-    return normalized
+    """Compatibility adapter for persisted and migrated configuration."""
+    return normalize_devices(raw_devices, strict=False)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -509,9 +384,7 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
             policy=policy,
         ),
     )
-    coordinator._reconfiguration_required = reconfiguration_required
-    _restore_runtime_state(coordinator, store, model)
-    await _initialize_mode(coordinator, store, data, reconfiguration_required)
+    await coordinator.async_recover_runtime(data, reconfiguration_required=reconfiguration_required)
 
     runtime = PowerOrchestratorRuntimeData(coordinator=coordinator, model=model, store=store)
     entry.runtime_data = runtime
@@ -559,7 +432,7 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
 
 def _build_model(data: dict[str, Any]) -> PowerModel:
     model = PowerModel()
-    for device_data in _normalize_devices(data.get(CONF_DEVICES, [])):
+    for device_data in normalize_devices(data.get(CONF_DEVICES, []), strict=False):
         model.add_device(ManagedDevice.from_dict(device_data))
     return model
 
@@ -570,73 +443,6 @@ def _unconfigured_policy() -> PolicyConfig:
     return PolicyConfig(
         thresholds=(ThresholdTier("unconfigured", 1.0, 0.0, ReasonCode.CONFIGURATION_INVALID),)
     )
-
-
-def _restore_runtime_state(
-    coordinator: PowerOrchestratorCoordinator,
-    store: RuntimeStore,
-    model: PowerModel,
-) -> None:
-    coordinator._safety_storage_invalid = store.safety_storage_invalid
-    store.restore_pause_timestamps(model, MAX_RUNTIME_PAUSE_SECONDS)
-    faulted, quarantined = store.restore_device_runtime(model)
-    coordinator.restore_device_runtime(
-        faulted,
-        quarantined,
-        fault_reasons=store.restore_fault_reasons(model),
-        storage_invalid=store.safety_storage_invalid,
-    )
-    from .const import NOTIFY_TELEMETRY_ID
-
-    active, pending = store.restore_fault_notification_state(
-        model, telemetry_notification_id=f"{NOTIFY_TELEMETRY_ID}_{coordinator._entry_id}"
-    )
-    coordinator.restore_fault_notification_state(active, pending)
-    telemetry_latched, telemetry_reason = store.restore_telemetry_fault()
-    coordinator.restore_telemetry_fault(
-        telemetry_latched,
-        telemetry_reason,
-        emergency_handled=store.restore_telemetry_emergency_handled(),
-    )
-    coordinator._safety_storage_invalid = (
-        coordinator._safety_storage_invalid or store.safety_storage_invalid
-    )
-    coordinator.restore_action_journal(store.unresolved_actions())
-    store.restore_policy_runtime(coordinator._policy_engine, model)
-    coordinator.restore_requests(store.restore_requests(model))
-    coordinator.restore_restore_tickets(store.restore_restore_tickets(model))
-    coordinator._safety_storage_invalid = (
-        coordinator._safety_storage_invalid or store.safety_storage_invalid
-    )
-
-
-def _restored_mode(
-    store: RuntimeStore,
-    data: dict[str, Any],
-    reconfiguration_required: bool,
-) -> str:
-    if store.safety_storage_invalid:
-        return MODE_OFF
-    if reconfiguration_required:
-        return MODE_OBSERVE
-    mode = store.resolve_unified_mode(data.get("execution_mode"))
-    return mode if mode in MODES else MODE_OBSERVE
-
-
-async def _initialize_mode(
-    coordinator: PowerOrchestratorCoordinator,
-    store: RuntimeStore,
-    data: dict[str, Any],
-    reconfiguration_required: bool,
-) -> None:
-    try:
-        coordinator.mode = _restored_mode(store, data, reconfiguration_required)
-        coordinator._save_runtime_snapshot()
-        await store.async_save()
-    except Exception:
-        coordinator._mode = MODE_OBSERVE
-        store.set_mode(MODE_OBSERVE)
-        _LOGGER.exception("Unified mode could not be persisted; defaulting to observe")
 
 
 def _tracked_entity_ids(data: dict[str, Any], model: PowerModel) -> list[str]:
