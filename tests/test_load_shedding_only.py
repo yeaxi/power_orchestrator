@@ -18,6 +18,24 @@ from power_orchestrator.const import (
 )
 
 
+from power_orchestrator.coordinator import CoordinatorConfig, PowerOrchestratorCoordinator
+from power_orchestrator.policy import policy_for_tests
+from power_orchestrator.power_model import PowerModel
+
+
+def _setup_coordinator(hass, store, entry_id):
+    coordinator = PowerOrchestratorCoordinator(
+        hass, PowerModel(), store,
+        CoordinatorConfig(
+            load_sensor="sensor.load", averaging_period=10, pause_period=60,
+            grid_loss_mode=GRID_LOSS_MODE_SENSOR, policy=policy_for_tests((5000.0, 0.0)),
+            entry_id=entry_id,
+        ),
+    )
+    coordinator.async_config_entry_first_refresh = AsyncMock()
+    return coordinator
+
+
 ROOT = Path(__file__).parents[1]
 INTEGRATION = ROOT / "custom_components" / "power_orchestrator"
 
@@ -58,9 +76,7 @@ async def test_persisted_mode_is_restored_only_when_safety_storage_is_valid(
     runtime_store.restore_fault_notification_state.return_value = ({}, {})
     runtime_store.unresolved_actions.return_value = []
     runtime_store.action_journal_invalid = False
-    coordinator = MagicMock()
-    coordinator.async_config_entry_first_refresh = AsyncMock()
-    coordinator._save_runtime_snapshot = MagicMock()
+    coordinator = _setup_coordinator(hass, runtime_store, entry.entry_id)
     runtime_store.async_save = AsyncMock()
 
     with (
@@ -111,9 +127,7 @@ async def test_setup_resolves_unified_mode_from_legacy_observe_execution() -> No
     runtime_store.restore_telemetry_emergency_handled.return_value = False
     runtime_store.restore_requests.return_value = {}
     runtime_store.restore_restore_tickets.return_value = {}
-    coordinator = MagicMock()
-    coordinator.async_config_entry_first_refresh = AsyncMock()
-    coordinator._save_runtime_snapshot = MagicMock()
+    coordinator = _setup_coordinator(hass, runtime_store, entry.entry_id)
 
     with (
         patch("power_orchestrator.Store"),

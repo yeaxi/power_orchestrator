@@ -49,7 +49,7 @@ class PowerOrchestratorModeSelect(CoordinatorEntity, SelectEntity):  # type: ign
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "Power Orchestrator",
             "manufacturer": "Power Orchestrator",
-            "model": "v0.7.5",
+            "model": "v0.7.6",
         }
 
     @property

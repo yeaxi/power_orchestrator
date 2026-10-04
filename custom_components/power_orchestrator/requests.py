@@ -58,6 +58,11 @@ class RestoreIntent:
         object.__setattr__(self, "request_data", validate_binding(self.request_entity, self.request_data))
         _validate_revision(self.revision)
 
+    def validate_recovery(self, now: float) -> None:
+        """Reject a durable deadline outside the supported publication horizon."""
+        if self.expires_at > now + MAX_INTENT_TTL_S:
+            raise ValueError("persisted intent deadline exceeds maximum lifetime")
+
     def due(self, now: float) -> bool:
         return not self.active or now >= self.expires_at
 
@@ -125,10 +130,17 @@ class RestoreTicket:
                 raise ValueError("invalid ticket timestamp")
         if self.expires_at <= self.created_at:
             raise ValueError("ticket must expire after creation")
+        if self.created_at < 0 or self.expires_at > self.created_at + MAX_INTENT_TTL_S:
+            raise ValueError("ticket lifetime is outside the supported range")
         if not isinstance(self.restore_state, dict):
             raise ValueError("invalid restore state")
         for source in self.intent_sources:
             _bounded_text(source)
+
+    def validate_recovery(self, now: float) -> None:
+        """A recovered ticket must prove an action that already happened."""
+        if self.created_at > now:
+            raise ValueError("persisted ticket creation is in the future")
 
     def expired(self, now: float) -> bool:
         return now >= self.expires_at

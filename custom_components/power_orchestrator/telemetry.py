@@ -70,7 +70,8 @@ def read_load_state(
     if reported_at is None:
         return LoadReading(0.0, False, "stale", None)
     current = time.time() if now is None else now
-    if not math.isfinite(current) or current - reported_at > max_age:
+    age = current - reported_at
+    if not math.isfinite(current) or not 0 <= age <= max_age:
         return LoadReading(0.0, False, "stale", reported_at)
     return LoadReading(value, True, "ok", reported_at)
 
