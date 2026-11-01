@@ -12,7 +12,7 @@ homeassistant==2026.8.2
 pytest-homeassistant-custom-component==0.13.356
 
 pytest==9.0.3
-pytest-asyncio==1.4.0
+pytest-asyncio==1.4.1
 voluptuous==0.15.2
 PyYAML==6.0.3
 
